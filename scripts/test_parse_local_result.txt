@@ -1,0 +1,3 @@
+跳过解析测试: 缺少依赖 No module named 'tree_sitter'
+请执行: pip install tree-sitter tree-sitter-languages
+skip=1

@@ -1,0 +1,25 @@
+# Web
+fastapi==0.109.2
+uvicorn[standard]==0.27.1
+
+# Git
+gitpython==3.1.42
+
+# Vector store（chromadb 0.4.x 与 NumPy 2.0 不兼容，需锁定 NumPy 1.x；fastembed 体积更小）
+numpy<2
+chromadb==0.4.22
+fastembed==0.7.4
+
+# LLM / Dify
+httpx==0.26.0
+openai==1.12.0
+
+# Config & utils
+pydantic-settings==2.1.0
+python-dotenv==1.0.1
+
+# Tree-sitter 函数级解析
+# - Docker 环境：优先使用 tree-sitter-language-pack（预编译语言包）
+# - 如需在本地单独使用 tree-sitter-languages，可自行额外安装，无需写入 Docker requirements
+tree-sitter>=0.20.4
+tree-sitter-language-pack
