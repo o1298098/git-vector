@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import json
 from typing import Any
 
 import httpx
@@ -217,12 +218,33 @@ class VectorStore:
 
         return {"project_id": pid, "indexed": True, "doc_count": doc_count}
 
+    def _sanitize_metadata(self, meta: dict[str, Any]) -> dict[str, Any]:
+        """
+        Chroma 要求 metadata 的 value 必须是 str / int / float / bool。
+        这里对其他类型做一次容错转换，避免因为某个字段是 list / dict 等导致整批 upsert 失败。
+        """
+        out: dict[str, Any] = {}
+        for k, v in (meta or {}).items():
+            # 丢弃 None，避免不必要的问题
+            if v is None:
+                continue
+            if isinstance(v, (str, int, float, bool)):
+                out[k] = v
+                continue
+            # 其他复杂类型统一转成 JSON 字符串（若失败则用 repr）
+            try:
+                out[k] = json.dumps(v, ensure_ascii=False)
+            except Exception:
+                out[k] = repr(v)
+        return out
+
     def upsert_project(self, project_id: str, chunks: list[dict[str, Any]]) -> None:
         if not chunks:
             return
         ids = [f"{project_id}::{i}" for i in range(len(chunks))]
         documents = [c.get("content", "") for c in chunks]
-        metadatas = [{**c.get("metadata", {}), "project_id": project_id} for c in chunks]
+        raw_metas = [{**c.get("metadata", {}), "project_id": project_id} for c in chunks]
+        metadatas = [self._sanitize_metadata(m) for m in raw_metas]
         # 存文档时加 passage 前缀；若某条向量生成失败，只跳过该条；若全部失败则跳过整个项目
         try:
             emb_with_idx = _embed(documents, prefix="passage: ")
