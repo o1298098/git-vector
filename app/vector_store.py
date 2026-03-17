@@ -141,6 +141,82 @@ class VectorStore:
             metadata={"description": "GitLab project code descriptions"},
         )
 
+    def list_projects(self) -> list[dict[str, Any]]:
+        """
+        列出当前向量库中已存在的项目。
+
+        返回结构：
+        [
+            {"project_id": "my-repo", "doc_count": 123},
+            ...
+        ]
+
+        说明：
+        - 目前 Chroma 没有直接的 distinct 查询，这里通过扫描元数据里的 project_id 来汇总。
+        - 为避免一次性拉取过多，这里设置一个保守上限；真实使用中若数据量很大，可改为分批分页。
+        """
+        # 保险起见限制一次最多读取的文档数，避免极端情况 OOM
+        max_limit = int(os.getenv("PROJECT_LIST_MAX_DOCS", "50000"))
+        try:
+            all_docs = self.collection.get(
+                include=["metadatas"],
+                limit=max_limit,
+            )
+        except Exception as e:  # noqa: S110
+            logger.error("Failed to list projects from vector store: %s", e)
+            return []
+
+        metas = all_docs.get("metadatas") or []
+        project_stats: dict[str, int] = {}
+        for meta in metas:
+            if not meta:
+                continue
+            pid = meta.get("project_id")
+            if not pid:
+                continue
+            project_stats[pid] = project_stats.get(pid, 0) + 1
+
+        projects: list[dict[str, Any]] = []
+        for pid, count in sorted(project_stats.items(), key=lambda x: x[0]):
+            projects.append({"project_id": pid, "doc_count": count})
+        return projects
+
+    def get_project_index_status(self, project_id: str) -> dict[str, Any]:
+        """
+        查询指定 project_id 是否已在向量库中建立索引（已成功写入至少一条向量）。
+
+        返回：
+        - project_id: 查询用的项目标识（与索引时传入的一致）
+        - indexed: 是否已索引
+        - doc_count: 该项目下的向量条数（未索引时为 0）
+        """
+        pid = str(project_id).strip()
+        if not pid:
+            return {"project_id": project_id, "indexed": False, "doc_count": 0}
+
+        try:
+            probe = self.collection.get(
+                where={"project_id": pid},
+                limit=1,
+                include=[],
+            )
+        except Exception as e:  # noqa: S110
+            logger.error("get_project_index_status probe failed for %s: %s", pid, e)
+            return {"project_id": pid, "indexed": False, "doc_count": 0}
+
+        ids = probe.get("ids") or []
+        if not ids:
+            return {"project_id": pid, "indexed": False, "doc_count": 0}
+
+        try:
+            full = self.collection.get(where={"project_id": pid}, include=[])
+            doc_count = len(full.get("ids") or [])
+        except Exception as e:  # noqa: S110
+            logger.error("get_project_index_status count failed for %s: %s", pid, e)
+            return {"project_id": pid, "indexed": True, "doc_count": 0}
+
+        return {"project_id": pid, "indexed": True, "doc_count": doc_count}
+
     def upsert_project(self, project_id: str, chunks: list[dict[str, Any]]) -> None:
         if not chunks:
             return

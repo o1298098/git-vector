@@ -105,10 +105,13 @@ def _function_chunks_to_docs(project_id: str, chunks: list[dict]) -> list[dict]:
         name = c["name"]
         code = c.get("code", "")
         desc = c.get("description", "")
+        calls = c.get("calls") or []
         # 用于检索的文本：路径、名称、描述、代码（便于判断功能是否实现）
         content = f"{path} :: {name}"
         if desc:
             content += f"\n{desc}"
+        if calls:
+            content += "\nCalls: " + ", ".join(str(x) for x in calls)
         content += f"\n{code}"
         meta = {
             "path": path,
@@ -116,6 +119,7 @@ def _function_chunks_to_docs(project_id: str, chunks: list[dict]) -> list[dict]:
             "kind": c.get("kind", "function"),
             "start_line": c.get("start_line"),
             "end_line": c.get("end_line"),
+            "calls": calls,
         }
         out.append({"content": content, "metadata": meta})
     return out

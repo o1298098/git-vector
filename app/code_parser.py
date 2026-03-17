@@ -80,6 +80,44 @@ def _node_name(node: Node, source: bytes) -> str:
     return ""
 
 
+def _collect_call_names(
+    source: bytes,
+    node: Node,
+    call_node_types: tuple[str, ...],
+) -> list[str]:
+    """
+    从给定子树中收集函数/方法调用的名字，返回简单字符串列表。
+    仅做轻量级静态分析：提取调用目标中最后一个 identifier（如 obj.foo -> foo）。
+    """
+    calls: list[str] = []
+
+    def walk(n: Node) -> None:
+        if n.type in call_node_types:
+            # 常见语法：call_expression / invocation_expression 等
+            target = n.child_by_field_name("function") or n.child_by_field_name("expression")
+            if target is None:
+                # C# invocation_expression 可能直接把目标作为第一个子节点
+                if n.child_count > 0:
+                    target = n.child(0)
+            if target is not None:
+                # 寻找目标里的最后一个 identifier 作为被调名称
+                last_ident: str | None = None
+                stack = [target]
+                while stack:
+                    cur = stack.pop()
+                    if cur.type == "identifier":
+                        last_ident = _node_text(source, cur).strip() or last_ident
+                    for i in range(cur.child_count - 1, -1, -1):
+                        stack.append(cur.child(i))
+                if last_ident:
+                    calls.append(last_ident)
+        for i in range(n.child_count):
+            walk(n.child(i))
+
+    walk(node)
+    return calls
+
+
 # --------------- Python ---------------
 def _extract_python(source: bytes, tree: Tree, path: str) -> list[dict[str, Any]]:
     root = tree.root_node
@@ -92,6 +130,7 @@ def _extract_python(source: bytes, tree: Tree, path: str) -> list[dict[str, Any]
                 code = _node_text(source, node)
                 kind = "method" if class_name else "function"
                 display_name = f"{class_name}.{name}" if class_name else name
+                calls = _collect_call_names(source, node, ("call",))
                 chunks.append({
                     "path": path,
                     "name": display_name,
@@ -100,6 +139,7 @@ def _extract_python(source: bytes, tree: Tree, path: str) -> list[dict[str, Any]
                     "start_line": node.start_point[0] + 1,
                     "end_line": node.end_point[0] + 1,
                     "metadata": {"path": path, "name": display_name, "kind": kind},
+                    "calls": calls,
                 })
         elif node.type == "class_definition":
             cls_name = _node_name(node, source)
@@ -135,6 +175,7 @@ def _extract_js_ts(source: bytes, tree: Tree, path: str) -> list[dict[str, Any]]
             if name == "anonymous":
                 name = "anonymous_" + str(node.start_byte)
             code = _node_text(source, node)
+            calls = _collect_call_names(source, node, ("call_expression",))
             kind = "method" if class_name else "function"
             display = f"{class_name}.{name}" if class_name else name
             chunks.append({
@@ -145,11 +186,13 @@ def _extract_js_ts(source: bytes, tree: Tree, path: str) -> list[dict[str, Any]]
                 "start_line": node.start_point[0] + 1,
                 "end_line": node.end_point[0] + 1,
                 "metadata": {"path": path, "name": display, "kind": kind},
+                "calls": calls,
             })
         elif t == "method_definition":
             name = name_from_node(node)
             display = f"{class_name}.{name}" if class_name else name
             code = _node_text(source, node)
+            calls = _collect_call_names(source, node, ("call_expression",))
             chunks.append({
                 "path": path,
                 "name": display,
@@ -158,6 +201,7 @@ def _extract_js_ts(source: bytes, tree: Tree, path: str) -> list[dict[str, Any]]
                 "start_line": node.start_point[0] + 1,
                 "end_line": node.end_point[0] + 1,
                 "metadata": {"path": path, "name": display, "kind": "method"},
+                "calls": calls,
             })
         elif t == "class_declaration" or t == "class":
             cls_name = name_from_node(node)
@@ -173,6 +217,7 @@ def _extract_js_ts(source: bytes, tree: Tree, path: str) -> list[dict[str, Any]]
                 name = _node_text(source, name_node).strip()
                 if name:
                     code = _node_text(source, value)
+                    calls = _collect_call_names(source, value, ("call_expression",))
                     chunks.append({
                         "path": path,
                         "name": name,
@@ -181,6 +226,7 @@ def _extract_js_ts(source: bytes, tree: Tree, path: str) -> list[dict[str, Any]]
                         "start_line": value.start_point[0] + 1,
                         "end_line": value.end_point[0] + 1,
                         "metadata": {"path": path, "name": name, "kind": "function"},
+                        "calls": calls,
                     })
             for i in range(node.child_count):
                 walk(node.child(i), class_name)
@@ -314,6 +360,7 @@ def _extract_csharp(source: bytes, tree: Tree, path: str) -> list[dict[str, Any]
             name_node = node.child_by_field_name("name")
             name = _node_text(source, name_node).strip() if name_node else "anonymous"
             code = _node_text(source, node)
+            calls = _collect_call_names(source, node, ("invocation_expression",))
             display = f"{class_name}.{name}" if class_name else name
             chunks.append({
                 "path": path,
@@ -323,11 +370,13 @@ def _extract_csharp(source: bytes, tree: Tree, path: str) -> list[dict[str, Any]
                 "start_line": node.start_point[0] + 1,
                 "end_line": node.end_point[0] + 1,
                 "metadata": {"path": path, "name": display, "kind": "method"},
+                "calls": calls,
             })
         elif node.type == "constructor_declaration":
             name_node = node.child_by_field_name("name")
             name = _node_text(source, name_node).strip() if name_node else (class_name or "constructor")
             code = _node_text(source, node)
+            calls = _collect_call_names(source, node, ("invocation_expression",))
             display = f"{class_name}.{name}" if class_name else name
             chunks.append({
                 "path": path,
@@ -337,11 +386,13 @@ def _extract_csharp(source: bytes, tree: Tree, path: str) -> list[dict[str, Any]
                 "start_line": node.start_point[0] + 1,
                 "end_line": node.end_point[0] + 1,
                 "metadata": {"path": path, "name": display, "kind": "constructor"},
+                "calls": calls,
             })
         elif node.type == "destructor_declaration":
             name_node = node.child_by_field_name("name")
             name = _node_text(source, name_node).strip() if name_node else "destructor"
             code = _node_text(source, node)
+            calls = _collect_call_names(source, node, ("invocation_expression",))
             display = f"{class_name}.{name}" if class_name else name
             chunks.append({
                 "path": path,
@@ -351,6 +402,7 @@ def _extract_csharp(source: bytes, tree: Tree, path: str) -> list[dict[str, Any]
                 "start_line": node.start_point[0] + 1,
                 "end_line": node.end_point[0] + 1,
                 "metadata": {"path": path, "name": display, "kind": "destructor"},
+                "calls": calls,
             })
         elif node.type in ("class_declaration", "struct_declaration", "interface_declaration"):
             name_node = node.child_by_field_name("name")
