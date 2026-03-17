@@ -23,6 +23,7 @@ EXT_TO_LANG: dict[str, str] = {
     ".jsx": "javascript",
     ".ts": "typescript",
     ".tsx": "tsx",
+    ".vue": "typescript",
     ".go": "go",
     ".java": "java",
     ".cs": "csharp",
