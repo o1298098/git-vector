@@ -2,6 +2,7 @@ import logging
 import os
 import shutil
 from pathlib import Path
+from typing import Callable, Optional, Any
 
 import git
 from app.config import settings
@@ -47,9 +48,21 @@ def _should_skip(name: str) -> bool:
 
 def clone_or_pull(repo_url: str, project_id: str) -> Path:
     dest = _repo_dir(project_id)
+    # repo_url 可能是干净 URL，这里按需注入 token
+    try:
+        from app.job_queue import build_repo_url_for_clone
+
+        auth_url = build_repo_url_for_clone(repo_url)
+    except Exception:
+        auth_url = repo_url
     if dest.exists():
         try:
             r = git.Repo(dest)
+            # 确保 remote 使用最新 token（避免之前 clone 时的 token 失效）
+            try:
+                r.remotes.origin.set_url(auth_url)
+            except Exception:
+                pass
             r.remotes.origin.fetch()
             r.git.reset("--hard", "origin/HEAD")
             r.git.clean("-fdx")
@@ -58,7 +71,7 @@ def clone_or_pull(repo_url: str, project_id: str) -> Path:
         except Exception as e:
             logger.warning("Pull failed, re-cloning: %s", e)
             shutil.rmtree(dest, ignore_errors=True)
-    git.Repo.clone_from(repo_url, dest, depth=1)
+    git.Repo.clone_from(auth_url, dest, depth=1)
     logger.info("Cloned repo %s", project_id)
     return dest
 
@@ -149,12 +162,28 @@ def _file_fallback_chunks(files: list[tuple[str, str]], max_files: int = 500) ->
     return out
 
 
-def run_index_pipeline(repo_url: str, project_id: str) -> None:
+def run_index_pipeline(
+    repo_url: str,
+    project_id: str,
+    progress: Optional[Callable[[dict[str, Any]], None]] = None,
+) -> None:
+    def _report(stage: str, **fields: Any) -> None:
+        if not progress:
+            return
+        try:
+            progress({"stage": stage, **fields})
+        except Exception:
+            # 进度上报失败不影响主流程
+            return
+
     try:
+        _report("clone_or_pull", percent=5)
         repo_path = clone_or_pull(repo_url, project_id)
+        _report("collect_files", percent=15)
         files = collect_code_files(repo_path)
         if not files:
             logger.warning("No code files found for %s", project_id)
+            _report("done", percent=100, status="skipped", reason="no_files")
             return
         # 统计扩展名，便于排查
         exts: dict[str, int] = {}
@@ -162,6 +191,7 @@ def run_index_pipeline(repo_url: str, project_id: str) -> None:
             ext = (path.rsplit(".", 1)[-1] if "." in path else "no_ext")
             exts[ext] = exts.get(ext, 0) + 1
         logger.info("Collected %s files for %s (extensions: %s)", len(files), project_id, exts)
+        _report("parse_functions", percent=35, file_count=len(files))
         # Tree-sitter 函数级解析
         function_chunks = parse_files(files)
         if not function_chunks:
@@ -171,13 +201,20 @@ def run_index_pipeline(repo_url: str, project_id: str) -> None:
             )
             function_chunks = _file_fallback_chunks(files)
         if not function_chunks:
+            _report("done", percent=100, status="skipped", reason="no_chunks")
             return
+        _report("describe_chunks", percent=55, chunk_count=len(function_chunks))
         docs = _function_chunks_to_docs(project_id, function_chunks)
         if os.environ.get("SKIP_VECTOR_STORE") == "1":
             logger.info("Indexed project %s with %s chunks (SKIP_VECTOR_STORE=1, skip upsert)", project_id, len(docs))
+            _report("done", percent=100, status="done", skipped_vector_store=True, doc_count=len(docs))
             return
+        _report("upsert_vector_store", percent=80, doc_count=len(docs))
         store = get_vector_store()
         store.upsert_project(project_id, docs)
         logger.info("Indexed project %s with %s chunks", project_id, len(docs))
+        _report("done", percent=100, status="done", doc_count=len(docs))
     except Exception as e:
         logger.exception("Index pipeline failed for %s: %s", project_id, e)
+        _report("done", percent=100, status="failed", error=str(e))
+        raise

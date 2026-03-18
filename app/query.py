@@ -45,7 +45,6 @@ def list_projects():
     projects = store.list_projects()
     return {"total": len(projects), "projects": projects}
 
-
 @router.get("/search")
 def search(
     q: str = Query(..., description="检索问题"),

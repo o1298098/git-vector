@@ -1,141 +1,214 @@
-# GitLab 代码分析 → 向量库 → Dify 查询
+# GitLab 代码分析 → 向量库（Chroma）→ 语义检索（供 Dify/前端调用）
 
-GitLab 仓库 Push 后自动拉取代码、用 AI 生成功能说明、写入向量库，支持通过 API 或 Dify 进行语义查询，实现「AI 自动分析整个项目功能」。
+本服务用于把 GitLab 仓库代码“索引成可检索的向量知识库”：当 GitLab Push（或手动触发）时自动拉取代码，按**函数级**（解析不到则自动退化为**文件级**）切分 chunk，可选用 LLM 为 chunk 生成一行中文描述，然后做 embedding 写入 Chroma。随后可通过 HTTP API 做语义检索，把结果喂给 Dify（API 工具）或任何前端/脚本。
 
-## 流程（函数级）
+---
 
+## 你会得到什么
+
+- **自动索引**：GitLab `main/master` push 后排队执行索引（避免并发写库/写 repo 目录导致失败）
+- **可查进度**：索引任务入队后返回 `job_id`，可查询状态与进度
+- **可语义检索**：返回包含 `path`、`name`、`start_line`、`end_line` 等元数据，便于跳转定位实现
+
+---
+
+## 工作流
+
+```text
+GitLab Push(main/master) / 手动触发
+  ↓
+任务入队（SQLite 持久化，worker 串行执行）
+  ↓
+clone_or_pull：克隆/拉取仓库（可选注入 GITLAB_ACCESS_TOKEN）
+  ↓
+collect_files：扫描常见代码/配置文件（跳过 node_modules/.git/.env 等）
+  ↓
+parse_functions：Tree-sitter 函数级解析（0 条则 file-level fallback）
+  ↓
+describe_chunks（可选）：Dify / Azure OpenAI / OpenAI 生成一行描述
+  ↓
+upsert_vector_store：Ollama embeddings → Chroma 写入
+  ↓
+query/search：语义检索（供 Dify/前端调用）
 ```
-GitLab Repo
-    ↓
-Repo Loader（克隆/拉取）
-    ↓
-Tree-sitter 解析（Python / JS·TS·TSX / Go / Java / C# / Rust / C·C++；TSX 使用 TypeScript 解析，React 中 `const X = () => {}` 会按函数提取）
-    ↓
-函数级 Chunk（每个函数/方法一条）；若无则自动退化为「按文件」chunk
-    ↓
-可选：LLM 批量生成一行功能描述（Dify / Azure OpenAI / OpenAI）
-    ↓
-Embedding（通过 Ollama `/api/embeddings`）→ Vector DB (Chroma)
-    ↓
-Dify / Chat：语义检索 → 精确定位「功能是否在代码中实现」及文件与行号
-```
 
-检索结果包含 `path`、`name`、`start_line`、`end_line`，便于跳转到具体实现。
+---
 
 ## 快速开始（Docker）
 
-### 1. 配置环境变量
+### 1) 配置 `.env`
 
 ```bash
 cp .env.example .env
-# 编辑 .env：
-# - 拉私有库：填 GITLAB_ACCESS_TOKEN
-# - 生成功能描述：填 Dify 或 Azure OpenAI 或 OPENAI_*（见下方「LLM 与优先级」）
 ```
 
-### 2. 启动
+常见最小配置：
+
+- **私有 GitLab**：填 `GITLAB_ACCESS_TOKEN`（需 `read_repository`）
+- **向量化**：确保 `OLLAMA_BASE_URL` 可访问，且 Ollama 已拉好 `EMBED_MODEL`
+- **可选 LLM 描述**：按优先级三选一配置（见下文「LLM 优先级」）
+
+### 2) 启动
 
 ```bash
 docker compose up -d
 ```
 
-服务地址：`http://localhost:8000`，文档：`http://localhost:8000/docs`。**修改代码后需重新构建镜像**：`docker compose build --no-cache && docker compose up -d`。
+- **服务地址**：`http://localhost:8000`
+- **接口文档**：`http://localhost:8000/docs`
+- **代码改动后重建**：`docker compose build --no-cache && docker compose up -d`
 
-### 3. GitLab Webhook
+---
+
+## 接入 GitLab Webhook
 
 在 GitLab 项目 **Settings → Webhooks** 添加：
 
-- **URL**: `http://<你的服务器>:8000/webhook/gitlab`
-- **Secret**: 与 `.env` 中 `GITLAB_WEBHOOK_SECRET` 一致（可选）
-- **Trigger**: 勾选 **Push events**
+- **URL**：`http://<你的服务地址>:8000/webhook/gitlab`
+- **Secret token（可选）**：与 `.env` 的 `GITLAB_WEBHOOK_SECRET` 一致
+- **Trigger**：勾选 **Push events**
 
-Push 到 `main`/`master` 后会自动触发索引。
+说明：
 
-### 4. 自建 GitLab 与私有仓库
+- **只处理** `object_kind=push` 且分支为 `main/master` 的事件
+- 成功入队会返回 `job_id`：`{"status":"queued","project_id":"...","job_id":"..."}`
 
-- **Webhook URL**：填本服务对 GitLab **可访问**的地址。若 GitLab 与本服务在同一内网，例如本服务跑在 `192.168.1.100:8000`，则 URL 为 `http://192.168.1.100:8000/webhook/gitlab`；若通过 Nginx 暴露，则填对外域名。
-- **私有仓库**：必须配置 `GITLAB_ACCESS_TOKEN`，否则拉取会 401/403。  
-  - 在 GitLab：**User → Access Tokens** 创建 Token，勾选 **read_repository**（或至少包含读代码权限）。  
-  - 将 Token 写入 `.env` 的 `GITLAB_ACCESS_TOKEN`，本服务会在克隆时自动把 Token 注入到 HTTP(S) 地址中（如 `https://oauth2:<token>@gitlab.xxx/group/repo.git`）。
-- **自建 GitLab 的仓库地址**：一般为 `http(s)://<你的 GitLab 域名或 IP>/<group>/<repo>.git`，Webhook 发来的 `project.http_url` 即为此格式，无需改代码。
-- **自签名 HTTPS**：若 GitLab 使用自签名证书，需保证运行本服务的环境（Docker 或本机）信任该证书，否则 `git clone` 可能报 SSL 错误；必要时可在克隆前配置 `git config --global http.sslVerify false`（仅建议在内网测试时使用）。
+---
 
-### 5. 手动触发索引（不配 Webhook 时）
+## 不配 Webhook：手动触发索引
+
+### 方式 A：`/webhook/trigger`
 
 ```bash
-curl -X POST http://localhost:8000/webhook/trigger \
+curl -X POST "http://localhost:8000/webhook/trigger" \
   -H "Content-Type: application/json" \
-  -d '{"repo_url": "https://gitlab.com/group/my-repo.git", "project_id": "my-repo"}'
+  -d '{"repo_url":"https://gitlab.com/group/my-repo.git","project_id":"my-repo"}'
 ```
 
-自建 GitLab 时把 `repo_url` 换成你的地址，例如：  
-`"repo_url": "http://gitlab.company.local/group/my-repo.git"`。配置了 `GITLAB_ACCESS_TOKEN` 后，私有仓库也可用同样方式触发。
+### 方式 B：`/api/index-jobs/enqueue`（等价入队接口）
 
-### 6. 查询接口（供 Dify 或前端调用）
+```bash
+curl -X POST "http://localhost:8000/api/index-jobs/enqueue" \
+  -H "Content-Type: application/json" \
+  -d '{"repo_url":"https://gitlab.com/group/my-repo.git","project_id":"my-repo"}'
+```
 
-- **POST** `/api/query`  
-  Body: `{"query": "用户登录是怎么实现的？", "project_id": "my-repo", "top_k": 10}`  
-  返回语义检索到的功能说明片段（含 path、name、行号）。
+---
 
-- **GET** `/api/search?q=登录&project_id=my-repo&top_k=10`  
-  同上，GET 形式。
+## 查询（供 Dify 或前端调用）
 
-在 Dify 中可建「API 工具」调用上述接口，把检索结果作为上下文做对话。
+### 语义检索
 
-## 环境变量说明
+- **POST** `/api/query`
+
+```bash
+curl -X POST "http://localhost:8000/api/query" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"用户登录是怎么实现的？","project_id":"my-repo","top_k":10}'
+```
+
+- **GET** `/api/search`
+
+```bash
+curl "http://localhost:8000/api/search?q=登录&project_id=my-repo&top_k=10"
+```
+
+返回结构：
+
+```json
+{
+  "results": [
+    {
+      "score": 0.123,
+      "content": "...",
+      "metadata": {
+        "path": "app/auth.py",
+        "name": "login",
+        "kind": "function",
+        "start_line": 10,
+        "end_line": 88
+      }
+    }
+  ]
+}
+```
+
+### 项目列表 / 索引状态
+
+- **GET** `/api/projects`：列出向量库中已索引的项目及文档数
+- **GET** `/api/project/index-status?project_id=xxx`：查看某项目是否已写入向量（`indexed/doc_count`）
+
+---
+
+## 索引队列与进度查询
+
+本服务默认使用**队列串行执行**索引任务（避免并发写 Chroma / 本地 repos 导致失败），任务状态持久化到 SQLite，服务重启后仍可查询历史记录。
+
+- **查看任务列表**：`GET /api/index-jobs?limit=50&offset=0`（可选 `status` / `project_id` 过滤）
+- **查看单个任务**：`GET /api/index-jobs/{job_id}`
+
+关键字段：
+
+- **status**：`queued` / `running` / `succeeded` / `failed` / `cancelled`
+- **progress**：0-100
+- **step**：阶段名（如 `clone_or_pull` / `parse_functions` / `upsert_vector_store`）
+- **message**：更友好的中文阶段说明
+
+---
+
+## 环境变量
 
 | 变量 | 说明 |
 |------|------|
-| `GITLAB_WEBHOOK_SECRET` | Webhook 校验密钥，与 GitLab 中填写的 Secret 一致 |
-| `GITLAB_ACCESS_TOKEN` | **自建 GitLab 私有库必填**。Personal Access Token，需具备 `read_repository`，用于克隆/拉取 |
-| `DIFY_API_KEY` | Dify 应用 API Key，用于生成功能说明（对话型应用） |
+| `GITLAB_WEBHOOK_SECRET` | GitLab Webhook Secret token（不配则不校验） |
+| `GITLAB_ACCESS_TOKEN` | 私有仓库访问 Token（建议至少 `read_repository`）。服务会在 clone/pull 时对 http(s) URL 注入 `oauth2:<token>@...`；对外返回与落库会做“干净 URL”（去除凭据） |
+| `DIFY_API_KEY` | Dify 应用 API Key（用于为 chunk 生成一行描述） |
 | `DIFY_BASE_URL` | Dify API 地址，默认 `https://api.dify.ai/v1` |
-| `AZURE_OPENAI_API_KEY` | Azure OpenAI 密钥 |
-| `AZURE_OPENAI_ENDPOINT` | Azure 端点，如 `https://xxx.cognitiveservices.azure.com` |
-| `AZURE_OPENAI_VERSION` | API 版本，如 `2024-05-01-preview` |
-| `AZURE_OPENAI_DEPLOYMENT` | 部署名，与 Azure 门户一致（如 `gpt-5.4`） |
-| `OPENAI_API_KEY` | OpenAI 或兼容 API 的密钥 |
-| `OPENAI_BASE_URL` | 兼容接口地址，默认 `https://api.openai.com/v1` |
-| `OPENAI_MODEL` | 模型/部署名，默认 `gpt-4o-mini` |
-| `DATA_DIR` | 数据目录，默认 `./data`；Docker 内可为 `/data` |
-| `EMBED_MODEL` | **Ollama 中的向量模型名**，例如 `nomic-embed-text`、`mxbai-embed-large` 等。Docker compose 默认 `nomic-embed-text`，可在 `.env` 中覆盖。同一环境内请固定使用一个模型；更换模型后需清空 `DATA_DIR/chroma` 并重新触发索引（向量维度会变） |
-| `OLLAMA_BASE_URL` | Ollama 服务地址，默认 `http://host.docker.internal:11434`（Docker 容器访问宿主机上的 Ollama，适用于 Mac/Windows）。若 Ollama 跑在其它主机或容器，请改为对应地址，如 `http://192.168.1.10:11434` |
+| `AZURE_OPENAI_API_KEY` | Azure OpenAI Key |
+| `AZURE_OPENAI_ENDPOINT` | Azure Endpoint（如 `https://xxx.cognitiveservices.azure.com`） |
+| `AZURE_OPENAI_VERSION` | Azure API version |
+| `AZURE_OPENAI_DEPLOYMENT` | Azure 部署名 |
+| `OPENAI_API_KEY` | OpenAI（或兼容接口）Key |
+| `OPENAI_BASE_URL` | 兼容接口地址（默认 `https://api.openai.com/v1`） |
+| `OPENAI_MODEL` | 模型名/部署名 |
+| `DATA_DIR` | 数据目录（默认 `./data`；容器内常用 `/data`） |
+| `OLLAMA_BASE_URL` | Ollama 地址（默认 `http://host.docker.internal:11434`，便于容器访问宿主机 Ollama；按实际环境调整） |
+| `EMBED_MODEL` | Ollama embedding 模型名（如 `nomic-embed-text`、`mxbai-embed-large`）。**更换模型后需清空 `DATA_DIR/chroma` 并重新索引**（向量维度会变） |
+| `SKIP_VECTOR_STORE` | 设为 `1` 时只跑 clone/解析/（可选 LLM），不写入 Chroma（用于本地验证流程） |
 
-### LLM 与优先级
+### LLM 优先级（只会选一个）
 
-用于「为函数/文件生成一行描述」的 LLM 按以下优先级选用（只用一个）：
+用于“为函数/文件生成一行描述”的 LLM 按以下优先级自动选择：
 
-1. **Dify**：若配置了 `DIFY_API_KEY` + `DIFY_BASE_URL`
-2. **Azure OpenAI**：若配置了 `AZURE_OPENAI_API_KEY` + `AZURE_OPENAI_ENDPOINT`（使用官方 `openai` 包内 Azure SDK）
-3. **OpenAI 兼容**：若配置了 `OPENAI_API_KEY`
+1. **Dify**：配置 `DIFY_API_KEY`（可选 `DIFY_BASE_URL`）
+2. **Azure OpenAI**：配置 `AZURE_OPENAI_API_KEY` + `AZURE_OPENAI_ENDPOINT`
+3. **OpenAI 兼容**：配置 `OPENAI_API_KEY`
 
-不配置任何 LLM 时，仍会索引代码（path + 代码片段），仅无自然语言描述。
+不配置任何 LLM 时仍可索引与检索，只是 `content` 里不会附加自然语言描述（仍包含路径/名称/代码片段）。
+
+---
 
 ## 数据与持久化
 
-- 克隆的仓库：在 `DATA_DIR/repos` 下，Docker 通过 volume `app_data` 持久化。
-- 向量库：Chroma 数据在 `DATA_DIR/chroma`，同样由 `app_data` 持久化。
+默认在 `DATA_DIR` 下：
+
+- **仓库镜像**：`DATA_DIR/repos/<project_id>/...`
+- **向量库**：`DATA_DIR/chroma/`
+- **索引任务 DB**：`DATA_DIR/index_jobs.sqlite3`
+
+---
 
 ## 开发（本地调试）
 
 ```bash
 python3 -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
+source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env       # 按需填写
+cp .env.example .env
 uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-- 服务启动时不预加载向量库与 embedding，`/health`、`/`、`/docs` 可正常访问。
-- 首次触发 **索引**（Webhook 或 `/webhook/trigger`）或 **检索**（`/api/query`）时再加载 Chroma + fastembed（会下载多语言模型）。
-- 本地测试索引但不想写向量库时：`SKIP_VECTOR_STORE=1` 下执行索引逻辑，仅验证克隆 + 解析 + LLM 描述。
-- **构建前检查解析代码就绪**（无需依赖）：`python scripts/check_parse_ready.py`，通过后再 `docker compose build`。
-- **测试 TS/TSX 能否解析出函数**：在项目根执行 `python scripts/test_parse_iot.py`（需已安装依赖）；或在 Docker 构建后执行 `docker compose run --rm app python scripts/test_parse_local.py`（内联代码，无需 clone），或 `python scripts/test_parse_iot.py`（需 clone，可用 `SKIP_CLONE=1` 使用已克隆仓库）。
-- **日志「No function-level chunks parsed for xxx; using file-level fallback」**：表示该仓库在函数级解析时未得到任何 chunk（例如 374 个文件但 parser 未识别出函数），已自动退化为「按文件」chunk，检索仍可用，只是粒度为文件而非函数。
+补充说明：
 
-## 与 Dify 的配合方式
-
-1. **本服务**：负责「GitLab → 索引 → 功能说明 → 向量库」和「检索 API」。
-2. **Dify**：创建应用，添加「API 工具」调用本服务的 `POST /api/query`，把返回的 `results` 作为上下文，即可在对话中回答「这个项目/模块是做什么的」「某功能在哪」等问题。
-
-整体效果：**GitLab Push → 自动索引 → 生成代码功能说明 → 向量库 → Dify 查询**，由 AI 自动分析整个项目功能。
+- 服务启动时会尝试启动索引队列 worker；向量库/embedding 相关对象通常在首次索引或首次查询时才会加载。
+- 看到日志 `No function-level chunks parsed ...; using file-level fallback` 表示函数级解析得到 0 条，已自动退化为文件级 chunk（检索仍可用，只是粒度变粗）。

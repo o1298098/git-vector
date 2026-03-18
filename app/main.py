@@ -16,7 +16,13 @@ logging.getLogger("chromadb.telemetry.product.posthog").setLevel(logging.CRITICA
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 向量库与 embedding 模型改为首次使用时再加载，便于本地先起服务调试
+    # 启动任务队列 worker（串行执行索引任务，避免并发写库导致失败）
+    try:
+        from app.job_queue import get_job_queue
+
+        get_job_queue().start()
+    except Exception as e:
+        logging.getLogger(__name__).warning("Failed to start job queue: %s", e)
     yield
 
 
@@ -30,6 +36,8 @@ app.include_router(webhook_router, prefix="/webhook", tags=["webhook"])
 # 查询接口供 Dify 或前端调用
 from app.query import router as query_router
 app.include_router(query_router, prefix="/api", tags=["query"])
+from app.jobs_api import router as jobs_router
+app.include_router(jobs_router, prefix="/api", tags=["jobs"])
 
 
 @app.get("/health")
