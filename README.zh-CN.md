@@ -163,7 +163,7 @@ curl "http://localhost:8000/api/search?q=登录&project_id=my-repo&top_k=10"
 | 变量 | 说明 |
 |------|------|
 | `GITLAB_WEBHOOK_SECRET` | GitLab Webhook Secret token（不配则不校验） |
-| `GITLAB_ACCESS_TOKEN` | 私有仓库访问 Token（建议至少 `read_repository`）。服务会在 clone/pull 时对 http(s) URL 注入 `oauth2:<token>@...`；对外返回与落库会做“干净 URL”（去除凭据） |
+| `GITLAB_ACCESS_TOKEN` | 私有仓库访问 Token（建议至少 `read_repository`）|
 | `DIFY_API_KEY` | Dify 应用 API Key（用于为 chunk 生成一行描述） |
 | `DIFY_BASE_URL` | Dify API 地址，默认 `https://api.dify.ai/v1` |
 | `AZURE_OPENAI_API_KEY` | Azure OpenAI Key |

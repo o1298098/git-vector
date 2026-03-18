@@ -163,7 +163,7 @@ Key fields:
 | Variable | Description |
 |------|------|
 | `GITLAB_WEBHOOK_SECRET` | GitLab webhook secret token (if unset, signature verification is skipped) |
-| `GITLAB_ACCESS_TOKEN` | Token for private repos (recommend at least `read_repository`). The service injects `oauth2:<token>@...` for http(s) clone/pull; it stores/returns **clean URLs** (credentials removed). |
+| `GITLAB_ACCESS_TOKEN` | Token for private repos |
 | `DIFY_API_KEY` | Dify API key (used to generate one-line chunk descriptions) |
 | `DIFY_BASE_URL` | Dify API base URL (default `https://api.dify.ai/v1`) |
 | `AZURE_OPENAI_API_KEY` | Azure OpenAI key |
