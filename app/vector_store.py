@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import sqlite3
 import logging
 import os
 import json
+import threading
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -28,6 +31,144 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 COLLECTION_NAME = "gitlab_code_docs"
 _chroma_client: chromadb.PersistentClient | None = None
+_project_index_db_lock = threading.Lock()
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _project_index_db_path() -> str:
+    # 独立一个小库，避免与 index_jobs.sqlite3 的写入争用
+    return str(settings.data_path / "project_index.sqlite3")
+
+
+def _init_project_index_db(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS project_index (
+            project_id TEXT PRIMARY KEY,
+            doc_count INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
+
+
+def _read_project_index_from_db() -> list[dict[str, Any]]:
+    db_path = _project_index_db_path()
+    with _project_index_db_lock:
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        try:
+            _init_project_index_db(conn)
+            rows = conn.execute(
+                "SELECT project_id, doc_count FROM project_index ORDER BY project_id ASC"
+            ).fetchall()
+            return [{"project_id": r["project_id"], "doc_count": int(r["doc_count"])} for r in rows]
+        finally:
+            conn.close()
+
+
+def _upsert_project_index_in_db(project_id: str, doc_count: int) -> None:
+    db_path = _project_index_db_path()
+    with _project_index_db_lock:
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        try:
+            _init_project_index_db(conn)
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO project_index (project_id, doc_count, updated_at)
+                VALUES (?, ?, ?)
+                """,
+                (project_id, int(doc_count), _utc_now_iso()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def _replace_project_index_in_db(project_stats: dict[str, int]) -> None:
+    db_path = _project_index_db_path()
+    with _project_index_db_lock:
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        try:
+            _init_project_index_db(conn)
+            conn.execute("DELETE FROM project_index")
+            conn.executemany(
+                """
+                INSERT OR REPLACE INTO project_index (project_id, doc_count, updated_at)
+                VALUES (?, ?, ?)
+                """,
+                [(pid, int(count), _utc_now_iso()) for pid, count in project_stats.items()],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def _scan_all_project_docs_from_vector_store(collection: Any) -> dict[str, int]:
+    """
+    仅用于首次回填 project_index 缓存（或缓存为空时）。
+
+    说明：Chroma 的 get 是否支持 offset 取决于版本；这里做了兼容。
+    """
+    batch_size = int(os.getenv("PROJECT_LIST_SCAN_BATCH_SIZE", "2000"))
+    max_limit = int(os.getenv("PROJECT_LIST_MAX_DOCS", "50000"))  # 旧行为兜底
+    backfill_max_docs = int(os.getenv("PROJECT_LIST_BACKFILL_MAX_DOCS", "0"))  # 0 表示不限制
+
+    project_stats: dict[str, int] = {}
+    offset = 0
+    scanned = 0
+
+    while True:
+        try:
+            chunk = collection.get(
+                include=["metadatas"],
+                limit=batch_size,
+                offset=offset,
+            )
+        except TypeError:
+            # offset 不支持：回退到单次读取（仍可能漏项目，但至少不会直接失效）
+            all_docs = collection.get(include=["metadatas"], limit=max_limit)
+            metas = all_docs.get("metadatas") or []
+            for meta in metas:
+                if not meta:
+                    continue
+                pid = meta.get("project_id")
+                if not pid:
+                    continue
+                project_stats[pid] = project_stats.get(pid, 0) + 1
+            logger.warning(
+                "Chroma get(offset=...) 不支持，回退到 limit=%s 扫描；/api/projects 仍可能漏项目。",
+                max_limit,
+            )
+            return project_stats
+
+        metas = chunk.get("metadatas") or []
+        if not metas:
+            break
+
+        for meta in metas:
+            if not meta:
+                continue
+            pid = meta.get("project_id")
+            if not pid:
+                continue
+            project_stats[pid] = project_stats.get(pid, 0) + 1
+
+        scanned += len(metas)
+        offset += len(metas)
+        if backfill_max_docs > 0 and scanned >= backfill_max_docs:
+            logger.warning(
+                "Backfill 中止：达到 PROJECT_LIST_BACKFILL_MAX_DOCS=%s（当前扫描=%s）。",
+                backfill_max_docs,
+                scanned,
+            )
+            break
+
+    return project_stats
 
 
 def _get_chroma() -> chromadb.PersistentClient:
@@ -153,34 +294,20 @@ class VectorStore:
         ]
 
         说明：
-        - 目前 Chroma 没有直接的 distinct 查询，这里通过扫描元数据里的 project_id 来汇总。
-        - 为避免一次性拉取过多，这里设置一个保守上限；真实使用中若数据量很大，可改为分批分页。
+        - 使用 SQLite 缓存表 `project_index`，避免每次都扫描向量库造成漏项目/性能问题。
+        - 缓存为空时，才对 Chroma 做一次回填（扫描 metadatas 汇总 project_id -> doc_count）。
         """
-        # 保险起见限制一次最多读取的文档数，避免极端情况 OOM
-        max_limit = int(os.getenv("PROJECT_LIST_MAX_DOCS", "50000"))
+        cached = _read_project_index_from_db()
+        if cached:
+            return cached
+
         try:
-            all_docs = self.collection.get(
-                include=["metadatas"],
-                limit=max_limit,
-            )
+            project_stats = _scan_all_project_docs_from_vector_store(self.collection)
+            _replace_project_index_in_db(project_stats)
         except Exception as e:  # noqa: S110
-            logger.error("Failed to list projects from vector store: %s", e)
-            return []
+            logger.error("Backfill project_index from vector store failed: %s", e)
 
-        metas = all_docs.get("metadatas") or []
-        project_stats: dict[str, int] = {}
-        for meta in metas:
-            if not meta:
-                continue
-            pid = meta.get("project_id")
-            if not pid:
-                continue
-            project_stats[pid] = project_stats.get(pid, 0) + 1
-
-        projects: list[dict[str, Any]] = []
-        for pid, count in sorted(project_stats.items(), key=lambda x: x[0]):
-            projects.append({"project_id": pid, "doc_count": count})
-        return projects
+        return _read_project_index_from_db()
 
     def get_project_index_status(self, project_id: str) -> dict[str, Any]:
         """
@@ -284,6 +411,12 @@ class VectorStore:
             )
             return
 
+        # 重新索引时，保证旧向量不会残留导致 doc_count 不准确。
+        try:
+            self.collection.delete(where={"project_id": project_id})
+        except Exception as e:  # noqa: S110
+            logger.warning("Delete old vectors failed for project %s: %s", project_id, e)
+
         self.collection.upsert(
             ids=kept_ids,
             embeddings=kept_embs,
@@ -291,6 +424,15 @@ class VectorStore:
             metadatas=kept_metas,
         )
         logger.info("Upserted %s chunks for project %s", len(chunks), project_id)
+
+        # 探测实际写入数量，写入缓存，避免 delete/upsert 部分失败导致统计不一致。
+        try:
+            full = self.collection.get(where={"project_id": project_id}, include=[])
+            doc_count = len(full.get("ids") or [])
+        except Exception as e:  # noqa: S110
+            logger.warning("Failed to probe doc_count after upsert for %s: %s", project_id, e)
+            doc_count = len(kept_ids)
+        _upsert_project_index_in_db(project_id, doc_count)
 
     def query(
         self,
