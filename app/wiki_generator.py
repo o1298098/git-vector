@@ -74,6 +74,11 @@ def _escape_md_table_cell(s: str) -> str:
     return (s or "").replace("|", "\\|").replace("\n", " ").strip()[:500]
 
 
+def _symbol_anchor(kind: str, name: str) -> str:
+    """与文件页标题锚点一致（不可写在 f-string 的 {{}} 内：正则含反斜杠会 SyntaxError）。"""
+    return re.sub(r"[^a-zA-Z0-9\u4e00-\u9fff_-]+", "-", f"{kind}-{name}")[:80]
+
+
 def _build_directory_tree(repo_path: Path, max_lines: int = TREE_MAX_LINES) -> str:
     lines: list[str] = []
     try:
@@ -209,7 +214,7 @@ def _write_file_pages(
             el = c.get("end_line")
             desc = (c.get("description") or "").strip()
             calls = c.get("calls") or []
-            anchor = re.sub(r"[^a-zA-Z0-9\u4e00-\u9fff_-]+", "-", f"{kind}-{name}")[:80]
+            anchor = _symbol_anchor(kind, name)
             lines.append(f"### `{name}` — `{kind}` {{#{anchor}}}")
             lines.append("")
             lines.append(f"- **位置**: 第 {sl}–{el} 行" if el else f"- **位置**: 第 {sl} 行起")
@@ -249,8 +254,8 @@ def _write_symbol_index_parts(
         parts.append(cur)
 
     for pi, group in enumerate(parts):
-        name = "symbol-index.md" if pi == 0 else f"symbol-index-{pi + 1}.md"
-        nav_names.append(name)
+        md_filename = "symbol-index.md" if pi == 0 else f"symbol-index-{pi + 1}.md"
+        nav_names.append(md_filename)
         title = "符号索引" if pi == 0 else f"符号索引（第 {pi + 1} 部分）"
         lines: list[str] = [
             "---",
@@ -267,17 +272,19 @@ def _write_symbol_index_parts(
         for c in group:
             path_norm = _normalize_rel_path(str(c.get("path", "")))
             slug = slug_map.get(path_norm, _file_slug(path_norm))
-            name = str(c.get("name", ""))
+            sym_name = str(c.get("name", ""))
             kind = str(c.get("kind", ""))
             sl = c.get("start_line", "")
             el = c.get("end_line", "")
             row_line = f"{sl}-{el}" if el else str(sl)
             desc = _escape_md_table_cell(str(c.get("description", "")))
-            link = f"[{ _escape_md_table_cell(path_norm) }](files/{slug}.md#{re.sub(r'[^a-zA-Z0-9\u4e00-\u9fff_-]+', '-', f'{kind}-{name}')[:80]})"
+            anchor = _symbol_anchor(kind, sym_name)
+            path_cell = _escape_md_table_cell(path_norm)
+            link = f"[{path_cell}](files/{slug}.md#{anchor})"
             lines.append(
-                f"| `{_escape_md_table_cell(name)}` | `{kind}` | {link} | {row_line} | {desc} |"
+                f"| `{_escape_md_table_cell(sym_name)}` | `{kind}` | {link} | {row_line} | {desc} |"
             )
-        (docs_dir / name).write_text("\n".join(lines), encoding="utf-8")
+        (docs_dir / md_filename).write_text("\n".join(lines), encoding="utf-8")
     return nav_names
 
 
