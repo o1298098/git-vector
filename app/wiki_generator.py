@@ -3,6 +3,7 @@
 """
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import logging
@@ -79,6 +80,140 @@ def _symbol_anchor(kind: str, name: str) -> str:
     return re.sub(r"[^a-zA-Z0-9\u4e00-\u9fff_-]+", "-", f"{kind}-{name}")[:80]
 
 
+# 功能说明正文过长时截断（避免单页过大）
+MAX_FUNCTION_SUMMARY_CHARS = 6000
+
+
+def _trim_summary(text: str) -> str:
+    t = (text or "").strip()
+    if len(t) > MAX_FUNCTION_SUMMARY_CHARS:
+        return t[: MAX_FUNCTION_SUMMARY_CHARS].rstrip() + "\n\n…（已截断）"
+    return t
+
+
+def _md_list_item_body(text: str) -> list[str]:
+    """把多行说明写成列表项下的缩进块，避免破坏 Markdown 列表结构。"""
+    lines_out: list[str] = []
+    for ln in (text or "").splitlines():
+        lines_out.append(f"    {ln}")
+    return lines_out
+
+
+def _python_docstring_ast(code: str) -> str:
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return ""
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            ds = (ast.get_docstring(node) or "").strip()
+            if ds:
+                return ds
+    return (ast.get_docstring(tree) or "").strip()
+
+
+def _python_docstring_regex(code: str) -> str:
+    """AST 失败时（片段不完整）匹配 `:` 后第一个三引号 docstring。"""
+    m = re.search(r":\s*\n\s*'''([\s\S]*?)'''", code)
+    if m:
+        return m.group(1).strip()
+    m = re.search(r':\s*\n\s*"""([\s\S]*?)"""', code)
+    if m:
+        return m.group(1).strip()
+    return ""
+
+
+def _js_ts_docstring(code: str) -> str:
+    s = code.lstrip()
+    if not s.startswith("/**"):
+        return ""
+    end = s.find("*/")
+    if end == -1:
+        return ""
+    inner = s[3:end]
+    lines: list[str] = []
+    for line in inner.splitlines():
+        ln = line.strip().lstrip("*").strip()
+        if ln:
+            lines.append(ln)
+    return "\n".join(lines).strip()
+
+
+def _go_rust_line_comments(code: str) -> str:
+    lines_out: list[str] = []
+    for line in code.splitlines():
+        st = line.strip()
+        if st.startswith("///"):
+            lines_out.append(st[3:].strip())
+        elif st.startswith("//"):
+            lines_out.append(st[2:].strip())
+        elif st.startswith("func ") or re.match(r"^(pub(\([^)]*\))?\s+)?(async\s+)?fn\s", st):
+            break
+    return " ".join(lines_out).strip() if lines_out else ""
+
+
+def _c_style_block_docstring(code: str) -> str:
+    s = code.lstrip()
+    if not s.startswith("/**"):
+        return ""
+    end = s.find("*/")
+    if end == -1:
+        return ""
+    inner = s[3:end]
+    lines = [ln.strip().lstrip("*").strip() for ln in inner.splitlines() if ln.strip().lstrip("*").strip()]
+    return "\n".join(lines).strip()
+
+
+def _docstring_from_code(code: str, path: str) -> str:
+    """从 chunk 的源码片段提取文档注释（不依赖 LLM）。"""
+    if not (code or "").strip():
+        return ""
+    ext = _ext_of(_normalize_rel_path(path))
+    if ext == "py":
+        doc = _python_docstring_ast(code)
+        if doc:
+            return doc
+        return _python_docstring_regex(code)
+    if ext in ("js", "jsx", "ts", "tsx", "vue", "java", "cs", "c", "h", "cpp", "hpp"):
+        doc = _js_ts_docstring(code) if ext in ("js", "jsx", "ts", "tsx", "vue") else _c_style_block_docstring(code)
+        if doc:
+            return doc
+    if ext == "go":
+        return _go_rust_line_comments(code)
+    if ext == "rs":
+        return _go_rust_line_comments(code)
+    if ext in ("rb", "php"):
+        # =begin / =end 或 # 多行 — 简化为连续以 # 开头的行
+        lines_out: list[str] = []
+        for line in code.splitlines():
+            st = line.strip()
+            if st.startswith("#") and not st.startswith("#!"):
+                lines_out.append(st.lstrip("#").strip())
+            elif st and not st.startswith("#") and lines_out:
+                break
+        return "\n".join(lines_out).strip() if lines_out else ""
+    return ""
+
+
+def _symbol_function_summary(chunk: dict[str, Any]) -> str:
+    """
+    每条符号的「功能说明」：优先 LLM 描述，否则从源码 docstring/注释提取，
+    仍无则给简短占位说明。
+    """
+    llm = (chunk.get("description") or "").strip()
+    if llm:
+        return _trim_summary(llm)
+    code = (chunk.get("code") or "").strip()
+    path = str(chunk.get("path", ""))
+    doc = _docstring_from_code(code, path)
+    if doc:
+        return _trim_summary(doc)
+    kind = str(chunk.get("kind", ""))
+    if kind == "file":
+        return "（文件级索引：未解析到独立函数说明；请查看下方代码摘录。）"
+    return "（未找到文档字符串或注释；请展开「代码摘录」查看实现。）"
+
+
 def _build_directory_tree(repo_path: Path, max_lines: int = TREE_MAX_LINES) -> str:
     lines: list[str] = []
     try:
@@ -125,11 +260,9 @@ def _architecture_markdown(
     for c in chunks[:ARCH_SAMPLE_CHUNKS]:
         p = _normalize_rel_path(str(c.get("path", "")))
         n = str(c.get("name", ""))
-        d = (c.get("description") or "").strip()
         k = str(c.get("kind", "function"))
-        line = f"- `{p}` :: `{n}` ({k})"
-        if d:
-            line += f" — {d}"
+        summary = _symbol_function_summary(c)
+        line = f"- `{p}` :: `{n}` ({k}) — {summary}"
         samples.append(line)
 
     client = get_llm_client()
@@ -212,14 +345,15 @@ def _write_file_pages(
             kind = str(c.get("kind", "function"))
             sl = c.get("start_line")
             el = c.get("end_line")
-            desc = (c.get("description") or "").strip()
+            summary = _symbol_function_summary(c)
             calls = c.get("calls") or []
             anchor = _symbol_anchor(kind, name)
             lines.append(f"### `{name}` — `{kind}` {{#{anchor}}}")
             lines.append("")
+            lines.append("- **功能说明**:")
+            lines.extend(_md_list_item_body(summary))
+            lines.append("")
             lines.append(f"- **位置**: 第 {sl}–{el} 行" if el else f"- **位置**: 第 {sl} 行起")
-            if desc:
-                lines.append(f"- **说明**: {desc}")
             if calls:
                 lines.append(f"- **调用**: {', '.join(str(x) for x in calls[:40])}")
             code = (c.get("code") or "").strip()
@@ -266,7 +400,7 @@ def _write_symbol_index_parts(
             "",
             "# 符号索引",
             "",
-            "| 符号 | 类型 | 文件 | 行号 | 说明 |",
+            "| 符号 | 类型 | 文件 | 行号 | 功能说明 |",
             "| --- | --- | --- | --- | --- |",
         ]
         for c in group:
@@ -277,7 +411,7 @@ def _write_symbol_index_parts(
             sl = c.get("start_line", "")
             el = c.get("end_line", "")
             row_line = f"{sl}-{el}" if el else str(sl)
-            desc = _escape_md_table_cell(str(c.get("description", "")))
+            desc = _escape_md_table_cell(_symbol_function_summary(c))
             anchor = _symbol_anchor(kind, sym_name)
             path_cell = _escape_md_table_cell(path_norm)
             link = f"[{path_cell}](files/{slug}.md#{anchor})"
