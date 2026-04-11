@@ -26,6 +26,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logging.getLogger(__name__).warning("Failed to start job queue: %s", e)
     yield
+    try:
+        from app.job_queue import get_job_queue
+
+        get_job_queue().shutdown()
+    except Exception as e:
+        logging.getLogger(__name__).warning("Job queue shutdown: %s", e)
 
 
 app = FastAPI(
@@ -62,6 +68,6 @@ def root():
         "docs": "/docs",
         "webhook": "POST /webhook/gitlab",
         "query": "POST /api/query",
-        "wiki": "GET /wiki/<project_id>/site/ （索引成功后静态站）",
+        "wiki": "GET /wiki/<project_id>/site/",
         "wiki_meta": "GET /api/wiki/{project_id}",
     }

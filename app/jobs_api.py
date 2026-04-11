@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
@@ -21,11 +22,11 @@ class EnqueueBody(BaseModel):
 
 
 @router.post("/index-jobs/enqueue")
-def enqueue_index_job(body: EnqueueBody):
+async def enqueue_index_job(body: EnqueueBody):
     pid = body.project_id or body.repo_url.split("/")[-1].replace(".git", "")
     pname = (body.project_name or "").strip()
     q = get_job_queue()
-    job = q.enqueue(project_id=str(pid), repo_url=body.repo_url, project_name=pname)
+    job = await asyncio.to_thread(q.enqueue, str(pid), body.repo_url, pname)
     return {
         "status": "queued",
         "job_id": job.job_id,
@@ -35,9 +36,9 @@ def enqueue_index_job(body: EnqueueBody):
 
 
 @router.get("/index-jobs/{job_id}")
-def get_index_job(job_id: str):
+async def get_index_job(job_id: str):
     store = get_job_store()
-    job = store.get_job(job_id)
+    job = await asyncio.to_thread(store.get_job, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="job not found")
     return {
@@ -57,23 +58,26 @@ def get_index_job(job_id: str):
 
 
 @router.get("/wiki/{project_id}")
-def get_wiki_meta(project_id: str):
+async def get_wiki_meta(project_id: str):
     """返回最近一次生成的 Wiki 元数据（manifest.json）。"""
-    m = wiki_manifest(project_id)
+    m = await asyncio.to_thread(wiki_manifest, project_id)
     if not m:
         raise HTTPException(status_code=404, detail="wiki not found for project")
     return m
 
 
 @router.get("/index-jobs")
-def list_index_jobs(
+async def list_index_jobs(
     status: Optional[JobStatus] = Query(None),
     project_id: Optional[str] = Query(None),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
     store = get_job_store()
-    jobs = store.list_jobs(status=status, project_id=project_id, limit=limit, offset=offset)
+    jobs = await asyncio.to_thread(
+        store.list_jobs,
+        **{"status": status, "project_id": project_id, "limit": limit, "offset": offset},
+    )
     current = get_job_queue().get_current_job_id()
     return {
         "total": len(jobs),

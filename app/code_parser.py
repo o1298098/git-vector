@@ -2,7 +2,8 @@
 Tree-sitter 函数级解析：从源码中提取函数/方法为独立 chunk，便于精确检索「功能是否在代码中实现」。
 """
 import logging
-from typing import Any
+import time
+from typing import Any, Callable, Optional
 
 from tree_sitter import Node, Tree
 
@@ -503,15 +504,27 @@ def parse_file(path: str, content: str) -> list[dict[str, Any]]:
         return []
 
 
-def parse_files(files: list[tuple[str, str]]) -> list[dict[str, Any]]:
-    """批量解析，返回所有函数级 chunk。"""
+def parse_files(
+    files: list[tuple[str, str]],
+    on_progress: Optional[Callable[[int, int], None]] = None,
+) -> list[dict[str, Any]]:
+    """批量解析，返回所有函数级 chunk。on_progress(done_count, total) 周期性回调（与 GIL 让出同频）。"""
     all_chunks: list[dict[str, Any]] = []
     supported = 0
-    for path, content in files:
+    total = len(files)
+    for i, (path, content) in enumerate(files):
+        # 解析在后台线程跑，但 Python 层遍历 AST 会长时间占 GIL，阻塞同进程内处理同步 API 的线程
+        if i and i % 8 == 0:
+            time.sleep(0)
+            if on_progress:
+                on_progress(i, total)
         chunks = parse_file(path, content)
         if chunks:
             supported += 1
         all_chunks.extend(chunks)
+    if on_progress and files:
+        time.sleep(0)
+        on_progress(total, total)
     if not all_chunks and files:
         # 诊断：TS/TSX 是否拿到 parser（Docker 需重建镜像才会包含 tsx→typescript 回退）
         parser_tsx = _get_parser("tsx")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import multiprocessing as mp
 import re
 import sqlite3
 import threading
@@ -18,6 +19,9 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 JobStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
+
+# 子进程必须用 spawn：父进程已打开 SQLite，fork 会继承非法连接状态
+_mp_spawn = mp.get_context("spawn")
 
 
 def _utc_now_iso() -> str:
@@ -120,6 +124,11 @@ class JobStore:
 
     def _init_schema(self) -> None:
         with self._lock:
+            try:
+                self._conn.execute("PRAGMA journal_mode=WAL;")
+                self._conn.execute("PRAGMA busy_timeout=8000;")
+            except Exception as e:
+                logger.warning("SQLite PRAGMA (WAL/busy_timeout) failed: %s", e)
             self._conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS index_jobs (
@@ -283,6 +292,101 @@ class JobStore:
             yield r["job_id"]
 
 
+def _apply_index_progress(store: JobStore, job_id: str, payload: dict[str, Any]) -> None:
+    """根据 pipeline 进度字典更新任务行（API 进程与子进程共用）。"""
+    stage = str(payload.get("stage") or "")
+    pct = payload.get("percent")
+    try:
+        pct_i = int(pct) if pct is not None else None
+    except Exception:
+        pct_i = None
+
+    status = str(payload.get("status") or "")
+    reason = str(payload.get("reason") or "")
+    error = str(payload.get("error") or "")
+
+    if status and stage == "done":
+        if status == "done":
+            msg = "完成"
+        elif status == "failed":
+            msg = f"失败: {error}" if error else "失败"
+        else:
+            msg = status
+    elif reason:
+        msg = reason
+    elif error:
+        msg = error
+    else:
+        msg = {
+            "clone_or_pull": "克隆/拉取仓库中",
+            "collect_files": "扫描代码文件中",
+            "parse_functions": "函数级解析中",
+            "describe_chunks": "生成函数中文描述中（如已配置 LLM）",
+            "generate_wiki": "生成静态 Wiki（MkDocs）中",
+            "upsert_vector_store": "向量化并写入向量库中",
+            "done": "收尾中",
+        }.get(stage, stage or "处理中")
+        if stage == "parse_functions":
+            try:
+                done = int(payload.get("parsed") or 0)
+                tot = int(payload.get("file_count") or 0)
+            except (TypeError, ValueError):
+                done, tot = 0, 0
+            if tot > 0:
+                msg = f"函数级解析中（{done}/{tot} 个文件）"
+
+    store.update_job(job_id, progress=pct_i, step=stage or "running", message=msg)
+
+
+def _run_index_job_subprocess(job_id: str) -> None:
+    """
+    在独立子进程中执行整条索引管道，与 API 进程 CPU/GIL 完全隔离。
+    须为模块级函数以便 multiprocessing spawn 可 pickle。
+    """
+    root = logging.getLogger()
+    if not root.handlers:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        )
+
+    from app.indexer import run_index_pipeline
+
+    store = get_job_store()
+    job = store.get_job(job_id)
+    if not job:
+        logger.error("Index subprocess: job not found job_id=%s", job_id)
+        return
+
+    try:
+        auth_url = build_repo_url_for_clone(job.repo_url)
+        run_index_pipeline(
+            repo_url=auth_url,
+            project_id=job.project_id,
+            progress=lambda p: _apply_index_progress(store, job_id, p),
+            project_name=job.project_name,
+        )
+        finished = _utc_now_iso()
+        store.update_job(
+            job_id,
+            status="succeeded",
+            progress=100,
+            step="done",
+            message="完成",
+            finished_at=finished,
+        )
+    except Exception as e:  # noqa: S110
+        finished = _utc_now_iso()
+        store.update_job(
+            job_id,
+            status="failed",
+            step="failed",
+            message=f"失败: {e}",
+            finished_at=finished,
+        )
+        logger.exception("Index subprocess failed (job_id=%s, project_id=%s): %s", job_id, job.project_id, e)
+
+
 class IndexJobQueue:
     def __init__(self, store: JobStore):
         self.store = store
@@ -290,6 +394,7 @@ class IndexJobQueue:
         self._stop = threading.Event()
         self._worker: Optional[threading.Thread] = None
         self._current_job_id: str = ""
+        self._current_process: Optional[mp.Process] = None
 
     def start(self) -> None:
         if self._worker and self._worker.is_alive():
@@ -311,9 +416,19 @@ class IndexJobQueue:
     def get_current_job_id(self) -> str:
         return self._current_job_id
 
-    def _run_loop(self) -> None:
-        from app.indexer import run_index_pipeline
+    def shutdown(self, wait: bool = True) -> None:
+        """停止队列线程；若正在跑子进程索引则 terminate。"""
+        self._stop.set()
+        proc = self._current_process
+        if proc is not None and proc.is_alive():
+            logger.warning("Terminating index subprocess (pid=%s)", proc.pid)
+            proc.terminate()
+            if wait:
+                proc.join(timeout=120)
+        if self._worker and self._worker.is_alive():
+            self._worker.join(timeout=5)
 
+    def _run_loop(self) -> None:
         while not self._stop.is_set():
             try:
                 job_id = self._q.get(timeout=0.5)
@@ -336,58 +451,63 @@ class IndexJobQueue:
                 started_at=started,
             )
 
-            def reporter(payload: dict[str, Any]) -> None:
-                stage = str(payload.get("stage") or "")
-                pct = payload.get("percent")
-                try:
-                    pct_i = int(pct) if pct is not None else None
-                except Exception:
-                    pct_i = None
-
-                status = str(payload.get("status") or "")
-                reason = str(payload.get("reason") or "")
-                error = str(payload.get("error") or "")
-
-                if status and stage == "done":
-                    if status == "done":
-                        msg = "完成"
-                    elif status == "failed":
-                        msg = f"失败: {error}" if error else "失败"
-                    else:
-                        msg = status
-                elif reason:
-                    msg = reason
-                elif error:
-                    msg = error
-                else:
-                    msg = {
-                        "clone_or_pull": "克隆/拉取仓库中",
-                        "collect_files": "扫描代码文件中",
-                        "parse_functions": "函数级解析中",
-                        "describe_chunks": "生成函数中文描述中（如已配置 LLM）",
-                        "generate_wiki": "生成静态 Wiki（MkDocs）中",
-                        "upsert_vector_store": "向量化并写入向量库中",
-                        "done": "收尾中",
-                    }.get(stage, stage or "处理中")
-
-                self.store.update_job(job_id, progress=pct_i, step=stage or "running", message=msg)
-
+            proc: Optional[mp.Process] = None
             try:
-                # job.repo_url 是干净 URL；执行时再注入 token
-                auth_url = build_repo_url_for_clone(job.repo_url)
-                run_index_pipeline(
-                    repo_url=auth_url,
-                    project_id=job.project_id,
-                    progress=reporter,
-                    project_name=job.project_name,
+                proc = _mp_spawn.Process(
+                    target=_run_index_job_subprocess,
+                    args=(job_id,),
+                    name=f"index-job-{job_id[:8]}",
+                    daemon=False,
                 )
+                self._current_process = proc
+                proc.start()
+                while proc.is_alive():
+                    proc.join(timeout=0.5)
+                    if self._stop.is_set():
+                        logger.warning("Stop requested, terminating index subprocess job_id=%s", job_id)
+                        proc.terminate()
+                        proc.join(timeout=120)
+                        if proc.is_alive():
+                            try:
+                                proc.kill()
+                            except Exception:
+                                pass
+                            proc.join(timeout=15)
+                        break
+
+                ec = proc.exitcode
+                j = self.store.get_job(job_id)
+                if self._stop.is_set():
+                    if j and j.status == "running":
+                        self.store.update_job(
+                            job_id,
+                            status="cancelled",
+                            progress=j.progress,
+                            step="cancelled",
+                            message="服务关闭，任务已终止",
+                            finished_at=_utc_now_iso(),
+                        )
+                elif ec not in (0, None) and j and j.status == "running":
+                    self.store.update_job(
+                        job_id,
+                        status="failed",
+                        step="failed",
+                        message=f"子进程异常退出 (code={ec})",
+                        finished_at=_utc_now_iso(),
+                    )
+                    logger.error("Index subprocess exited abnormally job_id=%s exitcode=%s", job_id, ec)
+            except Exception as e:
                 finished = _utc_now_iso()
-                self.store.update_job(job_id, status="succeeded", progress=100, step="done", message="完成", finished_at=finished)
-            except Exception as e:  # noqa: S110
-                finished = _utc_now_iso()
-                self.store.update_job(job_id, status="failed", step="failed", message=f"失败: {e}", finished_at=finished)
-                logger.exception("Index job failed (job_id=%s, project_id=%s): %s", job_id, job.project_id, e)
+                self.store.update_job(
+                    job_id,
+                    status="failed",
+                    step="failed",
+                    message=f"失败: {e}",
+                    finished_at=finished,
+                )
+                logger.exception("Failed to start or run index subprocess (job_id=%s): %s", job_id, e)
             finally:
+                self._current_process = None
                 self._current_job_id = ""
                 self._q.task_done()
                 time.sleep(0.05)

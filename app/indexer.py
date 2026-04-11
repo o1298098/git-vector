@@ -1,6 +1,7 @@
 import logging
 import os
 import shutil
+import time
 from pathlib import Path
 from typing import Callable, Optional, Any
 
@@ -103,6 +104,8 @@ def collect_code_files(repo_path: Path) -> list[tuple[str, str]]:
                 if len(text) > 500_000:
                     text = text[:500_000] + "\n... [truncated]"
                 out.append((str(path), text))
+                if len(out) % 50 == 0:
+                    time.sleep(0)
             except Exception as e:
                 logger.debug("Skip file %s: %s", path, e)
     return out
@@ -190,9 +193,14 @@ def run_index_pipeline(
             ext = (path.rsplit(".", 1)[-1] if "." in path else "no_ext")
             exts[ext] = exts.get(ext, 0) + 1
         logger.info("Collected %s files for %s (extensions: %s)", len(files), project_id, exts)
-        _report("parse_functions", percent=35, file_count=len(files))
-        # Tree-sitter 函数级解析
-        function_chunks = parse_files(files)
+        nfiles = len(files)
+
+        def _parse_progress(done: int, total: int) -> None:
+            pct = min(15 + int(20 * done / max(total, 1)), 35)
+            _report("parse_functions", percent=pct, file_count=total, parsed=done)
+
+        _parse_progress(0, nfiles)
+        function_chunks = parse_files(files, on_progress=_parse_progress)
         if not function_chunks:
             logger.warning(
                 "No function-level chunks parsed for %s (collected %s files); using file-level fallback",
