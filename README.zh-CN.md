@@ -86,15 +86,17 @@ docker compose up -d
 ```bash
 curl -X POST "http://localhost:8000/webhook/trigger" \
   -H "Content-Type: application/json" \
-  -d '{"repo_url":"https://gitlab.com/group/my-repo.git","project_id":"my-repo"}'
+  -d '{"repo_url":"https://gitlab.com/group/my-repo.git","project_id":"my-repo","project_name":"我的项目"}'
 ```
+
+可选字段 **`project_name`**：项目中文名或展示名，会写入索引任务记录与 Wiki 首页 / 站点标题（`manifest.json` 的 `project_name` 字段）。
 
 ### 方式 B：`/api/index-jobs/enqueue`（等价入队接口）
 
 ```bash
 curl -X POST "http://localhost:8000/api/index-jobs/enqueue" \
   -H "Content-Type: application/json" \
-  -d '{"repo_url":"https://gitlab.com/group/my-repo.git","project_id":"my-repo"}'
+  -d '{"repo_url":"https://gitlab.com/group/my-repo.git","project_id":"my-repo","project_name":"我的项目"}'
 ```
 
 ---
@@ -149,7 +151,7 @@ curl "http://localhost:8000/api/search?q=登录&project_id=my-repo&top_k=10"
 - **浏览器访问**：`http://<host>:8000/wiki/<project_id>/site/`（`project_id` 与索引时一致；与 `repos` 目录名相同规则，非字母数字会替换为 `_`）
 - **元数据**：`GET /api/wiki/{project_id}` → `manifest.json`（提交 SHA、生成时间、`chunk_count` 等）
 
-Wiki 含：首页元数据与 README 摘录、架构总览（已配置 LLM 时自动生成）、文件索引、按文件的符号说明页、符号总表（过大时自动分卷）。站内 **搜索框** 使用构建时生成的全文索引（Lunr，以英文分词为主，中文关键词仍可匹配正文）。
+Wiki 含：首页元数据与 README 摘录、架构总览（已配置 LLM 时自动生成）、文件索引、按文件的符号说明页、符号总表（过大时自动分卷）。站内 **搜索框** 使用构建时生成的全文索引（Lunr，以英文分词为主，中文关键词仍可匹配正文）。**功能说明** 仅使用索引阶段 LLM 为每个函数生成的描述（与 `describe_chunks` 写入向量库的一致）；源码 docstring 若与 LLM 描述不同，会在 **源码文档** 中另列。
 
 ---
 

@@ -40,6 +40,11 @@ def _safe_project_id(project_id: str) -> str:
     return "".join(c if c.isalnum() or c in "-_" else "_" for c in project_id)
 
 
+def _safe_yaml_double_quoted_title(s: str) -> str:
+    """MkDocs 首页 frontmatter title 双引号转义。"""
+    return (s or "").replace("\\", "\\\\").replace('"', '\\"')
+
+
 def _normalize_rel_path(p: str) -> str:
     return str(p).replace("\\", "/")
 
@@ -195,23 +200,50 @@ def _docstring_from_code(code: str, path: str) -> str:
     return ""
 
 
-def _symbol_function_summary(chunk: dict[str, Any]) -> str:
+def _normalize_ws(s: str) -> str:
+    return " ".join((s or "").split())
+
+
+def _yaml_double_quoted(s: str) -> str:
+    """YAML 双引号 title 内转义。"""
+    return (s or "").replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _wiki_llm_function_description(chunk: dict[str, Any]) -> str:
     """
-    每条符号的「功能说明」：优先 LLM 描述，否则从源码 docstring/注释提取，
-    仍无则给简短占位说明。
+    Wiki「功能说明」**仅**使用索引阶段 `describe_functions_batch` 写入的 LLM 描述，
+    与向量库检索用的自然语言一致；不用源码 docstring 冒充功能说明。
     """
     llm = (chunk.get("description") or "").strip()
     if llm:
         return _trim_summary(llm)
+    kind = str(chunk.get("kind", ""))
+    if kind == "file":
+        return (
+            "（无 LLM 描述：当前为文件级索引，未对单个函数生成说明；"
+            "可配置 LLM 并尽量使用函数级解析后重新索引，或查看下方代码摘录。）"
+        )
+    return (
+        "（无 LLM 描述：请在环境中配置 Dify / Azure OpenAI / OpenAI 后重新索引本仓库；"
+        "若已配置仍为空，请查看索引日志中 describe 阶段是否报错。）"
+    )
+
+
+def _wiki_source_docstring_supplement(chunk: dict[str, Any]) -> str | None:
+    """
+    源码中的文档字符串/注释，单独展示，避免与「功能说明」混淆。
+    若与 LLM 描述实质相同（去空白后一致）则不重复列出。
+    """
+    llm = (chunk.get("description") or "").strip()
     code = (chunk.get("code") or "").strip()
     path = str(chunk.get("path", ""))
     doc = _docstring_from_code(code, path)
-    if doc:
-        return _trim_summary(doc)
-    kind = str(chunk.get("kind", ""))
-    if kind == "file":
-        return "（文件级索引：未解析到独立函数说明；请查看下方代码摘录。）"
-    return "（未找到文档字符串或注释；请展开「代码摘录」查看实现。）"
+    if not doc.strip():
+        return None
+    doc_t = _trim_summary(doc)
+    if llm and _normalize_ws(doc_t) == _normalize_ws(_trim_summary(llm)):
+        return None
+    return doc_t
 
 
 def _build_directory_tree(repo_path: Path, max_lines: int = TREE_MAX_LINES) -> str:
@@ -255,13 +287,20 @@ def _architecture_markdown(
     repo_path: Path,
     chunks: list[dict[str, Any]],
     tree_text: str,
+    project_name: str = "",
 ) -> str:
+    pname = (project_name or "").strip()
+    if pname:
+        project_header = f"## 项目信息\n\n- **项目名称**: {pname}\n- **project_id**: `{project_id}`\n\n"
+    else:
+        project_header = f"## 项目信息\n\n- **project_id**: `{project_id}`\n\n"
+
     samples: list[str] = []
     for c in chunks[:ARCH_SAMPLE_CHUNKS]:
         p = _normalize_rel_path(str(c.get("path", "")))
         n = str(c.get("name", ""))
         k = str(c.get("kind", "function"))
-        summary = _symbol_function_summary(c)
+        summary = _wiki_llm_function_description(c)
         line = f"- `{p}` :: `{n}` ({k}) — {summary}"
         samples.append(line)
 
@@ -269,7 +308,8 @@ def _architecture_markdown(
     if not client:
         return (
             "# 架构与功能总览\n\n"
-            "未配置 LLM，无法自动生成架构说明。以下为目录树节选与代码单元列表，请使用左侧搜索或「符号索引」浏览。\n\n"
+            + project_header
+            + "未配置 LLM，无法自动生成架构说明。以下为目录树节选与代码单元列表，请使用左侧搜索或「符号索引」浏览。\n\n"
             "## 目录树（节选）\n\n```text\n"
             f"{tree_text}\n```\n\n"
             "## 代码单元摘要（节选）\n\n"
@@ -277,14 +317,18 @@ def _architecture_markdown(
             + "\n"
         )
 
+    if pname:
+        pname_line = f"项目展示名称：`{pname}`\n项目标识 project_id：`{project_id}`\n\n"
+    else:
+        pname_line = f"项目标识 project_id：`{project_id}`\n\n"
     user = (
         "你是资深软件架构师。根据下面「目录树节选」与「代码单元摘要」，用**中文 Markdown** 写一份「架构与功能总览」。\n\n"
         "必须包含三级标题：## 模块与职责、## 主要数据与控制流、## 与外部系统的交互（若无则写「未从材料中观察到」）。\n"
         "要求：只根据材料推断，不要编造材料中不存在的功能或依赖；可适度使用列表与加粗。\n\n"
-        f"项目标识：`{project_id}`\n\n"
-        "## 目录树（节选）\n```text\n"
-        f"{tree_text}\n```\n\n"
-        "## 代码单元摘要（节选）\n"
+        + pname_line
+        + "## 目录树（节选）\n```text\n"
+        + f"{tree_text}\n```\n\n"
+        + "## 代码单元摘要（节选）\n"
         + "\n".join(samples)
         + "\n\n请直接输出 Markdown 正文（从一级标题 `# 架构与功能总览` 开始）。"
     )
@@ -300,7 +344,8 @@ def _architecture_markdown(
     return (
         "# 架构与功能总览\n\n"
         "（自动生成失败，以下为节选材料。）\n\n"
-        "## 目录树（节选）\n\n```text\n"
+        + project_header
+        + "## 目录树（节选）\n\n```text\n"
         f"{tree_text}\n```\n\n"
         "## 代码单元摘要（节选）\n\n"
         + "\n".join(samples)
@@ -345,13 +390,18 @@ def _write_file_pages(
             kind = str(c.get("kind", "function"))
             sl = c.get("start_line")
             el = c.get("end_line")
-            summary = _symbol_function_summary(c)
+            llm_desc = _wiki_llm_function_description(c)
             calls = c.get("calls") or []
             anchor = _symbol_anchor(kind, name)
             lines.append(f"### `{name}` — `{kind}` {{#{anchor}}}")
             lines.append("")
-            lines.append("- **功能说明**:")
-            lines.extend(_md_list_item_body(summary))
+            lines.append("- **功能说明**（LLM 生成）:")
+            lines.extend(_md_list_item_body(llm_desc))
+            src_doc = _wiki_source_docstring_supplement(c)
+            if src_doc:
+                lines.append("")
+                lines.append("- **源码文档**（docstring / 注释）:")
+                lines.extend(_md_list_item_body(src_doc))
             lines.append("")
             lines.append(f"- **位置**: 第 {sl}–{el} 行" if el else f"- **位置**: 第 {sl} 行起")
             if calls:
@@ -411,7 +461,7 @@ def _write_symbol_index_parts(
             sl = c.get("start_line", "")
             el = c.get("end_line", "")
             row_line = f"{sl}-{el}" if el else str(sl)
-            desc = _escape_md_table_cell(_symbol_function_summary(c))
+            desc = _escape_md_table_cell(_wiki_llm_function_description(c))
             anchor = _symbol_anchor(kind, sym_name)
             path_cell = _escape_md_table_cell(path_norm)
             link = f"[{path_cell}](files/{slug}.md#{anchor})"
@@ -427,13 +477,16 @@ def generate_project_wiki(
     repo_path: Path,
     chunks: list[dict[str, Any]],
     collected_files: list[tuple[str, str]] | None = None,
+    project_name: str = "",
 ) -> dict[str, Any]:
     """
     生成 MkDocs 源文件并执行 build。失败时抛出异常（由 indexer 捕获）。
+    project_name：可选展示名（如中文项目名），由触发接口或 Webhook 传入。
     """
     if not settings.wiki_enabled:
         return {"skipped": True, "reason": "wiki_disabled"}
 
+    pname = (project_name or "").strip()
     safe = _safe_project_id(project_id)
     wiki_root = settings.data_path / "wiki_sites" / safe
     work_dir = settings.data_path / "wiki_work" / safe
@@ -466,37 +519,66 @@ def generate_project_wiki(
 
     readme = _readme_excerpt(collected_files or [], limit=8000)
 
+    page_title = _safe_yaml_double_quoted_title(
+        f"{pname}（{project_id}）" if pname else f"项目 Wiki — {project_id}"
+    )
+    site_title = f"{pname} · {project_id}" if pname else f"Wiki — {project_id}"
+    h1_line = pname if pname else project_id
+
     # 首页
     index_lines = [
         "---",
-        f'title: "项目 Wiki — {project_id}"',
+        f'title: "{page_title}"',
         "description: 代码索引与符号说明（自动生成）",
         "tags: [index]",
         "---",
         "",
-        f"# {project_id}",
+        f"# {h1_line}",
         "",
         "## 元数据",
         "",
-        f"- **project_id**: `{project_id}`",
-        f"- **Git 提交**: `{commit}`",
-        f"- **生成时间（UTC）**: {generated_at}",
-        f"- **符号/单元总数**: {len(chunks)}",
-        f"- **文件数（有符号）**: {len(by_file)}",
-        "",
-        "## 语言 / 扩展名分布",
-        "",
-        "| 扩展名 | 文件数 |",
-        "| --- | --- |",
     ]
+    if pname:
+        index_lines.extend(
+            [
+                f"- **项目名称**: {pname}",
+                f"- **project_id**: `{project_id}`",
+            ]
+        )
+    else:
+        index_lines.append(f"- **project_id**: `{project_id}`")
+    index_lines.extend(
+        [
+            f"- **Git 提交**: `{commit}`",
+            f"- **生成时间（UTC）**: {generated_at}",
+            f"- **符号/单元总数**: {len(chunks)}",
+            f"- **文件数（有符号）**: {len(by_file)}",
+            "",
+            "## 语言 / 扩展名分布",
+            "",
+            "| 扩展名 | 文件数 |",
+            "| --- | --- |",
+        ]
+    )
     for ext, cnt in sorted(ext_counts.items(), key=lambda x: -x[1])[:40]:
         index_lines.append(f"| `{ext}` | {cnt} |")
-    index_lines.extend(["", "## 使用说明", "", "使用顶部 **搜索框** 可全文检索路径、函数名与中文说明。", ""])
+    index_lines.extend(
+        [
+            "",
+            "## 使用说明",
+            "",
+            "使用顶部 **搜索框** 可全文检索路径、函数名与说明。",
+            "",
+            "**功能说明** 一栏仅展示索引阶段由 LLM（Dify / OpenAI / Azure OpenAI）生成的描述，与向量语义检索一致；"
+            "若未配置 LLM 或生成失败，会显示提示文案。源码中的 docstring 如有且与 LLM 描述不同，会单独出现在 **源码文档** 中。",
+            "",
+        ]
+    )
     if readme:
         index_lines.extend(["## README 摘录", "", readme, ""])
     (docs_dir / "index.md").write_text("\n".join(index_lines), encoding="utf-8")
 
-    arch = _architecture_markdown(project_id, repo_path, chunks, tree_text)
+    arch = _architecture_markdown(project_id, repo_path, chunks, tree_text, project_name=pname)
     (docs_dir / "architecture.md").write_text(arch, encoding="utf-8")
 
     # 文件索引（表格 + 链接）
@@ -541,7 +623,7 @@ def generate_project_wiki(
     site_out.parent.mkdir(parents=True, exist_ok=True)
 
     mkdocs_content: dict[str, Any] = {
-        "site_name": f"Wiki — {project_id}",
+        "site_name": site_title,
         "docs_dir": "docs",
         "site_dir": str(site_out.resolve()),
         "theme": {
@@ -585,6 +667,7 @@ def generate_project_wiki(
 
     manifest = {
         "project_id": project_id,
+        "project_name": pname or None,
         "safe_id": safe,
         "commit": commit,
         "generated_at": generated_at,

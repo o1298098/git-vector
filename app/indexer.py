@@ -164,6 +164,7 @@ def run_index_pipeline(
     repo_url: str,
     project_id: str,
     progress: Optional[Callable[[dict[str, Any]], None]] = None,
+    project_name: str = "",
 ) -> None:
     def _report(stage: str, **fields: Any) -> None:
         if not progress:
@@ -210,7 +211,13 @@ def run_index_pipeline(
             try:
                 from app.wiki_generator import generate_project_wiki
 
-                wiki_info = generate_project_wiki(project_id, repo_path, function_chunks, files)
+                wiki_info = generate_project_wiki(
+                    project_id,
+                    repo_path,
+                    function_chunks,
+                    files,
+                    project_name=project_name,
+                )
                 logger.info("Wiki: %s", wiki_info.get("browse_url_path") or wiki_info)
             except Exception as wiki_exc:
                 logger.warning("Wiki 生成失败（不影响向量索引）: %s", wiki_exc, exc_info=True)

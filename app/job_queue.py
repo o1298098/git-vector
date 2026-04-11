@@ -98,6 +98,7 @@ class IndexJob:
     job_id: str
     project_id: str
     repo_url: str  # 永远是干净 URL（不含凭据）
+    project_name: str  # 展示用中文名等（可选，默认空）
     status: JobStatus
     progress: int
     step: str
@@ -125,6 +126,7 @@ class JobStore:
                     job_id TEXT PRIMARY KEY,
                     project_id TEXT NOT NULL,
                     repo_url TEXT NOT NULL,
+                    project_name TEXT NOT NULL DEFAULT '',
                     status TEXT NOT NULL,
                     progress INTEGER NOT NULL,
                     step TEXT NOT NULL,
@@ -137,16 +139,23 @@ class JobStore:
             )
             self._conn.execute("CREATE INDEX IF NOT EXISTS idx_index_jobs_status ON index_jobs(status)")
             self._conn.execute("CREATE INDEX IF NOT EXISTS idx_index_jobs_project ON index_jobs(project_id)")
+            cols = {row[1] for row in self._conn.execute("PRAGMA table_info(index_jobs)")}
+            if "project_name" not in cols:
+                self._conn.execute(
+                    "ALTER TABLE index_jobs ADD COLUMN project_name TEXT NOT NULL DEFAULT ''"
+                )
             self._conn.commit()
 
-    def create_job(self, project_id: str, repo_url: str) -> IndexJob:
+    def create_job(self, project_id: str, repo_url: str, project_name: str = "") -> IndexJob:
         job_id = str(uuid.uuid4())
         now = _utc_now_iso()
         clean_url = normalize_repo_url(repo_url)
+        pname = (project_name or "").strip()
         job = IndexJob(
             job_id=job_id,
             project_id=project_id,
             repo_url=clean_url,
+            project_name=pname,
             status="queued",
             progress=0,
             step="queued",
@@ -159,13 +168,14 @@ class JobStore:
             self._conn.execute(
                 """
                 INSERT INTO index_jobs
-                (job_id, project_id, repo_url, status, progress, step, message, created_at, started_at, finished_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (job_id, project_id, repo_url, project_name, status, progress, step, message, created_at, started_at, finished_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job.job_id,
                     job.project_id,
                     job.repo_url,
+                    job.project_name,
                     job.status,
                     job.progress,
                     job.step,
@@ -293,8 +303,8 @@ class IndexJobQueue:
         self._worker.start()
         logger.info("Index job queue started.")
 
-    def enqueue(self, project_id: str, repo_url: str) -> IndexJob:
-        job = self.store.create_job(project_id, repo_url)
+    def enqueue(self, project_id: str, repo_url: str, project_name: str = "") -> IndexJob:
+        job = self.store.create_job(project_id, repo_url, project_name=project_name)
         self._q.put(job.job_id)
         return job
 
@@ -365,7 +375,12 @@ class IndexJobQueue:
             try:
                 # job.repo_url 是干净 URL；执行时再注入 token
                 auth_url = build_repo_url_for_clone(job.repo_url)
-                run_index_pipeline(repo_url=auth_url, project_id=job.project_id, progress=reporter)
+                run_index_pipeline(
+                    repo_url=auth_url,
+                    project_id=job.project_id,
+                    progress=reporter,
+                    project_name=job.project_name,
+                )
                 finished = _utc_now_iso()
                 self.store.update_job(job_id, status="succeeded", progress=100, step="done", message="完成", finished_at=finished)
             except Exception as e:  # noqa: S110

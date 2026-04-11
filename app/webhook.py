@@ -4,24 +4,39 @@ import hashlib
 import hmac
 import logging
 from typing import Optional
-from fastapi import APIRouter, Request, Header, HTTPException, Body
+
+from fastapi import APIRouter, Header, HTTPException, Request
+from pydantic import BaseModel, Field
+
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+class TriggerBody(BaseModel):
+    repo_url: str = Field(..., description="Git 仓库 URL")
+    project_id: Optional[str] = Field(None, description="项目标识（不填则从 URL 推断）")
+    project_name: Optional[str] = Field(
+        None,
+        description="项目中文名或展示名（可选，会写入 Wiki 首页与任务记录）",
+    )
+
+
 @router.post("/trigger")
-async def trigger_index(
-    repo_url: str = Body(..., embed=True),
-    project_id: Optional[str] = Body(None),
-):
-    """手动触发一次索引（不依赖 GitLab Webhook）。"""
-    pid = project_id or repo_url.split("/")[-1].replace(".git", "")
+async def trigger_index(body: TriggerBody):
+    """手动触发一次索引（不依赖 GitLab Webhook）。支持 JSON：`repo_url`、`project_id`、`project_name`。"""
+    pid = body.project_id or body.repo_url.split("/")[-1].replace(".git", "")
+    pname = (body.project_name or "").strip()
     from app.job_queue import get_job_queue
 
-    job = get_job_queue().enqueue(project_id=str(pid), repo_url=repo_url)
-    return {"status": "queued", "project_id": pid, "job_id": job.job_id}
+    job = get_job_queue().enqueue(project_id=str(pid), repo_url=body.repo_url, project_name=pname)
+    return {
+        "status": "queued",
+        "project_id": pid,
+        "project_name": pname or None,
+        "job_id": job.job_id,
+    }
 
 
 def _verify_gitlab_token(payload: bytes, token: Optional[str]) -> bool:
@@ -61,11 +76,17 @@ async def gitlab_webhook(
     project = data.get("project", {})
     repo_url = project.get("http_url") or project.get("ssh_url_to_repo")
     project_id = project.get("id") or project.get("path_with_namespace", "unknown")
+    # GitLab 项目「名称」字段（可为中文），用于 Wiki 展示；无则用空字符串
+    project_name = str(project.get("name") or "").strip()
 
     if not repo_url:
         raise HTTPException(status_code=400, detail="Missing project URL")
 
     from app.job_queue import get_job_queue
 
-    job = get_job_queue().enqueue(project_id=str(project_id), repo_url=repo_url)
-    return {"status": "queued", "project_id": project_id, "job_id": job.job_id}
+    job = get_job_queue().enqueue(
+        project_id=str(project_id),
+        repo_url=repo_url,
+        project_name=project_name,
+    )
+    return {"status": "queued", "project_id": project_id, "project_name": project_name or None, "job_id": job.job_id}

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, Body, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.job_queue import get_job_queue, get_job_store, JobStatus
@@ -14,14 +14,24 @@ router = APIRouter()
 class EnqueueBody(BaseModel):
     repo_url: str = Field(..., description="Git 仓库 URL（http/https/ssh 均可）")
     project_id: Optional[str] = Field(None, description="项目标识（不填则从 repo_url 推断）")
+    project_name: Optional[str] = Field(
+        None,
+        description="项目中文名或展示名（可选，写入 Wiki 与任务记录）",
+    )
 
 
 @router.post("/index-jobs/enqueue")
 def enqueue_index_job(body: EnqueueBody):
     pid = body.project_id or body.repo_url.split("/")[-1].replace(".git", "")
+    pname = (body.project_name or "").strip()
     q = get_job_queue()
-    job = q.enqueue(project_id=str(pid), repo_url=body.repo_url)
-    return {"status": "queued", "job_id": job.job_id, "project_id": job.project_id}
+    job = q.enqueue(project_id=str(pid), repo_url=body.repo_url, project_name=pname)
+    return {
+        "status": "queued",
+        "job_id": job.job_id,
+        "project_id": job.project_id,
+        "project_name": job.project_name or None,
+    }
 
 
 @router.get("/index-jobs/{job_id}")
@@ -33,6 +43,7 @@ def get_index_job(job_id: str):
     return {
         "job_id": job.job_id,
         "project_id": job.project_id,
+        "project_name": job.project_name or None,
         "repo_url": job.repo_url,
         "status": job.status,
         "progress": job.progress,
@@ -70,6 +81,7 @@ def list_index_jobs(
             {
                 "job_id": j.job_id,
                 "project_id": j.project_id,
+                "project_name": j.project_name or None,
                 "repo_url": j.repo_url,
                 "status": j.status,
                 "progress": j.progress,
