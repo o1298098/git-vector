@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 from collections import defaultdict
+from itertools import groupby
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -78,6 +79,53 @@ def _ext_of(path: str) -> str:
 
 def _escape_md_table_cell(s: str) -> str:
     return (s or "").replace("|", "\\|").replace("\n", " ").strip()[:500]
+
+
+class _DirNode:
+    """用于文件索引树：目录与文件分桶，避免同名文件/文件夹冲突。"""
+
+    __slots__ = ("dirs", "files")
+
+    def __init__(self) -> None:
+        self.dirs: dict[str, _DirNode] = {}
+        self.files: dict[str, tuple[str, int, bool]] = {}
+
+
+def _file_tree_insert(
+    root: _DirNode,
+    path_norm: str,
+    slug: str,
+    sym_count: int,
+    has_page: bool,
+) -> None:
+    parts = [p for p in _normalize_rel_path(path_norm).split("/") if p]
+    if not parts:
+        return
+    *dir_parts, fname = parts
+    node = root
+    for d in dir_parts:
+        if d not in node.dirs:
+            node.dirs[d] = _DirNode()
+        node = node.dirs[d]
+    node.files[fname] = (slug, sym_count, has_page)
+
+
+def _render_file_tree_md(node: _DirNode, indent: int = 0) -> list[str]:
+    """嵌套无序列表，每级 4 空格缩进（与 Python-Markdown 嵌套列表兼容）。"""
+    sp = "    " * indent
+    lines: list[str] = []
+    for dname in sorted(node.dirs.keys(), key=lambda x: x.lower()):
+        lines.append(f"{sp}- **{dname}**")
+        lines.extend(_render_file_tree_md(node.dirs[dname], indent + 1))
+    for fname in sorted(node.files.keys(), key=lambda x: x.lower()):
+        slug, cnt, has_page = node.files[fname]
+        if has_page:
+            lines.append(f"{sp}- [{fname}](files/{slug}.md) — {cnt} 个符号")
+        else:
+            lines.append(
+                f"{sp}- `{fname}` — {cnt} 个符号（未生成单独页面，请用顶部搜索）"
+            )
+    return lines
 
 
 def _symbol_anchor(kind: str, name: str) -> str:
@@ -421,15 +469,17 @@ def _write_symbol_index_parts(
     chunks: list[dict[str, Any]],
     slug_map: dict[str, str],
     rows_per_file: int,
+    paths_with_file_page: set[str],
 ) -> list[str]:
-    """返回 nav 用的 symbol 索引文件名列表。"""
+    """按文件分组输出符号表（避免每行重复长路径导致表格过窄难读）；返回 nav 用的文件名列表。"""
     nav_names: list[str] = []
-    parts: list[list[dict[str, Any]]] = []
-    cur: list[dict[str, Any]] = []
-    for c in sorted(
+    sorted_chunks = sorted(
         chunks,
         key=lambda x: (_normalize_rel_path(str(x.get("path", ""))), str(x.get("name", ""))),
-    ):
+    )
+    parts: list[list[dict[str, Any]]] = []
+    cur: list[dict[str, Any]] = []
+    for c in sorted_chunks:
         cur.append(c)
         if len(cur) >= rows_per_file:
             parts.append(cur)
@@ -450,24 +500,36 @@ def _write_symbol_index_parts(
             "",
             "# 符号索引",
             "",
-            "| 符号 | 类型 | 文件 | 行号 | 功能说明 |",
-            "| --- | --- | --- | --- | --- |",
+            "按 **文件** 分组列出符号；长路径只在每组标题出现一次，表格更易阅读。",
+            "",
         ]
-        for c in group:
-            path_norm = _normalize_rel_path(str(c.get("path", "")))
+        for path_norm, file_chunks_iter in groupby(
+            group,
+            key=lambda x: _normalize_rel_path(str(x.get("path", ""))),
+        ):
+            file_chunks = list(file_chunks_iter)
             slug = slug_map.get(path_norm, _file_slug(path_norm))
-            sym_name = str(c.get("name", ""))
-            kind = str(c.get("kind", ""))
-            sl = c.get("start_line", "")
-            el = c.get("end_line", "")
-            row_line = f"{sl}-{el}" if el else str(sl)
-            desc = _escape_md_table_cell(_wiki_llm_function_description(c))
-            anchor = _symbol_anchor(kind, sym_name)
-            path_cell = _escape_md_table_cell(path_norm)
-            link = f"[{path_cell}](files/{slug}.md#{anchor})"
-            lines.append(
-                f"| `{_escape_md_table_cell(sym_name)}` | `{kind}` | {link} | {row_line} | {desc} |"
-            )
+            path_esc = _escape_md_table_cell(path_norm)
+            lines.append(f"## `{path_esc}`")
+            lines.append("")
+            if path_norm in paths_with_file_page:
+                lines.append(f"[打开该文件说明页](files/{slug}.md)")
+                lines.append("")
+            lines.append("| 符号 | 类型 | 行号 | 功能说明 |")
+            lines.append("| --- | --- | --- | --- |")
+            for c in file_chunks:
+                sym_name = str(c.get("name", ""))
+                kind = str(c.get("kind", ""))
+                sl = c.get("start_line", "")
+                el = c.get("end_line", "")
+                row_line = f"{sl}-{el}" if el else str(sl)
+                desc = _escape_md_table_cell(_wiki_llm_function_description(c))
+                anchor = _symbol_anchor(kind, sym_name)
+                sym_cell = f"[`{_escape_md_table_cell(sym_name)}`](files/{slug}.md#{anchor})"
+                if path_norm not in paths_with_file_page:
+                    sym_cell = f"`{_escape_md_table_cell(sym_name)}`"
+                lines.append(f"| {sym_cell} | `{kind}` | {row_line} | {desc} |")
+            lines.append("")
         (docs_dir / md_filename).write_text("\n".join(lines), encoding="utf-8")
     return nav_names
 
@@ -581,7 +643,17 @@ def generate_project_wiki(
     arch = _architecture_markdown(project_id, repo_path, chunks, tree_text, project_name=pname)
     (docs_dir / "architecture.md").write_text(arch, encoding="utf-8")
 
-    # 文件索引（表格 + 链接）
+    sorted_file_items = sorted(by_file.items(), key=lambda x: x[0])
+    paths_with_file_page = {p for p, _ in sorted_file_items[:max_file_pages]}
+
+    # 文件索引：树状目录 + 可折叠的扁平表
+    tree_root = _DirNode()
+    for path_norm, syms in sorted_file_items:
+        slug = slug_map[path_norm]
+        has_page = path_norm in paths_with_file_page
+        _file_tree_insert(tree_root, path_norm, slug, len(syms), has_page)
+    tree_lines = _render_file_tree_md(tree_root)
+    overflow_files = len(by_file) - min(len(by_file), max_file_pages)
     fi_lines = [
         "---",
         'title: "文件索引"',
@@ -591,21 +663,41 @@ def generate_project_wiki(
         "",
         "# 文件索引",
         "",
-        "| 路径 | 符号数 | 文档 |",
-        "| --- | ---: | --- |",
+        "按仓库 **目录树** 浏览；点击文件名进入该文件的符号说明页。也可使用顶部 **搜索** 按路径或符号名查找。",
+        "",
+        *tree_lines,
+        "",
     ]
-    for i, (path_norm, syms) in enumerate(sorted(by_file.items(), key=lambda x: x[0])):
+    if overflow_files > 0:
+        fi_lines.append(
+            f"超出单仓页面上限（`WIKI_MAX_FILE_PAGES={max_file_pages}`）的文件仍出现在上表中，"
+            f"但**未生成单独文档页**（共 {overflow_files} 个）；请用搜索或「符号索引」查看。"
+        )
+        fi_lines.append("")
+    fi_lines.extend(
+        [
+            "??? note \"扁平路径列表（备选，便于复制完整路径）\"",
+            "    | 路径 | 符号数 | 文档 |",
+            "    | --- | ---: | --- |",
+        ]
+    )
+    for i, (path_norm, syms) in enumerate(sorted_file_items):
         if i >= max_file_pages:
-            fi_lines.append(f"| … | … | *另有 {len(by_file) - max_file_pages} 个文件未单独建页* |")
+            fi_lines.append(
+                f"    | … | … | *另有 {overflow_files} 个文件未单独建页* |"
+            )
             break
         slug = slug_map[path_norm]
         fi_lines.append(
-            f"| `{_escape_md_table_cell(path_norm)}` | {len(syms)} | [打开](files/{slug}.md) |"
+            f"    | `{_escape_md_table_cell(path_norm)}` | {len(syms)} | [打开](files/{slug}.md) |"
         )
+    fi_lines.append("")
     (docs_dir / "file-index.md").write_text("\n".join(fi_lines), encoding="utf-8")
 
     _write_file_pages(docs_dir, by_file, slug_map, max_file_pages)
-    symbol_nav = _write_symbol_index_parts(docs_dir, chunks, slug_map, rows_per)
+    symbol_nav = _write_symbol_index_parts(
+        docs_dir, chunks, slug_map, rows_per, paths_with_file_page
+    )
 
     # mkdocs.yml
     nav: list[Any] = [
