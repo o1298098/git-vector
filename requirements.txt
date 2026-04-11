@@ -17,6 +17,10 @@ openai==1.12.0
 # Config & utils
 pydantic-settings==2.1.0
 python-dotenv==1.0.1
+PyYAML==6.0.1
+
+# 静态 Wiki（索引完成后 mkdocs build）
+mkdocs-material==9.5.17
 
 # Tree-sitter 函数级解析
 # - Docker 环境：优先使用 tree-sitter-language-pack（预编译语言包）

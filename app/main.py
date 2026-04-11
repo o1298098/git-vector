@@ -1,8 +1,10 @@
 import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
-from fastapi.responses import JSONResponse
 
+from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+
+from app.config import settings
 from app.webhook import router as webhook_router
 
 # 基础日志配置：INFO 级别以上都会输出，带时间和模块名，方便观察运行过程
@@ -39,6 +41,14 @@ app.include_router(query_router, prefix="/api", tags=["query"])
 from app.jobs_api import router as jobs_router
 app.include_router(jobs_router, prefix="/api", tags=["jobs"])
 
+_wiki_root = settings.data_path / "wiki_sites"
+_wiki_root.mkdir(parents=True, exist_ok=True)
+app.mount(
+    "/wiki",
+    StaticFiles(directory=str(_wiki_root), html=True),
+    name="wiki",
+)
+
 
 @app.get("/health")
 def health():
@@ -52,4 +62,6 @@ def root():
         "docs": "/docs",
         "webhook": "POST /webhook/gitlab",
         "query": "POST /api/query",
+        "wiki": "GET /wiki/<project_id>/site/ （索引成功后静态站）",
+        "wiki_meta": "GET /api/wiki/{project_id}",
     }

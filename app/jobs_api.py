@@ -6,6 +6,7 @@ from fastapi import APIRouter, Body, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.job_queue import get_job_queue, get_job_store, JobStatus
+from app.wiki_generator import wiki_manifest
 
 router = APIRouter()
 
@@ -42,6 +43,15 @@ def get_index_job(job_id: str):
         "finished_at": job.finished_at,
         "is_current": (get_job_queue().get_current_job_id() == job.job_id),
     }
+
+
+@router.get("/wiki/{project_id}")
+def get_wiki_meta(project_id: str):
+    """返回最近一次生成的 Wiki 元数据（manifest.json）。"""
+    m = wiki_manifest(project_id)
+    if not m:
+        raise HTTPException(status_code=404, detail="wiki not found for project")
+    return m
 
 
 @router.get("/index-jobs")

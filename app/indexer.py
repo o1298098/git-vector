@@ -108,10 +108,8 @@ def collect_code_files(repo_path: Path) -> list[tuple[str, str]]:
     return out
 
 
-def _function_chunks_to_docs(project_id: str, chunks: list[dict]) -> list[dict]:
-    """将函数级 chunk 转为向量库所需格式：content（用于 embedding）+ metadata。"""
-    # 可选：批量 LLM 生成一行描述，便于检索
-    chunks = describe_functions_batch(chunks)
+def _chunks_to_embedding_docs(project_id: str, chunks: list[dict]) -> list[dict]:
+    """将已含 description 的 chunk 转为向量库格式（不再重复调用 LLM）。"""
     out = []
     for c in chunks:
         path = c["path"]
@@ -204,7 +202,20 @@ def run_index_pipeline(
             _report("done", percent=100, status="skipped", reason="no_chunks")
             return
         _report("describe_chunks", percent=55, chunk_count=len(function_chunks))
-        docs = _function_chunks_to_docs(project_id, function_chunks)
+        function_chunks = describe_functions_batch(function_chunks)
+
+        skip_wiki = os.environ.get("SKIP_WIKI", "").strip().lower() in ("1", "true", "yes")
+        if settings.wiki_enabled and not skip_wiki:
+            _report("generate_wiki", percent=62, chunk_count=len(function_chunks))
+            try:
+                from app.wiki_generator import generate_project_wiki
+
+                wiki_info = generate_project_wiki(project_id, repo_path, function_chunks, files)
+                logger.info("Wiki: %s", wiki_info.get("browse_url_path") or wiki_info)
+            except Exception as wiki_exc:
+                logger.warning("Wiki 生成失败（不影响向量索引）: %s", wiki_exc, exc_info=True)
+
+        docs = _chunks_to_embedding_docs(project_id, function_chunks)
         if os.environ.get("SKIP_VECTOR_STORE") == "1":
             logger.info("Indexed project %s with %s chunks (SKIP_VECTOR_STORE=1, skip upsert)", project_id, len(docs))
             _report("done", percent=100, status="done", skipped_vector_store=True, doc_count=len(docs))

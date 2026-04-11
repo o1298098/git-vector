@@ -29,7 +29,9 @@ parse_functions：Tree-sitter 函数级解析（0 条则 file-level fallback）
   ↓
 describe_chunks（可选）：Dify / Azure OpenAI / OpenAI 生成一行描述
   ↓
-upsert_vector_store：Ollama embeddings → Chroma 写入
+generate_wiki：MkDocs Material 静态 Wiki（站内搜索）→ DATA_DIR/wiki_sites
+  ↓
+upsert_vector_store：embedding → Chroma 写入
   ↓
 query/search：语义检索（供 Dify/前端调用）
 ```
@@ -140,6 +142,15 @@ curl "http://localhost:8000/api/search?q=登录&project_id=my-repo&top_k=10"
 - **GET** `/api/projects`：列出向量库中已索引的项目及文档数
 - **GET** `/api/project/index-status?project_id=xxx`：查看某项目是否已写入向量（`indexed/doc_count`）
 
+### 静态 Wiki（MkDocs + 站内搜索）
+
+索引任务在「向量化」之前会自动执行 **MkDocs Material** 构建（失败仅打日志，不阻断向量写入）。产物在 `DATA_DIR/wiki_sites/<project_id>/site/`，由本服务静态挂载：
+
+- **浏览器访问**：`http://<host>:8000/wiki/<project_id>/site/`（`project_id` 与索引时一致；与 `repos` 目录名相同规则，非字母数字会替换为 `_`）
+- **元数据**：`GET /api/wiki/{project_id}` → `manifest.json`（提交 SHA、生成时间、`chunk_count` 等）
+
+Wiki 含：首页元数据与 README 摘录、架构总览（已配置 LLM 时自动生成）、文件索引、按文件的符号说明页、符号总表（过大时自动分卷）。站内 **搜索框** 使用构建时生成的全文索引（Lunr，以英文分词为主，中文关键词仍可匹配正文）。
+
 ---
 
 ## 索引队列与进度查询
@@ -153,7 +164,7 @@ curl "http://localhost:8000/api/search?q=登录&project_id=my-repo&top_k=10"
 
 - **status**：`queued` / `running` / `succeeded` / `failed` / `cancelled`
 - **progress**：0-100
-- **step**：阶段名（如 `clone_or_pull` / `parse_functions` / `upsert_vector_store`）
+- **step**：阶段名（如 `clone_or_pull` / `parse_functions` / `generate_wiki` / `upsert_vector_store`）
 - **message**：更友好的中文阶段说明
 
 ---
@@ -177,6 +188,11 @@ curl "http://localhost:8000/api/search?q=登录&project_id=my-repo&top_k=10"
 | `OLLAMA_BASE_URL` | Ollama 地址（默认 `http://host.docker.internal:11434`，便于容器访问宿主机 Ollama；按实际环境调整） |
 | `EMBED_MODEL` | Ollama embedding 模型名（如 `nomic-embed-text`、`mxbai-embed-large`）。**更换模型后需清空 `DATA_DIR/chroma` 并重新索引**（向量维度会变） |
 | `SKIP_VECTOR_STORE` | 设为 `1` 时只跑 clone/解析/（可选 LLM），不写入 Chroma（用于本地验证流程） |
+| `WIKI_ENABLED` | `false` / `0` 关闭索引结束后的 MkDocs Wiki 生成（默认开启） |
+| `SKIP_WIKI` | `1` 跳过 Wiki（不改变 `WIKI_ENABLED` 配置） |
+| `WIKI_KEEP_WORK` | `1` 保留 `wiki_work/<project_id>` 中间目录 |
+| `WIKI_MAX_FILE_PAGES` | 最多为多少个路径单独生成文件说明页（默认 `5000`） |
+| `WIKI_SYMBOL_ROWS_PER_FILE` | 符号索引每个 Markdown 表格最大行数（默认 `4000`） |
 
 ### LLM 优先级（只会选一个）
 
@@ -197,6 +213,7 @@ curl "http://localhost:8000/api/search?q=登录&project_id=my-repo&top_k=10"
 - **仓库镜像**：`DATA_DIR/repos/<project_id>/...`
 - **向量库**：`DATA_DIR/chroma/`
 - **索引任务 DB**：`DATA_DIR/index_jobs.sqlite3`
+- **静态 Wiki**：`DATA_DIR/wiki_sites/<project_id>/site/`（及 `manifest.json`；中间文件默认在 `wiki_work/` 构建后删除）
 
 ---
 

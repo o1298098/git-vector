@@ -1,4 +1,6 @@
 from pathlib import Path
+
+from pydantic import Field
 from pydantic_settings import BaseSettings
 
 
@@ -18,6 +20,10 @@ class Settings(BaseSettings):
     data_dir: str = "./data"
     # 文本嵌入模型（需为 fastembed TextEmbedding 支持列表中的模型，如 intfloat/multilingual-e5-large）
     embed_model: str = "intfloat/multilingual-e5-large"
+    # 索引成功后是否生成 MkDocs 静态 Wiki（见 README）
+    wiki_enabled: bool = True
+    wiki_max_file_pages: int = 5000
+    wiki_symbol_rows_per_file: int = 4000
 
     @property
     def data_path(self) -> Path:
