@@ -2,13 +2,11 @@
 """
 测试 iot-frontend 仓库能否解析出函数级 chunk。
 用法（项目根目录）：python scripts/test_parse_iot.py
-私有仓库时需在 .env 中配置 GITLAB_ACCESS_TOKEN。
+私有仓库时需在 .env 中配置 GITLAB_ACCESS_TOKEN 或 GIT_HTTPS_TOKEN。
 """
 import logging
 import os
 import sys
-from urllib.parse import urlparse
-
 # 本地：仓库根/backend；容器内：WORKDIR 为含 app 包的目录（如 /app）
 _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 for _base in (os.path.join(_root, "backend"), _root):
@@ -28,14 +26,11 @@ PROJECT_ID = "o1298098/iot-frontend"
 
 
 def main():
-    from app.config import settings
     from app.indexer import clone_or_pull, collect_code_files, _repo_dir
     from app.code_parser import parse_files, _get_parser
+    from app.job_queue import build_repo_url_for_clone
 
-    repo_url = REPO_URL
-    if getattr(settings, "gitlab_access_token", None) and "http" in repo_url:
-        u = urlparse(repo_url)
-        repo_url = f"{u.scheme}://oauth2:{settings.gitlab_access_token}@{u.netloc}{u.path}"
+    repo_url = build_repo_url_for_clone(REPO_URL)
 
     if os.environ.get("SKIP_CLONE") == "1":
         repo_path = _repo_dir(PROJECT_ID)

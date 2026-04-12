@@ -21,7 +21,11 @@ from app.content_locale import (
     index_parse_progress_msg,
     index_progress_messages,
 )
-from app.effective_settings import effective_content_language, effective_gitlab_access_token
+from app.effective_settings import (
+    effective_content_language,
+    effective_git_https_token,
+    effective_git_https_username,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -72,10 +76,10 @@ def build_repo_url_for_clone(clean_repo_url: str) -> str:
     执行 clone/pull 时再注入 token。
     仅当：
     - clean_repo_url 为 http(s)
-    - effective_gitlab_access_token() 有值（含界面覆盖与环境变量）
+    - effective_git_https_token() 有值（GIT_HTTPS_TOKEN 或 GITLAB_ACCESS_TOKEN / 界面覆盖）
     - URL 本身不包含 userinfo
     """
-    token = (effective_gitlab_access_token() or "").strip()
+    token = (effective_git_https_token() or "").strip()
     if not token:
         return clean_repo_url
     try:
@@ -93,11 +97,13 @@ def build_repo_url_for_clone(clean_repo_url: str) -> str:
     netloc = host
     if u.port:
         netloc = f"{host}:{u.port}"
-    # token 可能包含特殊字符（如 @、:、/），必须 URL 编码，否则会被解析截断导致鉴权失败
+    # token / 用户名可能含特殊字符，须编码
+    user = (effective_git_https_username() or "oauth2").strip() or "oauth2"
+    user_enc = quote(user, safe="")
     token_enc = quote(token, safe="")
-    netloc = f"oauth2:{token_enc}@{netloc}"
+    netloc = f"{user_enc}:{token_enc}@{netloc}"
 
-    # GitLab HTTPS clone 通常兼容不带 .git，但某些环境会因重定向/策略导致鉴权异常；这里做一次保守补齐
+    # 多数托管方 HTTPS clone 兼容不带 .git；补全 .git 可减少重定向/鉴权边界问题
     path = u.path or ""
     if path and not path.endswith(".git"):
         path = path + ".git"

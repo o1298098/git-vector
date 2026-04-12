@@ -21,7 +21,15 @@ def _dotenv_files() -> tuple[str, ...]:
 
 class Settings(BaseSettings):
     gitlab_webhook_secret: str = ""
+    # GitHub：仓库 Webhooks → Secret；验签头 X-Hub-Signature-256（未设置则跳过验签）
+    github_webhook_secret: str = ""
+    # Gitea：与 GitHub 类似，验签头 X-Gitea-Signature（body 的 HMAC-SHA256 十六进制；未设置则跳过）
+    gitea_webhook_secret: str = ""
     gitlab_access_token: str = ""
+    # 优先于 GITLAB_ACCESS_TOKEN：任意 Git 托管的 HTTPS 克隆令牌（PAT 等）
+    git_https_token: str = ""
+    # HTTPS 克隆时的用户名；默认 oauth2（GitLab）；GitHub 常用 x-access-token
+    git_https_username: str = ""
     # 概览「打开仓库」无任务记录时的兜底：与 project_id（path/with/namespace）拼接，如 https://gitlab.com
     gitlab_external_url: str = ""
     # 索引 / Wiki 中 LLM 生成说明的语言：zh | en（默认中文）

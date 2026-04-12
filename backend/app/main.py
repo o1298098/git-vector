@@ -38,8 +38,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="GitLab 代码分析服务",
-    description="GitLab Push → 自动索引 → 生成功能说明 → 向量库 → Dify 查询",
+    title="Git 代码索引服务",
+    description="Git 托管 Webhook 或手动触发 → 索引 → 向量库 → 检索 / 对话",
     lifespan=lifespan,
 )
 
@@ -128,7 +128,12 @@ def root():
         "service": "gitlab-vetor",
         "docs": "/docs",
         "admin": "/admin/",
-        "webhook": "POST /webhook/gitlab",
+        "webhooks": [
+            "POST /webhook/gitlab",
+            "POST /webhook/github",
+            "POST /webhook/gitea",
+        ],
+        "webhook_trigger": "POST /webhook/trigger",
         "query": "POST /api/query",
         "code_chat": "POST /api/code-chat",
         "code_chat_stream": "POST /api/code-chat/stream",

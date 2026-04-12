@@ -13,8 +13,8 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      "/api": { target: "http://192.168.100.186:7777", changeOrigin: true },
-      "/wiki": { target: "http://192.168.100.186:7777", changeOrigin: true },
+      "/api": { target: "http://127.0.0.1:8000", changeOrigin: true },
+      "/wiki": { target: "http://127.0.0.1:8000", changeOrigin: true },
     },
   },
 });

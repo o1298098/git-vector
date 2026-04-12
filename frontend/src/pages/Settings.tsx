@@ -32,6 +32,7 @@ type FormState = {
   azure_openai_version: string;
   azure_openai_deployment: string;
   gitlab_access_token: string;
+  git_https_username: string;
   wiki_enabled: boolean;
   wiki_backend: string;
   wiki_max_file_pages: string;
@@ -52,6 +53,7 @@ const EMPTY_FORM: FormState = {
   azure_openai_version: "",
   azure_openai_deployment: "",
   gitlab_access_token: "",
+  git_https_username: "",
   wiki_enabled: true,
   wiki_backend: "mkdocs",
   wiki_max_file_pages: "5000",
@@ -88,6 +90,7 @@ function respToForm(resp: SettingsResponse): FormState {
     azure_openai_version: str("azure_openai_version"),
     azure_openai_deployment: str("azure_openai_deployment"),
     gitlab_access_token: fields.gitlab_access_token?.value === "***" ? "" : str("gitlab_access_token"),
+    git_https_username: str("git_https_username"),
     wiki_enabled: wikiBool,
     wiki_backend: str("wiki_backend") || "mkdocs",
     wiki_max_file_pages: str("wiki_max_file_pages") || "5000",
@@ -117,6 +120,7 @@ function buildPatch(
     "azure_openai_deployment",
     "wiki_backend",
     "npm_registry",
+    "git_https_username",
   ];
   for (const k of keys) {
     if (a[k] !== b[k]) p[k] = b[k];
@@ -398,7 +402,8 @@ export function Settings() {
                     <CardDescription>{t("settings.gitlabDesc")}</CardDescription>
                   </CardHeader>
                   <CardContent className="space-y-5 p-4 pt-6 sm:p-6">
-                    {row("gitlab_access_token", "gitlab_access_token", undefined, { secret: true })}
+                    {row("gitlab_access_token", t("settings.gitTokenLabel"), t("settings.gitTokenHint"), { secret: true })}
+                    {row("git_https_username", t("settings.gitHttpsUsername"), t("settings.gitHttpsUsernameHint"))}
                   </CardContent>
                 </Card>
               </section>
