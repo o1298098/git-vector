@@ -1,9 +1,19 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { ChevronLeft, ChevronRight, ExternalLink, MessageCircle, Search } from "lucide-react";
+import { ChevronLeft, ChevronRight, ExternalLink, MessageCircle, Search, Trash2 } from "lucide-react";
 import { apiJson } from "@/lib/api";
 import { safeProjectId } from "@/lib/projectId";
-import { Button } from "@/components/ui/button";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import {
@@ -17,7 +27,21 @@ import {
 import { cn } from "@/lib/utils";
 import { useI18n } from "@/i18n/I18nContext";
 
-type ProjectRow = { project_id: string; doc_count: number; project_name?: string | null; repo_url?: string | null };
+type ProjectRow = {
+  project_id: string;
+  doc_count: number;
+  project_name?: string | null;
+  created_at?: string | null;
+  repo_url?: string | null;
+};
+
+function formatProjectCreatedAt(iso: string | null | undefined): string {
+  const s = (iso ?? "").trim();
+  if (!s) return "";
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) return s;
+  return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(d);
+}
 
 const PAGE_SIZES = [10, 20, 50] as const;
 const SEARCH_DEBOUNCE_MS = 350;
@@ -35,6 +59,8 @@ export function Dashboard() {
   const [searchInput, setSearchInput] = useState("");
   const [debouncedQ, setDebouncedQ] = useState("");
   const [err, setErr] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<ProjectRow | null>(null);
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize) || 1);
 
@@ -79,6 +105,22 @@ export function Dashboard() {
   function onPageSizeChange(n: number) {
     setPageSize(n);
     setPage(0);
+  }
+
+  async function performDelete(p: ProjectRow) {
+    setDeletingId(p.project_id);
+    setErr(null);
+    try {
+      await apiJson<{ ok?: boolean }>(
+        `/api/projects/${encodeURIComponent(p.project_id)}`,
+        { method: "DELETE" },
+      );
+      await load();
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : t("dashboard.deleteFail"));
+    } finally {
+      setDeletingId(null);
+    }
   }
 
   return (
@@ -168,37 +210,59 @@ export function Dashboard() {
             />
           </div>
 
-          <Table>
+          <Table className="table-fixed">
+            <colgroup>
+              <col className="w-60" />
+              <col />
+              <col className="w-44" />
+              <col className="w-20" />
+              <col className="w-36" />
+              <col className="w-36" />
+              <col className="w-24" />
+            </colgroup>
             <TableHeader>
               <TableRow>
-                <TableHead>{t("dashboard.colProjectId")}</TableHead>
-                <TableHead>{t("dashboard.colProjectName")}</TableHead>
-                <TableHead className="text-right">{t("dashboard.colVectors")}</TableHead>
-                <TableHead className="w-[120px]">{t("dashboard.colRepo")}</TableHead>
-                <TableHead className="w-[200px]">{t("dashboard.colWiki")}</TableHead>
+                <TableHead className="align-middle">{t("dashboard.colProjectId")}</TableHead>
+                <TableHead className="min-w-0 align-middle">{t("dashboard.colProjectName")}</TableHead>
+                <TableHead className="whitespace-nowrap align-middle">{t("dashboard.colCreatedAt")}</TableHead>
+                <TableHead className="whitespace-nowrap text-right align-middle">{t("dashboard.colVectors")}</TableHead>
+                <TableHead className="align-middle">{t("dashboard.colRepo")}</TableHead>
+                <TableHead className="align-middle">{t("dashboard.colWiki")}</TableHead>
+                <TableHead className="whitespace-nowrap text-center align-middle">{t("dashboard.colActions")}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {projects.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={5} className="text-muted-foreground">
+                  <TableCell colSpan={7} className="text-muted-foreground">
                     {debouncedQ ? t("dashboard.emptyFiltered") : t("dashboard.empty")}
                   </TableCell>
                 </TableRow>
               ) : (
-                projects.map((p) => (
+                projects.map((p) => {
+                  const displayName = p.project_name?.trim() ? p.project_name : t("dashboard.dash");
+                  return (
                   <TableRow key={p.project_id}>
-                    <TableCell className="font-mono text-sm">{p.project_id}</TableCell>
-                    <TableCell className="text-sm text-muted-foreground">
-                      {p.project_name?.trim() ? p.project_name : t("dashboard.dash")}
+                    <TableCell className="font-mono text-sm">
+                      <span className="block truncate" title={p.project_id}>
+                        {p.project_id}
+                      </span>
                     </TableCell>
-                    <TableCell className="text-right">{p.doc_count}</TableCell>
+                    <TableCell className="min-w-0 text-sm text-muted-foreground">
+                      <span className="block truncate" title={displayName === t("dashboard.dash") ? undefined : displayName}>
+                        {displayName}
+                      </span>
+                    </TableCell>
+                    <TableCell className="whitespace-nowrap text-sm text-muted-foreground">
+                      {formatProjectCreatedAt(p.created_at) || t("dashboard.dash")}
+                    </TableCell>
+                    <TableCell className="whitespace-nowrap text-right tabular-nums">{p.doc_count}</TableCell>
                     <TableCell>
                       {p.repo_url ? (
-                        <Button variant="outline" size="sm" asChild>
+                        <Button variant="outline" size="sm" className="h-8 w-full max-w-full justify-center gap-1 px-2" asChild>
                           <a href={p.repo_url} target="_blank" rel="noreferrer">
-                            {t("dashboard.openRepo")}
-                            <ExternalLink className="size-3" />
+                            <span className="truncate">{t("dashboard.openRepo")}</span>
+                            <ExternalLink className="size-3 shrink-0" />
                           </a>
                         </Button>
                       ) : (
@@ -206,15 +270,29 @@ export function Dashboard() {
                       )}
                     </TableCell>
                     <TableCell>
-                      <Button variant="outline" size="sm" asChild>
+                      <Button variant="outline" size="sm" className="h-8 w-full max-w-full justify-center gap-1 px-2" asChild>
                         <a href={`/wiki/${safeProjectId(p.project_id)}/site/`} target="_blank" rel="noreferrer">
-                          {t("dashboard.openWiki")}
-                          <ExternalLink className="size-3" />
+                          <span className="truncate">{t("dashboard.openWiki")}</span>
+                          <ExternalLink className="size-3 shrink-0" />
                         </a>
                       </Button>
                     </TableCell>
+                    <TableCell className="text-center">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className="size-9 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                        disabled={deletingId !== null}
+                        aria-label={`${t("dashboard.delete")}: ${p.project_id}`}
+                        onClick={() => setDeleteTarget(p)}
+                      >
+                        <Trash2 className={cn("size-4", deletingId === p.project_id && "opacity-40")} />
+                      </Button>
+                    </TableCell>
                   </TableRow>
-                ))
+                  );
+                })
               )}
             </TableBody>
           </Table>
@@ -269,6 +347,39 @@ export function Dashboard() {
           </div>
         </CardContent>
       </Card>
+
+      <AlertDialog
+        open={deleteTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setDeleteTarget(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("dashboard.deleteDialogTitle")}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {deleteTarget
+                ? t("dashboard.deleteConfirm", {
+                    id: (deleteTarget.project_name ?? "").trim() || deleteTarget.project_id,
+                  })
+                : "\u00a0"}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deletingId !== null}>{t("dashboard.deleteCancel")}</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={deletingId !== null}
+              className={cn(buttonVariants({ variant: "destructive" }))}
+              onClick={() => {
+                const target = deleteTarget;
+                if (target) void performDelete(target);
+              }}
+            >
+              {deletingId !== null ? "…" : t("dashboard.delete")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

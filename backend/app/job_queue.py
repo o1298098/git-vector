@@ -348,6 +348,24 @@ class JobStore:
             out[pid] = str(r["repo_url"] or "").strip()
         return out
 
+    def earliest_job_created_at_by_project_id(self) -> dict[str, str]:
+        """每个 project_id 最早一条索引任务的 created_at（ISO 文本），近似「首次入队/创建」时间。"""
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT project_id, MIN(created_at) AS first_at
+                FROM index_jobs
+                GROUP BY project_id
+                """
+            ).fetchall()
+        out: dict[str, str] = {}
+        for r in rows:
+            pid = str(r["project_id"] or "")
+            at = str(r["first_at"] or "").strip()
+            if pid and at:
+                out[pid] = at
+        return out
+
     def reset_running_jobs_on_startup(self) -> int:
         with self._lock:
             rows = self._conn.execute("SELECT job_id FROM index_jobs WHERE status='running'").fetchall()

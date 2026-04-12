@@ -87,6 +87,34 @@ def _read_project_index_from_db() -> list[dict[str, Any]]:
             conn.close()
 
 
+def _project_index_row_exists(project_id: str) -> bool:
+    db_path = _project_index_db_path()
+    with _project_index_db_lock:
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        try:
+            _init_project_index_db(conn)
+            row = conn.execute(
+                "SELECT 1 AS ok FROM project_index WHERE project_id=? LIMIT 1",
+                (project_id,),
+            ).fetchone()
+            return row is not None
+        finally:
+            conn.close()
+
+
+def _delete_project_index_row(project_id: str) -> None:
+    db_path = _project_index_db_path()
+    with _project_index_db_lock:
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        try:
+            _init_project_index_db(conn)
+            conn.execute("DELETE FROM project_index WHERE project_id=?", (project_id,))
+            conn.commit()
+        finally:
+            conn.close()
+
+
 def _upsert_project_index_in_db(project_id: str, doc_count: int, project_name: str = "") -> None:
     pname = (project_name or "").strip()
     now = _utc_now_iso()
@@ -370,6 +398,33 @@ class VectorStore:
             return {"project_id": pid, "indexed": True, "doc_count": 0}
 
         return {"project_id": pid, "indexed": True, "doc_count": doc_count}
+
+    def purge_project(self, project_id: str) -> dict[str, Any]:
+        """
+        删除该项目在 Chroma 中的全部向量，并移除 project_index 缓存行。
+
+        返回 removed_docs：删除前统计的条数；had_vectors_or_cache：删除前是否在库中有向量或缓存行。
+        """
+        pid = str(project_id).strip()
+        if not pid:
+            raise ValueError("project_id 不能为空")
+        doc_count = 0
+        try:
+            full = self.collection.get(where={"project_id": pid}, include=[])
+            doc_count = len(full.get("ids") or [])
+        except Exception as e:  # noqa: S110
+            logger.warning("purge_project: count failed for %s: %s", pid, e)
+        had_row = _project_index_row_exists(pid)
+        try:
+            self.collection.delete(where={"project_id": pid})
+        except Exception as e:  # noqa: S110
+            logger.warning("purge_project: chroma delete failed for %s: %s", pid, e)
+        _delete_project_index_row(pid)
+        return {
+            "project_id": pid,
+            "removed_docs": doc_count,
+            "had_vectors_or_cache": doc_count > 0 or had_row,
+        }
 
     def _sanitize_metadata(self, meta: dict[str, Any]) -> dict[str, Any]:
         """

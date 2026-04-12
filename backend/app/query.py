@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import Annotated, Optional
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
+from app.auth_ui import require_ui_session
 from app.config import settings
 
 router = APIRouter()
@@ -56,12 +57,13 @@ def _repo_url_for_browser(raw: str, project_id: str) -> str | None:
 
 
 def _enrich_projects_from_jobs(projects: list[dict]) -> None:
-    """合并任务表中的展示名、仓库地址（供概览跳转 GitLab）。"""
+    """合并任务表中的展示名、仓库地址、创建时间（供概览跳转 GitLab）。"""
     from app.job_queue import get_job_store
 
     store = get_job_store()
     job_names = store.latest_project_name_by_project_id()
     job_urls = store.latest_repo_url_by_project_id()
+    job_created = store.earliest_job_created_at_by_project_id()
     for p in projects:
         pid = str(p.get("project_id", ""))
         cached = str(p.get("project_name", "") or "").strip()
@@ -70,6 +72,8 @@ def _enrich_projects_from_jobs(projects: list[dict]) -> None:
         p["project_name"] = name if name else None
         raw_repo = (job_urls.get(pid) or "").strip()
         p["repo_url"] = _repo_url_for_browser(raw_repo, pid)
+        first_at = (job_created.get(pid) or "").strip()
+        p["created_at"] = first_at if first_at else None
 
 
 @router.get("/projects")
@@ -88,6 +92,8 @@ def list_projects(
     - 传入 ``limit``：分页返回，响应含 ``total``（过滤后总数）、``limit``、``offset``。
     - 每项含 ``project_name``：索引时传入的展示名（或最近一次任务中的名称），可能为 ``null``。
     - 每项含 ``repo_url``：可在浏览器打开的仓库页地址；无则 ``null``（可配置 ``GITLAB_EXTERNAL_URL`` 兜底）。
+    - 每项含 ``created_at``：该项目在任务表中最早一条索引任务的创建时间（ISO 8601）；无任务记录则为 ``null``。
+    - 返回顺序：按 ``created_at`` **降序**（新的在前）；无创建时间的项目排在最后，其次按 ``project_id`` 升序。
     """
     from app.vector_store import get_vector_store
 
@@ -102,6 +108,9 @@ def list_projects(
             if needle in str(p.get("project_id", "")).lower()
             or needle in str(p.get("project_name") or "").lower()
         ]
+    # 创建时间新的在前；无任务时间时靠后；同一时间按 project_id 稳定排序
+    projects.sort(key=lambda p: str(p.get("project_id", "")))
+    projects.sort(key=lambda p: p.get("created_at") or "", reverse=True)
     total = len(projects)
     if limit is not None:
         lim = int(limit)
@@ -114,6 +123,39 @@ def list_projects(
             "projects": page,
         }
     return {"total": total, "projects": projects}
+
+
+@router.delete("/projects/{project_id:path}")
+def delete_project(
+    project_id: str,
+    _user: Annotated[Optional[str], Depends(require_ui_session)],
+):
+    """
+    从向量库移除指定项目的全部检索数据，并删除本机已生成的 Wiki 站点目录。
+
+    - 与 ``GET /api/projects`` 使用相同的 ``project_id``（可含 ``/`` 等字符）。
+    - 索引任务表中的历史记录**不会**删除。
+    - 若未启用管理登录（未设置 ``ADMIN_PASSWORD``），本接口与入队接口一样不校验令牌；
+      启用后需携带与设置页相同的 Bearer。
+    """
+    from app.vector_store import get_vector_store
+    from app.wiki_generator import remove_project_wiki_artifacts
+
+    try:
+        store = get_vector_store()
+        r = store.purge_project(project_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    wiki_removed = remove_project_wiki_artifacts(r["project_id"])
+    if not r["had_vectors_or_cache"] and not wiki_removed:
+        raise HTTPException(status_code=404, detail="未找到该项目或未建立索引")
+    return {
+        "ok": True,
+        "project_id": r["project_id"],
+        "removed_docs": r["removed_docs"],
+        "wiki_removed": wiki_removed,
+    }
+
 
 @router.get("/search")
 def search(

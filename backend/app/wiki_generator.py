@@ -1103,3 +1103,18 @@ def wiki_manifest(project_id: str) -> dict[str, Any] | None:
         return json.loads(p.read_text(encoding="utf-8"))
     except Exception:
         return None
+
+
+def remove_project_wiki_artifacts(project_id: str) -> bool:
+    """
+    删除 data/wiki_sites 与 data/wiki_work 下该项目的目录（与 generate_project_wiki 输出路径一致）。
+    返回删除前是否至少存在一个目录。
+    """
+    safe = _safe_project_id(project_id)
+    existed = False
+    for sub in ("wiki_sites", "wiki_work"):
+        p = settings.data_path / sub / safe
+        if p.exists():
+            existed = True
+            shutil.rmtree(p, ignore_errors=True)
+    return existed

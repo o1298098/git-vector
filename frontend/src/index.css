@@ -402,9 +402,13 @@
 }
 
 @layer base {
-  /* 避免「有/无纵向滚动条」时视口宽度差一截，顶栏与内容左右跳动 */
+  /*
+   * 不使用 scrollbar-gutter: stable：与 Radix Dialog / react-remove-scroll 在弹层打开时
+   * 「保留滚动条占位 + padding-right」叠在一起，容易挤出横向溢出并在窗口右侧出现多余纵向滚动条。
+   * 横向溢出裁掉，纵向仍交给文档流；弹层由 remove-scroll 自行处理锁定。
+   */
   html {
-    scrollbar-gutter: stable;
+    overflow-x: hidden;
   }
   * {
     @apply border-border;
