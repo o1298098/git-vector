@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type SetStateAction } from "react";
 import { apiFetch, apiJson } from "@/lib/api";
+import { randomId } from "@/lib/randomId";
 import {
   type ChatSession,
   createChatSession,
@@ -303,8 +304,8 @@ export function useCodeChat() {
       const trimmed = text.trim();
       if (!trimmed || loading) return;
       setEditingUserId(null);
-      const uid = crypto.randomUUID();
-      const aid = crypto.randomUUID();
+      const uid = randomId();
+      const aid = randomId();
       setTurns((prev) => [...prev, { id: uid, role: "user", content: trimmed }]);
       await streamAssistant(trimmed, aid);
     },
@@ -321,7 +322,7 @@ export function useCodeChat() {
         if (i < 0 || prev[i].role !== "user") return prev;
         return [...prev.slice(0, i), { ...prev[i], content: trimmed }];
       });
-      void streamAssistant(trimmed, crypto.randomUUID());
+      void streamAssistant(trimmed, randomId());
     },
     [loading, streamAssistant, setTurns],
   );
@@ -340,7 +341,7 @@ export function useCodeChat() {
         return prev.slice(0, j);
       });
       if (!userMsg) return;
-      void streamAssistant(userMsg, crypto.randomUUID());
+      void streamAssistant(userMsg, randomId());
     },
     [loading, streamAssistant, setTurns],
   );

@@ -1,5 +1,7 @@
 /** 代码问答页：浏览器本地多会话存储（localStorage） */
 
+import { randomId } from "@/lib/randomId";
+
 export const CODE_CHAT_STORAGE_KEY = "gv_code_chat_sessions_v1";
 
 const STORAGE_VERSION = 1 as const;
@@ -42,7 +44,7 @@ let emptyBootstrap: { sessions: ChatSession[]; activeId: string } | null = null;
 
 export function createChatSession(): ChatSession {
   return {
-    id: crypto.randomUUID(),
+    id: randomId(),
     title: "",
     updatedAt: Date.now(),
     projectId: "",
