@@ -26,7 +26,10 @@ export function CodeChatHistoryCard({
   const { t } = useI18n();
   return (
     <section
-      className={cn("flex min-h-0 min-w-0 flex-1 flex-col gap-3 px-3 py-3 sm:px-3.5 sm:py-3.5", className)}
+      className={cn(
+        "flex h-full min-h-0 min-w-0 flex-1 flex-col gap-3 px-3 py-3 sm:px-3.5 sm:py-3.5",
+        className,
+      )}
       aria-labelledby="code-chat-history-heading"
     >
       <h2 id="code-chat-history-heading" className="sr-only">
@@ -41,7 +44,10 @@ export function CodeChatHistoryCard({
         <Plus className="size-3.5 shrink-0 opacity-70" aria-hidden />
         {t("chat.newChat")}
       </Button>
-      <ul className="min-h-0 min-w-0 flex-1 space-y-1 overflow-y-auto overflow-x-hidden overscroll-contain" role="list">
+      <ul
+        className="min-h-0 min-w-0 flex-1 basis-0 space-y-1 overflow-y-auto overflow-x-hidden overscroll-contain"
+        role="list"
+      >
         {sortedSessions.map((s) => {
           const label = s.title.trim() || t("chat.newChat");
           const isActive = s.id === activeId;

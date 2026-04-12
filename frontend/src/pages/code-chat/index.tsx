@@ -45,9 +45,9 @@ export function CodeChat() {
   });
 
   return (
-    <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden lg:flex-row">
+    <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden lg:flex-row lg:items-stretch lg:min-h-0">
       <aside
-        className="order-2 flex min-h-[120px] max-h-[32vh] w-full shrink-0 flex-col border-t border-border bg-muted/55 dark:border-border dark:bg-muted/30 lg:order-none lg:h-full lg:max-h-none lg:w-[14rem] lg:min-h-0 lg:border-t-0 lg:border-r"
+        className="order-2 flex min-h-[120px] max-h-[32vh] w-full shrink-0 flex-col border-t border-border bg-muted/55 dark:border-border dark:bg-muted/30 lg:order-none lg:h-auto lg:max-h-none lg:min-h-0 lg:w-[14rem] lg:shrink-0 lg:self-stretch lg:border-t-0 lg:border-r"
         aria-label={t("chat.sidebarAria")}
       >
         <CodeChatHistoryCard
