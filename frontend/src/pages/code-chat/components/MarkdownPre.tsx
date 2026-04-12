@@ -1,16 +1,27 @@
 import { useCallback, useMemo, useState } from "react";
 import type { ComponentProps } from "@ant-design/x-markdown";
 import { Check, Code2, Copy } from "lucide-react";
+import type { ChildNode } from "domhandler";
+import { ElementType } from "domelementtype";
 import type { DOMNode, Element as ParserElement } from "html-react-parser";
 import { useI18n } from "@/i18n/I18nContext";
 import { highlightMarkdownCode } from "@/lib/highlightMarkdownCode";
 import { cn } from "@/lib/utils";
 
-function domTextContent(node: DOMNode | undefined): string {
+/** 从 html-react-parser / domhandler 节点取纯文本（含 CDATA 等子类型） */
+function domTextContent(node: ChildNode | undefined | null): string {
   if (!node) return "";
-  if (node.type === "text") return node.data ?? "";
-  if (node.type === "tag" && node.children?.length) {
-    return node.children.map((c) => domTextContent(c)).join("");
+  if (node.type === ElementType.Text || node.type === ElementType.Comment || node.type === ElementType.Directive) {
+    return "data" in node ? (node.data ?? "") : "";
+  }
+  if (
+    node.type === ElementType.Tag ||
+    node.type === ElementType.Script ||
+    node.type === ElementType.Style ||
+    node.type === ElementType.Root ||
+    node.type === ElementType.CDATA
+  ) {
+    return node.children?.length ? node.children.map((c) => domTextContent(c)).join("") : "";
   }
   return "";
 }
