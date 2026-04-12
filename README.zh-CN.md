@@ -31,6 +31,7 @@
 | `backend/requirements.txt` | 后端依赖 |
 | `frontend/` | React + Vite 管理端（构建产物由后端挂载在 `/admin/`） |
 | `docs/images/` | README 配图 |
+| `LICENSE` | MIT 许可证全文 |
 | `scripts/` | 本地/容器内辅助脚本 |
 
 ---
@@ -302,3 +303,8 @@ cd frontend && npm install && npm run dev
 - 服务启动时会尝试启动索引队列 worker；向量库/embedding 相关对象通常在首次索引或首次查询时才会加载。
 - 看到日志 `No function-level chunks parsed ...; using file-level fallback` 表示函数级解析得到 0 条，已自动退化为文件级 chunk（检索仍可用，只是粒度变粗）。
 
+---
+
+## 许可
+
+本项目以 [MIT](LICENSE) 许可证发布。

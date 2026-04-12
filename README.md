@@ -31,6 +31,7 @@ Admin UI (`/admin/`): **Overview** with indexed projects, quick links, and **Sem
 | `backend/requirements.txt` | Backend dependencies |
 | `frontend/` | React + Vite admin UI (built assets served at `/admin/`) |
 | `docs/images/` | README screenshots |
+| `LICENSE` | MIT license |
 | `scripts/` | Helper scripts |
 
 ---
@@ -301,3 +302,9 @@ Notes:
 - When started from `backend/`, the default `DATA_DIR=./data` resolves to `backend/data/`; set `DATA_DIR=../data` in `.env` if you want data at the repository root.
 - On startup the service attempts to start the indexing queue worker; vector store/embedding objects are typically loaded on first index or first query.
 - If you see `No function-level chunks parsed ...; using file-level fallback`, parsing produced zero function chunks and the service fell back to file-level chunks (retrieval still works, but granularity is coarser).
+
+---
+
+## License
+
+[MIT](LICENSE)
