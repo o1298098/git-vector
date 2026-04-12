@@ -29,7 +29,7 @@ parse_functions: Tree-sitter function-level parsing (0 results → file-level fa
   ↓
 describe_chunks (optional): generate one-line descriptions via Dify / Azure OpenAI / OpenAI
   ↓
-generate_wiki: MkDocs Material static site (search index) under DATA_DIR/wiki_sites
+generate_wiki: static wiki (MkDocs / Starlight / VitePress) under DATA_DIR/wiki_sites
   ↓
 upsert_vector_store: embeddings → Chroma upsert
   ↓
@@ -144,14 +144,14 @@ Response shape:
 - **GET** `/api/projects`: list indexed projects and doc counts
 - **GET** `/api/project/index-status?project_id=xxx`: check whether a project is indexed (`indexed/doc_count`)
 
-### Static Wiki (MkDocs + site search)
+### Static Wiki (MkDocs / Starlight / VitePress)
 
-After `describe_chunks`, the worker runs **MkDocs Material** before vector upsert. Failures are logged only and do not block indexing. Output: `DATA_DIR/wiki_sites/<project_id>/site/`, served by the API.
+After `describe_chunks`, the worker runs a wiki build before vector upsert. Failures are logged only and do not block indexing. Default **`WIKI_BACKEND=mkdocs`** (Material, Python-only). **`starlight`** or **`vitepress`** need **Node.js + npm** (included in this repo’s Dockerfile; install them yourself on bare metal). The first build runs `npm install` under `wiki_work/<project_id>` (npm registry access required). Output: `DATA_DIR/wiki_sites/<project_id>/site/`, served by the API.
 
 - **Browse**: `http://<host>:8000/wiki/<project_id>/site/` (same `project_id` rules as under `repos/`)
-- **Metadata**: `GET /api/wiki/{project_id}` → last `manifest.json` (commit, timestamps, counts)
+- **Metadata**: `GET /api/wiki/{project_id}` → last `manifest.json` (includes `wiki_backend`, commit, timestamps, counts)
 
-Pages include overview, architecture (when an LLM is configured), file index, per-file symbol pages, and a symbol table (split into parts when large). The theme search box uses a prebuilt full-text index (no extra search service). On each symbol, **功能说明** shows only the **LLM-generated** one-line description from the indexing pipeline (same field as in the vector store); if the model is not configured or generation failed, a placeholder explains that. When a source docstring differs from that text, it appears separately under **源码文档**.
+Pages include overview, architecture (when an LLM is configured), file index (tree), per-file symbol pages, and a symbol table (split into parts when large). MkDocs uses Lunr search; Starlight/VitePress use built-in local search. On each symbol, **功能说明** shows only the **LLM-generated** one-line description from the indexing pipeline (same field as in the vector store); if the model is not configured or generation failed, a placeholder explains that. When a source docstring differs from that text, it appears separately under **源码文档**.
 
 ---
 
@@ -190,11 +190,13 @@ Key fields:
 | `OLLAMA_BASE_URL` | Ollama base URL (default `http://host.docker.internal:11434`; adjust for your setup) |
 | `EMBED_MODEL` | Ollama embedding model name (e.g. `nomic-embed-text`, `mxbai-embed-large`). **If you change the model, clear `DATA_DIR/chroma` and re-index** (dimension changes). |
 | `SKIP_VECTOR_STORE` | If `1`, runs clone/parse/(optional LLM) but skips Chroma upsert (useful for local validation). |
-| `WIKI_ENABLED` | `false` / `0` disables MkDocs wiki generation after describe (default: on). |
+| `WIKI_BACKEND` | `mkdocs` (default) / `starlight` / `vitepress` (last two need Node.js + npm; Docker image includes them). |
+| `WIKI_ENABLED` | `false` / `0` disables wiki generation after describe (default: on). |
 | `SKIP_WIKI` | `1` skips wiki for a run without changing `WIKI_ENABLED`. |
 | `WIKI_KEEP_WORK` | `1` keeps intermediate `wiki_work/<project_id>` for debugging. |
 | `WIKI_MAX_FILE_PAGES` | Max per-path file pages (default `5000`). |
 | `WIKI_SYMBOL_ROWS_PER_FILE` | Max symbol table rows per Markdown file (default `4000`). |
+| `NPM_REGISTRY` | Optional. When using `starlight` / `vitepress`, sets `npm_config_registry` for npm if non-empty. Or set **`npm_config_registry`** / **`NPM_CONFIG_REGISTRY`** in the environment (the uppercase form is mapped to `npm_config_registry` for subprocesses). |
 
 ### LLM priority (only one will be used)
 

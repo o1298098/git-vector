@@ -1,5 +1,7 @@
 """
-索引完成后生成 MkDocs Material 静态 Wiki（站内全文搜索），输出到 DATA_DIR/wiki_sites/<project_id>/site/。
+索引完成后生成静态 Wiki，输出到 DATA_DIR/wiki_sites/<project_id>/site/。
+
+后端由 WIKI_BACKEND 选择：mkdocs（Material，纯 Python）/ starlight / vitepress（需 Node.js）。
 """
 from __future__ import annotations
 
@@ -13,14 +15,16 @@ import shutil
 import subprocess
 import sys
 from collections import defaultdict
-from itertools import groupby
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from itertools import groupby
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from app.config import settings
+from app.wiki_node_build import build_starlight_site, build_vitepress_site
 from app.llm_client import get_llm_client
 
 logger = logging.getLogger(__name__)
@@ -37,6 +41,28 @@ TREE_MAX_LINES = 120
 MAX_CODE_IN_WIKI = 4000
 
 
+@dataclass(frozen=True)
+class WikiDocContext:
+    """写入各后端共用的 Markdown 时所需的上下文。"""
+
+    project_id: str
+    repo_path: Path
+    project_name: str
+    commit: str
+    generated_at: str
+    chunks: list[dict[str, Any]]
+    by_file: dict[str, list[dict[str, Any]]]
+    slug_map: dict[str, str]
+    ext_counts: dict[str, int]
+    readme: str
+    tree_text: str
+    page_title: str
+    site_title: str
+    h1_line: str
+    max_file_pages: int
+    rows_per: int
+
+
 def _safe_project_id(project_id: str) -> str:
     return "".join(c if c.isalnum() or c in "-_" else "_" for c in project_id)
 
@@ -48,6 +74,34 @@ def _safe_yaml_double_quoted_title(s: str) -> str:
 
 def _normalize_rel_path(p: str) -> str:
     return str(p).replace("\\", "/")
+
+
+def _wiki_link_to_file_page(
+    slug: str,
+    *,
+    mkdocs_style: bool,
+    anchor: str = "",
+    node_deploy_prefix: str | None = None,
+) -> str:
+    """
+    MkDocs：与源文件同在 docs/ 根下时用相对路径 files/<slug>.md。
+
+    Starlight/VitePress：构建结果为 files/<slug>/index.html。
+    - 相对链 `files/...` 在 file-index 下会错成 .../file-index/files/...
+    - 以 `/files/...` 开头会被浏览器当成「站点根」，在挂载于 /wiki/.../site/ 时变成 http://host/files/...（错）
+
+    因此非 MkDocs 时使用 **完整挂载前缀**（与 manifest browse_url_path 一致，如 /wiki/<id>/site/）拼接：
+    `{prefix}files/<slug>/`
+    """
+    frag = f"#{anchor}" if anchor else ""
+    if mkdocs_style:
+        return f"files/{slug}.md{frag}"
+    if not (node_deploy_prefix or "").strip():
+        raise ValueError("Starlight/VitePress 文件链需要 node_deploy_prefix（与 Wiki 挂载路径一致）")
+    base = node_deploy_prefix.strip()
+    if not base.endswith("/"):
+        base += "/"
+    return f"{base}files/{slug}/{frag}"
 
 
 def _git_head(repo_path: Path) -> str:
@@ -110,17 +164,35 @@ def _file_tree_insert(
     node.files[fname] = (slug, sym_count, has_page)
 
 
-def _render_file_tree_md(node: _DirNode, indent: int = 0) -> list[str]:
+def _render_file_tree_md(
+    node: _DirNode,
+    indent: int = 0,
+    *,
+    mkdocs_style_links: bool,
+    node_deploy_prefix: str | None,
+) -> list[str]:
     """嵌套无序列表，每级 4 空格缩进（与 Python-Markdown 嵌套列表兼容）。"""
     sp = "    " * indent
     lines: list[str] = []
     for dname in sorted(node.dirs.keys(), key=lambda x: x.lower()):
         lines.append(f"{sp}- **{dname}**")
-        lines.extend(_render_file_tree_md(node.dirs[dname], indent + 1))
+        lines.extend(
+            _render_file_tree_md(
+                node.dirs[dname],
+                indent + 1,
+                mkdocs_style_links=mkdocs_style_links,
+                node_deploy_prefix=node_deploy_prefix,
+            )
+        )
     for fname in sorted(node.files.keys(), key=lambda x: x.lower()):
         slug, cnt, has_page = node.files[fname]
         if has_page:
-            lines.append(f"{sp}- [{fname}](files/{slug}.md) — {cnt} 个符号")
+            href = _wiki_link_to_file_page(
+                slug,
+                mkdocs_style=mkdocs_style_links,
+                node_deploy_prefix=node_deploy_prefix,
+            )
+            lines.append(f"{sp}- [{fname}]({href}) — {cnt} 个符号")
         else:
             lines.append(
                 f"{sp}- `{fname}` — {cnt} 个符号（未生成单独页面，请用顶部搜索）"
@@ -131,6 +203,28 @@ def _render_file_tree_md(node: _DirNode, indent: int = 0) -> list[str]:
 def _symbol_anchor(kind: str, name: str) -> str:
     """与文件页标题锚点一致（不可写在 f-string 的 {{}} 内：正则含反斜杠会 SyntaxError）。"""
     return re.sub(r"[^a-zA-Z0-9\u4e00-\u9fff_-]+", "-", f"{kind}-{name}")[:80]
+
+
+def _html_escape(text: str) -> str:
+    return (
+        (text or "")
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def _file_symbol_heading(name: str, kind: str, anchor: str) -> str:
+    """
+    带稳定 id 的符号标题。Starlight 内容按 MDX 处理，`### ... {#id}` 中的 `{` 会触发 MDX 表达式导致构建失败；
+    故统一用 HTML 标题（MkDocs / VitePress 同样可用）。
+    """
+    return (
+        f'<h3 id="{_html_escape(anchor)}">'
+        f"<code>{_html_escape(name)}</code> — <code>{_html_escape(kind)}</code>"
+        f"</h3>"
+    )
 
 
 # 功能说明正文过长时截断（避免单页过大）
@@ -406,6 +500,8 @@ def _write_file_pages(
     by_file: dict[str, list[dict[str, Any]]],
     slug_map: dict[str, str],
     max_pages: int,
+    *,
+    use_pymdownx_admonitions: bool,
 ) -> None:
     files_dir = docs_dir / "files"
     files_dir.mkdir(parents=True, exist_ok=True)
@@ -416,13 +512,12 @@ def _write_file_pages(
         slug = slug_map[rel_path]
         path_norm = _normalize_rel_path(rel_path)
         ext = _ext_of(path_norm)
+        title_esc = _safe_yaml_double_quoted_title(path_norm)
+        desc_esc = _safe_yaml_double_quoted_title(f"文件 {path_norm} 内的符号与说明")
         lines: list[str] = [
             "---",
-            f'title: "{path_norm}"',
-            f'description: "文件 {path_norm} 内的符号与说明"',
-            f"tags:",
-            f"  - file",
-            f"  - ext-{ext or 'none'}",
+            f'title: "{title_esc}"',
+            f'description: "{desc_esc}"',
             "---",
             "",
             f"# `{path_norm}`",
@@ -441,7 +536,7 @@ def _write_file_pages(
             llm_desc = _wiki_llm_function_description(c)
             calls = c.get("calls") or []
             anchor = _symbol_anchor(kind, name)
-            lines.append(f"### `{name}` — `{kind}` {{#{anchor}}}")
+            lines.append(_file_symbol_heading(name, kind, anchor))
             lines.append("")
             lines.append("- **功能说明**（LLM 生成）:")
             lines.extend(_md_list_item_body(llm_desc))
@@ -459,7 +554,23 @@ def _write_file_pages(
                 snippet = code[:MAX_CODE_IN_WIKI]
                 if len(code) > MAX_CODE_IN_WIKI:
                     snippet += "\n\n/* … 已截断 … */"
-                lines.extend(["", "??? note \"代码摘录\"", "", "```text", snippet, "```", ""])
+                if use_pymdownx_admonitions:
+                    lines.extend(["", '??? note "代码摘录"', "", "```text", snippet, "```", ""])
+                else:
+                    lines.extend(
+                        [
+                            "",
+                            "<details>",
+                            "<summary>代码摘录</summary>",
+                            "",
+                            "```text",
+                            snippet,
+                            "```",
+                            "",
+                            "</details>",
+                            "",
+                        ]
+                    )
             lines.append("")
         (files_dir / f"{slug}.md").write_text("\n".join(lines), encoding="utf-8")
 
@@ -470,6 +581,9 @@ def _write_symbol_index_parts(
     slug_map: dict[str, str],
     rows_per_file: int,
     paths_with_file_page: set[str],
+    *,
+    mkdocs_style_links: bool,
+    node_deploy_prefix: str | None,
 ) -> list[str]:
     """按文件分组输出符号表（避免每行重复长路径导致表格过窄难读）；返回 nav 用的文件名列表。"""
     nav_names: list[str] = []
@@ -495,7 +609,6 @@ def _write_symbol_index_parts(
             "---",
             f'title: "{title}"',
             "description: 全量符号与所在文件",
-            "tags: [symbols, index]",
             "---",
             "",
             "# 符号索引",
@@ -513,7 +626,9 @@ def _write_symbol_index_parts(
             lines.append(f"## `{path_esc}`")
             lines.append("")
             if path_norm in paths_with_file_page:
-                lines.append(f"[打开该文件说明页](files/{slug}.md)")
+                lines.append(
+                    f"[打开该文件说明页]({_wiki_link_to_file_page(slug, mkdocs_style=mkdocs_style_links, node_deploy_prefix=node_deploy_prefix)})"
+                )
                 lines.append("")
             lines.append("| 符号 | 类型 | 行号 | 功能说明 |")
             lines.append("| --- | --- | --- | --- |")
@@ -525,7 +640,10 @@ def _write_symbol_index_parts(
                 row_line = f"{sl}-{el}" if el else str(sl)
                 desc = _escape_md_table_cell(_wiki_llm_function_description(c))
                 anchor = _symbol_anchor(kind, sym_name)
-                sym_cell = f"[`{_escape_md_table_cell(sym_name)}`](files/{slug}.md#{anchor})"
+                sym_cell = (
+                    f"[`{_escape_md_table_cell(sym_name)}`]("
+                    f"{_wiki_link_to_file_page(slug, mkdocs_style=mkdocs_style_links, anchor=anchor, node_deploy_prefix=node_deploy_prefix)})"
+                )
                 if path_norm not in paths_with_file_page:
                     sym_cell = f"`{_escape_md_table_cell(sym_name)}`"
                 lines.append(f"| {sym_cell} | `{kind}` | {row_line} | {desc} |")
@@ -534,68 +652,28 @@ def _write_symbol_index_parts(
     return nav_names
 
 
-def generate_project_wiki(
-    project_id: str,
-    repo_path: Path,
-    chunks: list[dict[str, Any]],
-    collected_files: list[tuple[str, str]] | None = None,
-    project_name: str = "",
-) -> dict[str, Any]:
+def _write_wiki_documentation(
+    docs_dir: Path,
+    ctx: WikiDocContext,
+    *,
+    use_pymdownx_admonitions: bool,
+    node_deploy_prefix: str | None = None,
+) -> list[str]:
+    """写入各后端共用的 Markdown；返回符号索引分卷文件名列表（用于侧栏）。
+
+    node_deploy_prefix：Starlight/VitePress 时传入与 FastAPI 挂载一致的 URL 前缀（如 /wiki/<safe>/site/），
+    用于正文内链到 files/<slug>/；MkDocs 时勿传。
     """
-    生成 MkDocs 源文件并执行 build。失败时抛出异常（由 indexer 捕获）。
-    project_name：可选展示名（如中文项目名），由触发接口或 Webhook 传入。
-    """
-    if not settings.wiki_enabled:
-        return {"skipped": True, "reason": "wiki_disabled"}
+    pname = (ctx.project_name or "").strip()
+    project_id = ctx.project_id
 
-    pname = (project_name or "").strip()
-    safe = _safe_project_id(project_id)
-    wiki_root = settings.data_path / "wiki_sites" / safe
-    work_dir = settings.data_path / "wiki_work" / safe
-    site_out = wiki_root / "site"
-
-    max_file_pages = int(os.environ.get("WIKI_MAX_FILE_PAGES") or getattr(settings, "wiki_max_file_pages", DEFAULT_MAX_FILE_PAGES))
-    rows_per = int(os.environ.get("WIKI_SYMBOL_ROWS_PER_FILE") or getattr(settings, "wiki_symbol_rows_per_file", DEFAULT_SYMBOL_ROWS_PER_FILE))
-
-    if work_dir.exists():
-        shutil.rmtree(work_dir, ignore_errors=True)
-    docs_dir = work_dir / "docs"
-    docs_dir.mkdir(parents=True, exist_ok=True)
-
-    commit = _git_head(repo_path)
-    generated_at = datetime.now(timezone.utc).isoformat()
-    tree_text = _build_directory_tree(repo_path)
-
-    by_file: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for c in chunks:
-        p = _normalize_rel_path(str(c.get("path", "")))
-        if p:
-            by_file[p].append(c)
-
-    slug_map: dict[str, str] = {p: _file_slug(p) for p in by_file}
-
-    # 统计扩展名
-    ext_counts: dict[str, int] = defaultdict(int)
-    for p in by_file:
-        ext_counts[_ext_of(p) or "none"] += 1
-
-    readme = _readme_excerpt(collected_files or [], limit=8000)
-
-    page_title = _safe_yaml_double_quoted_title(
-        f"{pname}（{project_id}）" if pname else f"项目 Wiki — {project_id}"
-    )
-    site_title = f"{pname} · {project_id}" if pname else f"Wiki — {project_id}"
-    h1_line = pname if pname else project_id
-
-    # 首页
     index_lines = [
         "---",
-        f'title: "{page_title}"',
+        f'title: "{ctx.page_title}"',
         "description: 代码索引与符号说明（自动生成）",
-        "tags: [index]",
         "---",
         "",
-        f"# {h1_line}",
+        f"# {ctx.h1_line}",
         "",
         "## 元数据",
         "",
@@ -611,10 +689,10 @@ def generate_project_wiki(
         index_lines.append(f"- **project_id**: `{project_id}`")
     index_lines.extend(
         [
-            f"- **Git 提交**: `{commit}`",
-            f"- **生成时间（UTC）**: {generated_at}",
-            f"- **符号/单元总数**: {len(chunks)}",
-            f"- **文件数（有符号）**: {len(by_file)}",
+            f"- **Git 提交**: `{ctx.commit}`",
+            f"- **生成时间（UTC）**: {ctx.generated_at}",
+            f"- **符号/单元总数**: {len(ctx.chunks)}",
+            f"- **文件数（有符号）**: {len(ctx.by_file)}",
             "",
             "## 语言 / 扩展名分布",
             "",
@@ -622,7 +700,7 @@ def generate_project_wiki(
             "| --- | --- |",
         ]
     )
-    for ext, cnt in sorted(ext_counts.items(), key=lambda x: -x[1])[:40]:
+    for ext, cnt in sorted(ctx.ext_counts.items(), key=lambda x: -x[1])[:40]:
         index_lines.append(f"| `{ext}` | {cnt} |")
     index_lines.extend(
         [
@@ -636,29 +714,46 @@ def generate_project_wiki(
             "",
         ]
     )
-    if readme:
-        index_lines.extend(["## README 摘录", "", readme, ""])
+    if ctx.readme:
+        index_lines.extend(["## README 摘录", "", ctx.readme, ""])
     (docs_dir / "index.md").write_text("\n".join(index_lines), encoding="utf-8")
 
-    arch = _architecture_markdown(project_id, repo_path, chunks, tree_text, project_name=pname)
-    (docs_dir / "architecture.md").write_text(arch, encoding="utf-8")
+    arch_body = _architecture_markdown(
+        project_id, ctx.repo_path, ctx.chunks, ctx.tree_text, project_name=pname
+    )
+    # Starlight 将文档按内容集合 + Zod 校验，title 必填；正文内重复的「一级标题」去掉以免与侧栏标题叠显。
+    arch_body = re.sub(r"^#\s*架构与功能总览\s*\n+", "", arch_body.lstrip(), count=1)
+    arch_title = _safe_yaml_double_quoted_title("架构与功能总览")
+    arch_desc = _safe_yaml_double_quoted_title(
+        "基于目录树与代码单元摘要的自动说明（可能含 LLM 生成内容）"
+    )
+    arch_doc = (
+        "---\n"
+        f'title: "{arch_title}"\n'
+        f'description: "{arch_desc}"\n'
+        "---\n\n"
+        + arch_body
+    )
+    (docs_dir / "architecture.md").write_text(arch_doc, encoding="utf-8")
 
-    sorted_file_items = sorted(by_file.items(), key=lambda x: x[0])
-    paths_with_file_page = {p for p, _ in sorted_file_items[:max_file_pages]}
+    sorted_file_items = sorted(ctx.by_file.items(), key=lambda x: x[0])
+    paths_with_file_page = {p for p, _ in sorted_file_items[: ctx.max_file_pages]}
 
-    # 文件索引：树状目录 + 可折叠的扁平表
     tree_root = _DirNode()
     for path_norm, syms in sorted_file_items:
-        slug = slug_map[path_norm]
+        slug = ctx.slug_map[path_norm]
         has_page = path_norm in paths_with_file_page
         _file_tree_insert(tree_root, path_norm, slug, len(syms), has_page)
-    tree_lines = _render_file_tree_md(tree_root)
-    overflow_files = len(by_file) - min(len(by_file), max_file_pages)
+    tree_lines = _render_file_tree_md(
+        tree_root,
+        mkdocs_style_links=use_pymdownx_admonitions,
+        node_deploy_prefix=node_deploy_prefix,
+    )
+    overflow_files = len(ctx.by_file) - min(len(ctx.by_file), ctx.max_file_pages)
     fi_lines = [
         "---",
         'title: "文件索引"',
         "description: 按路径浏览生成的文件说明页",
-        "tags: [files, index]",
         "---",
         "",
         "# 文件索引",
@@ -670,92 +765,250 @@ def generate_project_wiki(
     ]
     if overflow_files > 0:
         fi_lines.append(
-            f"超出单仓页面上限（`WIKI_MAX_FILE_PAGES={max_file_pages}`）的文件仍出现在上表中，"
+            f"超出单仓页面上限（`WIKI_MAX_FILE_PAGES={ctx.max_file_pages}`）的文件仍出现在上表中，"
             f"但**未生成单独文档页**（共 {overflow_files} 个）；请用搜索或「符号索引」查看。"
         )
         fi_lines.append("")
-    fi_lines.extend(
-        [
-            "??? note \"扁平路径列表（备选，便于复制完整路径）\"",
-            "    | 路径 | 符号数 | 文档 |",
-            "    | --- | ---: | --- |",
-        ]
-    )
+
+    if use_pymdownx_admonitions:
+        fi_lines.extend(
+            [
+                '??? note "扁平路径列表（备选，便于复制完整路径）"',
+                "    | 路径 | 符号数 | 文档 |",
+                "    | --- | ---: | --- |",
+            ]
+        )
+        row_prefix = "    "
+    else:
+        fi_lines.extend(
+            [
+                "<details>",
+                "<summary>扁平路径列表（备选，便于复制完整路径）</summary>",
+                "",
+                "| 路径 | 符号数 | 文档 |",
+                "| --- | ---: | --- |",
+            ]
+        )
+        row_prefix = ""
+
     for i, (path_norm, syms) in enumerate(sorted_file_items):
-        if i >= max_file_pages:
+        if i >= ctx.max_file_pages:
             fi_lines.append(
-                f"    | … | … | *另有 {overflow_files} 个文件未单独建页* |"
+                f"{row_prefix}| … | … | *另有 {overflow_files} 个文件未单独建页* |"
             )
             break
-        slug = slug_map[path_norm]
-        fi_lines.append(
-            f"    | `{_escape_md_table_cell(path_norm)}` | {len(syms)} | [打开](files/{slug}.md) |"
+        slug = ctx.slug_map[path_norm]
+        open_href = _wiki_link_to_file_page(
+            slug,
+            mkdocs_style=use_pymdownx_admonitions,
+            node_deploy_prefix=node_deploy_prefix,
         )
+        fi_lines.append(
+            f"{row_prefix}| `{_escape_md_table_cell(path_norm)}` | {len(syms)} | [打开]({open_href}) |"
+        )
+    if not use_pymdownx_admonitions:
+        fi_lines.extend(["", "</details>"])
     fi_lines.append("")
     (docs_dir / "file-index.md").write_text("\n".join(fi_lines), encoding="utf-8")
 
-    _write_file_pages(docs_dir, by_file, slug_map, max_file_pages)
-    symbol_nav = _write_symbol_index_parts(
-        docs_dir, chunks, slug_map, rows_per, paths_with_file_page
+    _write_file_pages(
+        docs_dir,
+        ctx.by_file,
+        ctx.slug_map,
+        ctx.max_file_pages,
+        use_pymdownx_admonitions=use_pymdownx_admonitions,
+    )
+    return _write_symbol_index_parts(
+        docs_dir,
+        ctx.chunks,
+        ctx.slug_map,
+        ctx.rows_per,
+        paths_with_file_page,
+        mkdocs_style_links=use_pymdownx_admonitions,
+        node_deploy_prefix=node_deploy_prefix,
     )
 
-    # mkdocs.yml
-    nav: list[Any] = [
-        {"首页": "index.md"},
-        {"架构总览": "architecture.md"},
-        {"文件索引": "file-index.md"},
-    ]
-    if len(symbol_nav) == 1:
-        nav.append({"符号索引": symbol_nav[0]})
-    else:
-        nested = [{f"第 {i + 1} 部分": n} for i, n in enumerate(symbol_nav)]
-        nav.append({f"符号索引（共 {len(symbol_nav)} 部分）": nested})
 
-    mkdocs_path = work_dir / "mkdocs.yml"
+def generate_project_wiki(
+    project_id: str,
+    repo_path: Path,
+    chunks: list[dict[str, Any]],
+    collected_files: list[tuple[str, str]] | None = None,
+    project_name: str = "",
+) -> dict[str, Any]:
+    """
+    生成静态 Wiki 源文件并执行 build。失败时抛出异常（由 indexer 捕获）。
+    project_name：可选展示名（如中文项目名），由触发接口或 Webhook 传入。
+    """
+    if not settings.wiki_enabled:
+        return {"skipped": True, "reason": "wiki_disabled"}
+
+    pname = (project_name or "").strip()
+    safe = _safe_project_id(project_id)
+    # 与 app.main 中 StaticFiles(directory=wiki_sites) 挂载到 /wiki 的路径一致（用于 Astro/VitePress base）
+    wiki_browse_base = f"/wiki/{safe}/site/"
+    wiki_root = settings.data_path / "wiki_sites" / safe
+    work_dir = settings.data_path / "wiki_work" / safe
+    site_out = wiki_root / "site"
+
+    max_file_pages = int(
+        os.environ.get("WIKI_MAX_FILE_PAGES")
+        or getattr(settings, "wiki_max_file_pages", DEFAULT_MAX_FILE_PAGES)
+    )
+    rows_per = int(
+        os.environ.get("WIKI_SYMBOL_ROWS_PER_FILE")
+        or getattr(settings, "wiki_symbol_rows_per_file", DEFAULT_SYMBOL_ROWS_PER_FILE)
+    )
+
+    backend = str(
+        os.environ.get("WIKI_BACKEND") or getattr(settings, "wiki_backend", "mkdocs") or "mkdocs"
+    ).strip().lower()
+    if backend not in ("mkdocs", "starlight", "vitepress"):
+        logger.warning("未知 WIKI_BACKEND=%s，回退 mkdocs", backend)
+        backend = "mkdocs"
+
+    if work_dir.exists():
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+    if backend == "starlight":
+        docs_dir = work_dir / "src" / "content" / "docs"
+    else:
+        docs_dir = work_dir / "docs"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+
+    commit = _git_head(repo_path)
+    generated_at = datetime.now(timezone.utc).isoformat()
+    tree_text = _build_directory_tree(repo_path)
+
+    by_file: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for c in chunks:
+        p = _normalize_rel_path(str(c.get("path", "")))
+        if p:
+            by_file[p].append(c)
+
+    slug_map: dict[str, str] = {p: _file_slug(p) for p in by_file}
+
+    ext_counts: dict[str, int] = defaultdict(int)
+    for p in by_file:
+        ext_counts[_ext_of(p) or "none"] += 1
+
+    readme = _readme_excerpt(collected_files or [], limit=8000)
+
+    page_title = _safe_yaml_double_quoted_title(
+        f"{pname}（{project_id}）" if pname else f"项目 Wiki — {project_id}"
+    )
+    site_title = f"{pname} · {project_id}" if pname else f"Wiki — {project_id}"
+    h1_line = pname if pname else project_id
+
+    ctx = WikiDocContext(
+        project_id=project_id,
+        repo_path=repo_path,
+        project_name=pname,
+        commit=commit,
+        generated_at=generated_at,
+        chunks=chunks,
+        by_file=dict(by_file),
+        slug_map=slug_map,
+        ext_counts=dict(ext_counts),
+        readme=readme,
+        tree_text=tree_text,
+        page_title=page_title,
+        site_title=site_title,
+        h1_line=h1_line,
+        max_file_pages=max_file_pages,
+        rows_per=rows_per,
+    )
+
+    use_pymdownx = backend == "mkdocs"
+    symbol_nav = _write_wiki_documentation(
+        docs_dir,
+        ctx,
+        use_pymdownx_admonitions=use_pymdownx,
+        node_deploy_prefix=None if use_pymdownx else wiki_browse_base,
+    )
+
     site_out.parent.mkdir(parents=True, exist_ok=True)
 
-    mkdocs_content: dict[str, Any] = {
-        "site_name": site_title,
-        "docs_dir": "docs",
-        "site_dir": str(site_out.resolve()),
-        "theme": {
-            "name": "material",
-            "language": "zh",
-            "features": [
-                "navigation.indexes",
-                "navigation.expand",
-                "search.suggest",
-                "search.highlight",
-                "content.code.copy",
+    if backend == "mkdocs":
+        nav: list[Any] = [
+            {"首页": "index.md"},
+            {"架构总览": "architecture.md"},
+            {"文件索引": "file-index.md"},
+        ]
+        if len(symbol_nav) == 1:
+            nav.append({"符号索引": symbol_nav[0]})
+        else:
+            nested = [{f"第 {i + 1} 部分": n} for i, n in enumerate(symbol_nav)]
+            nav.append({f"符号索引（共 {len(symbol_nav)} 部分）": nested})
+
+        mkdocs_path = work_dir / "mkdocs.yml"
+        mkdocs_content: dict[str, Any] = {
+            "site_name": site_title,
+            "docs_dir": "docs",
+            "site_dir": str(site_out.resolve()),
+            "theme": {
+                "name": "material",
+                "language": "zh",
+                "features": [
+                    "navigation.indexes",
+                    "navigation.expand",
+                    "search.suggest",
+                    "search.highlight",
+                    "content.code.copy",
+                ],
+            },
+            "markdown_extensions": [
+                "attr_list",
+                "admonition",
+                "pymdownx.details",
+                "pymdownx.superfences",
             ],
-        },
-        "markdown_extensions": [
-            "attr_list",
-            "admonition",
-            "pymdownx.details",
-            "pymdownx.superfences",
-        ],
-        # Lunr：中英混排仍以英文分词为主，兼容性最好；正文中文仍可被检索到
-        "plugins": [
-            {"search": {"lang": ["en"]}},
-        ],
-        "nav": nav,
-    }
-
-    mkdocs_path.write_text(yaml.safe_dump(mkdocs_content, allow_unicode=True, sort_keys=False), encoding="utf-8")
-
-    logger.info("Running mkdocs build for project=%s work_dir=%s site_out=%s", project_id, work_dir, site_out)
-    proc = subprocess.run(
-        [sys.executable, "-m", "mkdocs", "build", "-f", str(mkdocs_path), "-q"],
-        cwd=str(work_dir),
-        capture_output=True,
-        text=True,
-        timeout=3600,
-    )
-    if proc.returncode != 0:
-        err = (proc.stderr or "") + (proc.stdout or "")
-        logger.error("mkdocs build failed: %s", err[-4000:])
-        raise RuntimeError(f"mkdocs build failed: {err[-2000:]}")
+            "plugins": [
+                {"search": {"lang": ["en"]}},
+            ],
+            "nav": nav,
+        }
+        mkdocs_path.write_text(
+            yaml.safe_dump(mkdocs_content, allow_unicode=True, sort_keys=False),
+            encoding="utf-8",
+        )
+        logger.info(
+            "Running mkdocs build backend=%s project=%s work_dir=%s",
+            backend,
+            project_id,
+            work_dir,
+        )
+        proc = subprocess.run(
+            [sys.executable, "-m", "mkdocs", "build", "-f", str(mkdocs_path), "-q"],
+            cwd=str(work_dir),
+            capture_output=True,
+            text=True,
+            timeout=3600,
+        )
+        if proc.returncode != 0:
+            err = (proc.stderr or "") + (proc.stdout or "")
+            logger.error("mkdocs build failed: %s", err[-4000:])
+            raise RuntimeError(f"mkdocs build failed: {err[-2000:]}")
+    elif backend == "starlight":
+        logger.info(
+            "Running Starlight build backend=%s project=%s work_dir=%s",
+            backend,
+            project_id,
+            work_dir,
+        )
+        build_starlight_site(
+            work_dir, site_out, site_title, symbol_nav, public_base=wiki_browse_base
+        )
+    else:
+        logger.info(
+            "Running VitePress build backend=%s project=%s work_dir=%s",
+            backend,
+            project_id,
+            work_dir,
+        )
+        build_vitepress_site(
+            work_dir, site_out, site_title, symbol_nav, public_base=wiki_browse_base
+        )
 
     manifest = {
         "project_id": project_id,
@@ -765,16 +1018,19 @@ def generate_project_wiki(
         "generated_at": generated_at,
         "chunk_count": len(chunks),
         "file_count_with_symbols": len(by_file),
+        "wiki_backend": backend,
         "site_dir": str(site_out.resolve()),
-        "browse_url_path": f"/wiki/{safe}/site/",
+        "browse_url_path": wiki_browse_base,
     }
     wiki_root.mkdir(parents=True, exist_ok=True)
-    (wiki_root / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    (wiki_root / "manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
     if os.environ.get("WIKI_KEEP_WORK", "").strip().lower() not in ("1", "true", "yes"):
         shutil.rmtree(work_dir, ignore_errors=True)
 
-    logger.info("Wiki built for %s -> %s", project_id, site_out)
+    logger.info("Wiki built (%s) for %s -> %s", backend, project_id, site_out)
     return manifest
 
 

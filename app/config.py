@@ -1,7 +1,10 @@
 from pathlib import Path
+from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
+
+WikiBackend = Literal["mkdocs", "starlight", "vitepress"]
 
 
 class Settings(BaseSettings):
@@ -20,10 +23,22 @@ class Settings(BaseSettings):
     data_dir: str = "./data"
     # 文本嵌入模型（需为 fastembed TextEmbedding 支持列表中的模型，如 intfloat/multilingual-e5-large）
     embed_model: str = "intfloat/multilingual-e5-large"
-    # 索引成功后是否生成 MkDocs 静态 Wiki（见 README）
+    # 索引成功后是否生成静态 Wiki（见 README / .env.example）
     wiki_enabled: bool = True
+    # mkdocs：纯 Python；starlight / vitepress：需 Node.js + npm，首次会 npm install
+    wiki_backend: WikiBackend = Field(default="mkdocs")
     wiki_max_file_pages: int = 5000
     wiki_symbol_rows_per_file: int = 4000
+    # Starlight / VitePress 构建时 npm 使用的 registry；非空则注入环境变量 npm_config_registry
+    npm_registry: str = ""
+
+    @field_validator("wiki_backend", mode="before")
+    @classmethod
+    def _normalize_wiki_backend(cls, v: object) -> str:
+        s = str(v or "mkdocs").strip().lower()
+        if s in ("mkdocs", "starlight", "vitepress"):
+            return s
+        return "mkdocs"
 
     @property
     def data_path(self) -> Path:
