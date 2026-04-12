@@ -50,16 +50,140 @@
 }
 
 @layer components {
-  /* 代码问答：气泡列表间距 + 内 Markdown 长词不撑破布局 */
+  /* 代码问答：居中主栏（接近 ChatGPT 阅读宽度） */
+  .gv-code-chat-thread {
+    width: 100%;
+    max-width: 40rem;
+  }
+
+  @media (min-width: 1280px) {
+    .gv-code-chat-thread {
+      max-width: 44rem;
+    }
+  }
+
+  .gv-code-chat-main {
+    background-image: linear-gradient(
+      180deg,
+      hsl(var(--background)) 0%,
+      hsl(var(--muted) / 0.12) 100%
+    );
+  }
+
+  .dark .gv-code-chat-main {
+    background-image: linear-gradient(180deg, hsl(var(--background)) 0%, hsl(var(--muted) / 0.2) 100%);
+  }
+
+  /* 助手行占满主栏；覆盖 X 默认的 end 侧 15% 留白，便于正文通栏阅读 */
+  .gv-code-chat-bubbles .ant-bubble-start:not(.ant-bubble-divider):not(.ant-bubble-system) {
+    width: 100%;
+    max-width: 100%;
+    padding-inline-end: 0;
+  }
+
+  /* 用户气泡：复制/编辑仅在悬停或焦点在气泡内时显示（纯触控设备始终显示以免找不到入口） */
+  .gv-code-chat-bubbles .gv-code-chat-user-bubble .ant-bubble-extra {
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.15s ease;
+  }
+
+  .gv-code-chat-bubbles .gv-code-chat-user-bubble:hover .ant-bubble-extra,
+  .gv-code-chat-bubbles .gv-code-chat-user-bubble:focus-within .ant-bubble-extra {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  @media (hover: none) {
+    .gv-code-chat-bubbles .gv-code-chat-user-bubble .ant-bubble-extra {
+      opacity: 1;
+      pointer-events: auto;
+    }
+  }
+
+  /* 助手：复制/重试在悬停或键盘焦点时显示 */
+  .gv-code-chat-bubbles .gv-code-chat-assistant-bubble .ant-bubble-footer {
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.15s ease;
+  }
+
+  .gv-code-chat-bubbles .gv-code-chat-assistant-bubble:hover .ant-bubble-footer,
+  .gv-code-chat-bubbles .gv-code-chat-assistant-bubble:focus-within .ant-bubble-footer {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  @media (hover: none) {
+    .gv-code-chat-bubbles .gv-code-chat-assistant-bubble .ant-bubble-footer {
+      opacity: 1;
+      pointer-events: auto;
+    }
+  }
+
+  .gv-code-chat-bubbles.ant-bubble-list {
+    display: flex;
+    min-height: 0;
+    flex: 1 1 0;
+    flex-direction: column;
+  }
+
+  /* 隐藏消息区滚动条，仍可用滚轮/触控板滚动（避免右侧粗条抢视觉） */
+  .gv-code-chat-bubbles .ant-bubble-list-scroll-box {
+    flex: 1 1 0;
+    min-height: 0;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+
+  .gv-code-chat-bubbles .ant-bubble-list-scroll-box::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+  }
+
   .gv-code-chat-bubbles .ant-bubble-list-scroll-content {
     display: flex;
     flex-direction: column;
-    gap: 0.875rem;
+    gap: 1.75rem;
   }
+
   .gv-code-chat-bubbles .x-markdown-light,
   .gv-code-chat-bubbles .x-markdown-dark {
     overflow-wrap: anywhere;
     word-break: break-word;
+    font-size: 16px;
+    line-height: 1.75;
+  }
+
+  .gv-code-chat-bubbles .x-markdown-light p,
+  .gv-code-chat-bubbles .x-markdown-dark p {
+    margin-bottom: 0.75em;
+  }
+
+  .gv-code-chat-bubbles .x-markdown-light p:last-child,
+  .gv-code-chat-bubbles .x-markdown-dark p:last-child {
+    margin-bottom: 0;
+  }
+
+  /* 输入区：圆角容器 + 内边距（Sender 主框由 index 内联样式控制） */
+  .gv-code-chat-sender.ant-sender-main {
+    border-radius: 1.75rem;
+  }
+
+  .gv-code-chat-sender .ant-sender-content {
+    padding-block: 10px;
+    padding-inline-start: 6px;
+    padding-inline-end: 10px;
+    align-items: center;
+  }
+
+  .gv-code-chat-sender .ant-sender-actions-list {
+    align-self: center;
+  }
+
+  .gv-code-chat-sender textarea {
+    font-size: 16px;
+    line-height: 1.5;
   }
 }
 

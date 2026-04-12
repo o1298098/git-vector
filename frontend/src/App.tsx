@@ -6,7 +6,7 @@ import { Dashboard } from "@/pages/Dashboard";
 import { Enqueue } from "@/pages/Enqueue";
 import { Jobs } from "@/pages/Jobs";
 import { Login } from "@/pages/Login";
-import { CodeChat } from "@/pages/CodeChat";
+import { CodeChat } from "@/pages/code-chat";
 import { Search } from "@/pages/Search";
 import { Settings } from "@/pages/Settings";
 

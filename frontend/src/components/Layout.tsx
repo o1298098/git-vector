@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, NavLink, Outlet } from "react-router-dom";
+import { Link, NavLink, Outlet, useLocation } from "react-router-dom";
 import { Check, Home, Languages, ListOrdered, LogOut, MessageCircle, Search, Settings } from "lucide-react";
 import { ThemeMenu } from "@/components/ThemeMenu";
 import { Button } from "@/components/ui/button";
@@ -8,6 +8,8 @@ import { useI18n } from "@/i18n/I18nContext";
 import { cn } from "@/lib/utils";
 
 export function Layout() {
+  const { pathname } = useLocation();
+  const isChatRoute = pathname === "/chat";
   const { uiLoginRequired, username, logout } = useAuth();
   const { locale, setLocale, t } = useI18n();
   const [langOpen, setLangOpen] = useState(false);
@@ -156,8 +158,20 @@ export function Layout() {
         </div>
       </header>
 
-      <main className="flex-1 px-4 py-6 sm:px-6 sm:py-8">
-        <div className="mx-auto max-w-[1600px]">
+      <main
+        className={cn(
+          "flex-1",
+          isChatRoute ? "flex min-h-0 flex-col p-0" : "px-4 py-6 sm:px-6 sm:py-8",
+        )}
+      >
+        <div
+          className={cn(
+            "mx-auto w-full",
+            isChatRoute
+              ? "flex h-[calc(100dvh-3.5rem)] max-w-none min-h-0 flex-1 flex-col"
+              : "max-w-[1600px]",
+          )}
+        >
           <Outlet />
         </div>
       </main>
