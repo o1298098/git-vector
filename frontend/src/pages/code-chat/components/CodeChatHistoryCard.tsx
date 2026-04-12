@@ -37,7 +37,7 @@ export function CodeChatHistoryCard({
       </h2>
       <Button
         type="default"
-        className="flex h-9 w-full shrink-0 items-center justify-center gap-1.5 rounded-lg border border-border/60 bg-background text-sm font-medium text-foreground shadow-none hover:bg-muted/60"
+        className="flex h-9 w-full shrink-0 items-center justify-start gap-1.5 rounded-lg border border-border/60 bg-background px-3 text-left text-sm font-medium text-foreground shadow-none hover:bg-muted/60"
         onClick={onNewChat}
         disabled={loading}
       >
