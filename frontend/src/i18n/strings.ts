@@ -5,7 +5,7 @@ export const STORAGE_KEY = "gv_ui_locale";
 export const messages: Record<Locale, Record<string, string>> = {
   zh: {
     "common.loading": "加载中…",
-    "layout.brandTitle": "GitLab Vector",
+    "layout.brandTitle": "Git Vector",
     "layout.brandSub": "代码索引与 Wiki",
     "layout.uiLang": "界面语言",
     "layout.langZh": "中文",
@@ -222,7 +222,7 @@ export const messages: Record<Locale, Record<string, string>> = {
   },
   en: {
     "common.loading": "Loading…",
-    "layout.brandTitle": "GitLab Vector",
+    "layout.brandTitle": "Git Vector",
     "layout.brandSub": "Code index & wiki",
     "layout.uiLang": "UI language",
     "layout.langZh": "Chinese",

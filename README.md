@@ -4,6 +4,14 @@
 
 This service indexes **Git repositories** from common hosts (GitLab, GitHub, Gitea) or **any clone URL** (via manual trigger) into a searchable vector knowledge base. On `main`/`master` push webhooks—or when you call the trigger API—it pulls code, chunks it at the **function level** (falls back to **file level** when parsing yields zero functions), optionally generates a one-line description per chunk via an LLM, then embeds and upserts into Chroma. You can query via HTTP APIs, use the bundled admin UI, feed hits into Dify (API Tool), or call the **code Q&A** endpoints.
 
+## Screenshots
+
+Admin UI (`/admin/`): **Overview** with indexed projects, quick links, and **Semantic search** with natural-language queries over the vector index.
+
+| Overview | Semantic search |
+|----------|-----------------|
+| ![Admin overview — indexed projects and shortcuts](docs/images/overview.png) | ![Semantic search — query and ranked code snippets](docs/images/semantic-search.png) |
+
 ---
 
 ## What you get
@@ -22,6 +30,7 @@ This service indexes **Git repositories** from common hosts (GitLab, GitHub, Git
 | `backend/app/` | Python / FastAPI service, indexing, wiki, vector store |
 | `backend/requirements.txt` | Backend dependencies |
 | `frontend/` | React + Vite admin UI (built assets served at `/admin/`) |
+| `docs/images/` | README screenshots |
 | `scripts/` | Helper scripts |
 
 ---

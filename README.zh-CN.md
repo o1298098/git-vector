@@ -4,6 +4,14 @@
 
 本服务把 **Git 仓库**（GitLab / GitHub / Gitea 的 Webhook，或**任意可克隆 URL** 手动入队）索引成可检索的向量知识库：在 `main`/`master` 推送或手动触发时拉取代码，按**函数级**（解析不到则退化为**文件级**）切分 chunk，可选用 LLM 为每个 chunk 生成一行描述，再 embedding 写入 Chroma。可通过 HTTP API 检索、接入 Dify（API 工具）、使用自带 **管理端 `/admin/`**，以及调用 **代码问答** 接口。
 
+## 界面预览
+
+管理端（`/admin/`）：**概览**展示已索引项目与快捷入口；**语义检索**支持自然语言提问并返回相关代码片段。
+
+| 概览 | 语义检索 |
+|------|----------|
+| ![管理端概览 — 项目与快捷入口](docs/images/overview.png) | ![语义检索 — 提问与检索结果](docs/images/semantic-search.png) |
+
 ---
 
 ## 你会得到什么
@@ -22,6 +30,7 @@
 | `backend/app/` | Python / FastAPI 服务与索引、Wiki、向量库逻辑 |
 | `backend/requirements.txt` | 后端依赖 |
 | `frontend/` | React + Vite 管理端（构建产物由后端挂载在 `/admin/`） |
+| `docs/images/` | README 配图 |
 | `scripts/` | 本地/容器内辅助脚本 |
 
 ---
