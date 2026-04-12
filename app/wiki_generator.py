@@ -414,13 +414,51 @@ def _build_directory_tree(repo_path: Path, max_lines: int = TREE_MAX_LINES) -> s
     return "\n".join(lines[:max_lines])
 
 
+_README_MD_IMAGE = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
+_README_HTML_IMG = re.compile(r"<img\b[^>]*>", re.IGNORECASE)
+
+
+def _sanitize_readme_for_wiki_markdown(text: str) -> str:
+    """避免 README 中的图片被 Starlight/Astro 当作内容目录下的静态资源解析（仓库相对路径在 Wiki 工作区不存在）。"""
+
+    def repl_md(m: re.Match[str]) -> str:
+        alt = m.group(1).strip()
+        inner = (m.group(2) or "").strip()
+        url = inner.split()[0].strip("<>") if inner else ""
+        if not url:
+            return m.group(0)
+        lu = url.lower()
+        if lu.startswith(("http://", "https://", "//")):
+            label = alt or "图片"
+            return f"[{label}]({url})"
+        note = f"README 内图片（未复制到 Wiki）：`{url}`"
+        if alt:
+            note += f"，说明：{alt}"
+        return f"（{note}）"
+
+    text = _README_MD_IMAGE.sub(repl_md, text)
+
+    def repl_html(m: re.Match[str]) -> str:
+        tag = m.group(0)
+        src_m = re.search(r"src\s*=\s*[\"']([^\"']+)[\"']", tag, re.I)
+        src = (src_m.group(1) if src_m else "").strip()
+        if not src:
+            return "（README 内 HTML 图片标签，已省略）"
+        lu = src.lower()
+        if lu.startswith(("http://", "https://", "//")):
+            return f"[图片]({src})"
+        return f"（README 内图片（未复制到 Wiki）：`{src}`）"
+
+    return _README_HTML_IMG.sub(repl_html, text)
+
+
 def _readme_excerpt(files: list[tuple[str, str]], limit: int = 6000) -> str:
     for path, content in files:
         if path.replace("\\", "/").lower().endswith("readme.md"):
             text = content[:limit]
             if len(content) > limit:
                 text += "\n\n…（已截断）"
-            return text
+            return _sanitize_readme_for_wiki_markdown(text)
     return ""
 
 

@@ -1,7 +1,9 @@
 """
 Tree-sitter 函数级解析：从源码中提取函数/方法为独立 chunk，便于精确检索「功能是否在代码中实现」。
+Vue SFC：单独抽取 <template> 为模板 chunk，仅对 <script> 内代码做函数级解析并回写行号。
 """
 import logging
+import re
 import time
 from typing import Any, Callable, Optional
 
@@ -9,11 +11,14 @@ from tree_sitter import Node, Tree
 
 try:
     from tree_sitter_language_pack import get_parser
+    _GET_PARSER_MODULE = "tree_sitter_language_pack"
 except ImportError:
     try:
         from tree_sitter_languages import get_parser
+        _GET_PARSER_MODULE = "tree_sitter_languages"
     except ImportError:
         get_parser = None  # 无 parser 时索引阶段将无函数级 chunk
+        _GET_PARSER_MODULE = ""
 
 logger = logging.getLogger(__name__)
 
@@ -461,6 +466,86 @@ def _extract_c_cpp(source: bytes, tree: Tree, path: str) -> list[dict[str, Any]]
     return chunks
 
 
+# --------------- Vue SFC ---------------
+_VUE_TEMPLATE_RE = re.compile(r"<template(\s[^>]*)?>([\s\S]*?)</template>", re.IGNORECASE)
+_VUE_SCRIPT_RE = re.compile(r"<script(\s[^>]*)?>([\s\S]*?)</script>", re.IGNORECASE)
+
+
+def _line_at_char(content: str, char_index: int) -> int:
+    """1-based line number，char_index 为 str 中的字符偏移（与 re.Match.start/end 一致）。"""
+    if char_index <= 0:
+        return 1
+    if char_index >= len(content):
+        return content.count("\n") + 1
+    return content.count("\n", 0, char_index) + 1
+
+
+def _vue_skip_script(attrs: str) -> bool:
+    a = attrs or ""
+    if re.search(r"\bsrc\s*=", a, re.IGNORECASE):
+        return True
+    if re.search(r'\btype\s*=\s*["\']application/json', a, re.IGNORECASE):
+        return True
+    return False
+
+
+def _parse_vue_file(path: str, content: str) -> list[dict[str, Any]]:
+    """解析 .vue：模板独立 chunk + 各 <script> 块内函数级 chunk（行号相对整文件）。"""
+    chunks: list[dict[str, Any]] = []
+
+    tmpl_idx = 0
+    for m in _VUE_TEMPLATE_RE.finditer(content):
+        body = (m.group(2) or "").strip()
+        if not body:
+            continue
+        tmpl_idx += 1
+        start_c = m.start(2)
+        end_c = m.end(2)
+        start_line = _line_at_char(content, start_c)
+        end_line = _line_at_char(content, end_c - 1 if end_c > start_c else start_c)
+        name = "template" if tmpl_idx == 1 else f"template_{tmpl_idx}"
+        chunks.append({
+            "path": path,
+            "name": name,
+            "kind": "vue_template",
+            "code": body,
+            "start_line": start_line,
+            "end_line": end_line,
+            "metadata": {"path": path, "name": name, "kind": "vue_template"},
+            "calls": [],
+        })
+
+    parser = _get_parser("typescript")
+    extractor = EXTRACTORS.get("typescript")
+    if not parser or not extractor:
+        return chunks
+
+    for m in _VUE_SCRIPT_RE.finditer(content):
+        attrs = m.group(1) or ""
+        if _vue_skip_script(attrs):
+            continue
+        body = m.group(2) or ""
+        if not body.strip():
+            continue
+        line0 = _line_at_char(content, m.start(2))
+        offset = line0 - 1
+        try:
+            tree = parser.parse(body.encode("utf-8"))
+            if not tree or not tree.root_node:
+                continue
+            sub = extractor(body.encode("utf-8"), tree, path)
+            for c in sub:
+                c["start_line"] = int(c.get("start_line") or 1) + offset
+                c["end_line"] = int(c.get("end_line") or 1) + offset
+                if isinstance(c.get("metadata"), dict):
+                    c["metadata"] = {**c["metadata"], "path": path}
+            chunks.extend(sub)
+        except Exception as e:
+            logger.debug("Vue script parse %s failed: %s", path, e)
+
+    return chunks
+
+
 EXTRACTORS: dict[str, Any] = {
     "python": _extract_python,
     "javascript": _extract_js_ts,
@@ -482,6 +567,12 @@ def parse_file(path: str, content: str) -> list[dict[str, Any]]:
     """
     from pathlib import Path
     ext = (Path(path).suffix or "").lower()
+    if ext == ".vue":
+        try:
+            return _parse_vue_file(path, content)
+        except Exception as e:
+            logger.debug("parse_file vue %s failed: %s", path, e)
+            return []
     if ext == ".tsx":
         lang = "tsx"
     else:
@@ -530,9 +621,12 @@ def parse_files(
         parser_tsx = _get_parser("tsx")
         parser_ts = _get_parser("typescript")
         logger.info(
-            "parse_files: %s files, 0 function chunks (supported ext but no parser or no nodes?). "
-            "Parser tsx=%s, typescript=%s (若均为 None 请检查 tree-sitter 安装或重建 Docker 镜像)",
+            "parse_files: %s files, 0 function chunks。"
+            " get_parser 来源=%s；parser_tsx=%s，parser_typescript=%s。"
+            " 若来源为空：在同一 venv 执行 pip install -r requirements.txt（需 tree-sitter-language-pack）。"
+            " 若来源非空但 Parser 为 None：多为当前平台无可用预编译语言包或加载失败，可将日志级别调到 DEBUG 查看 “No parser for”。",
             len(files),
+            _GET_PARSER_MODULE or "(未安装 tree_sitter_language_pack / tree_sitter_languages)",
             "OK" if parser_tsx else "None",
             "OK" if parser_ts else "None",
         )
