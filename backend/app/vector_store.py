@@ -27,6 +27,7 @@ import chromadb
 from chromadb.config import Settings as ChromaSettings
 
 from app.config import settings
+from app.effective_settings import effective_embed_model
 
 logger = logging.getLogger(__name__)
 COLLECTION_NAME = "gitlab_code_docs"
@@ -53,6 +54,9 @@ def _init_project_index_db(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(project_index)").fetchall()}
+    if "project_name" not in cols:
+        conn.execute("ALTER TABLE project_index ADD COLUMN project_name TEXT NOT NULL DEFAULT ''")
     conn.commit()
 
 
@@ -64,25 +68,47 @@ def _read_project_index_from_db() -> list[dict[str, Any]]:
         try:
             _init_project_index_db(conn)
             rows = conn.execute(
-                "SELECT project_id, doc_count FROM project_index ORDER BY project_id ASC"
+                """
+                SELECT project_id, doc_count,
+                       COALESCE(project_name, '') AS project_name
+                FROM project_index
+                ORDER BY project_id ASC
+                """
             ).fetchall()
-            return [{"project_id": r["project_id"], "doc_count": int(r["doc_count"])} for r in rows]
+            return [
+                {
+                    "project_id": r["project_id"],
+                    "doc_count": int(r["doc_count"]),
+                    "project_name": (r["project_name"] or "").strip(),
+                }
+                for r in rows
+            ]
         finally:
             conn.close()
 
 
-def _upsert_project_index_in_db(project_id: str, doc_count: int) -> None:
+def _upsert_project_index_in_db(project_id: str, doc_count: int, project_name: str = "") -> None:
+    pname = (project_name or "").strip()
+    now = _utc_now_iso()
     db_path = _project_index_db_path()
     with _project_index_db_lock:
         conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
         try:
             _init_project_index_db(conn)
             conn.execute(
                 """
-                INSERT OR REPLACE INTO project_index (project_id, doc_count, updated_at)
-                VALUES (?, ?, ?)
+                INSERT INTO project_index (project_id, doc_count, updated_at, project_name)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(project_id) DO UPDATE SET
+                    doc_count = excluded.doc_count,
+                    updated_at = excluded.updated_at,
+                    project_name = CASE
+                        WHEN TRIM(excluded.project_name) != '' THEN TRIM(excluded.project_name)
+                        ELSE project_index.project_name
+                    END
                 """,
-                (project_id, int(doc_count), _utc_now_iso()),
+                (project_id, int(doc_count), now, pname),
             )
             conn.commit()
         finally:
@@ -98,8 +124,8 @@ def _replace_project_index_in_db(project_stats: dict[str, int]) -> None:
             conn.execute("DELETE FROM project_index")
             conn.executemany(
                 """
-                INSERT OR REPLACE INTO project_index (project_id, doc_count, updated_at)
-                VALUES (?, ?, ?)
+                INSERT INTO project_index (project_id, doc_count, updated_at, project_name)
+                VALUES (?, ?, ?, '')
                 """,
                 [(pid, int(count), _utc_now_iso()) for pid, count in project_stats.items()],
             )
@@ -189,7 +215,7 @@ def _embed(texts: list[str], prefix: str = "") -> list[tuple[int, list[float]]]:
     if prefix:
         texts = [f"{prefix}{t}" for t in texts]
 
-    model_name = settings.embed_model
+    model_name = effective_embed_model()
     base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
     # Ollama 向量模型也有上下文长度限制，这里做一个保守的字符截断防御。
@@ -365,7 +391,13 @@ class VectorStore:
                 out[k] = repr(v)
         return out
 
-    def upsert_project(self, project_id: str, chunks: list[dict[str, Any]]) -> None:
+    def upsert_project(
+        self,
+        project_id: str,
+        chunks: list[dict[str, Any]],
+        *,
+        project_name: str = "",
+    ) -> None:
         if not chunks:
             return
         ids = [f"{project_id}::{i}" for i in range(len(chunks))]
@@ -432,7 +464,7 @@ class VectorStore:
         except Exception as e:  # noqa: S110
             logger.warning("Failed to probe doc_count after upsert for %s: %s", project_id, e)
             doc_count = len(kept_ids)
-        _upsert_project_index_in_db(project_id, doc_count)
+        _upsert_project_index_in_db(project_id, doc_count, project_name)
 
     def query(
         self,
@@ -463,7 +495,13 @@ class VectorStore:
         metas = (results.get("metadatas") or [[]])[0]
         dists = (results.get("distances") or [[]])[0]
         for d, m, dist in zip(docs, metas, dists):
-            out.append({"content": d, "metadata": m or {}, "distance": dist})
+            try:
+                dist_f = float(dist) if dist is not None else None
+            except (TypeError, ValueError):
+                dist_f = None
+            # Chroma 返回的是距离（越小越近）；API 同时给出 score 供前端展示「相似度」：越大越相关
+            score = (1.0 / (1.0 + dist_f)) if dist_f is not None else None
+            out.append({"content": d, "metadata": m or {}, "distance": dist_f, "score": score})
         return out
 
 

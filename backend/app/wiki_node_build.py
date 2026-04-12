@@ -10,9 +10,10 @@ import logging
 import os
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
-from app.config import settings
+from app.content_locale import WikiI18n, wiki_i18n
+from app.effective_settings import effective_npm_registry
 
 logger = logging.getLogger(__name__)
 
@@ -32,14 +33,14 @@ def _normalized_site_base(path: str) -> str:
 
 def _npm_subprocess_env() -> dict[str, str]:
     """
-    npm 子进程环境：继承当前环境；若配置了 NPM_REGISTRY（settings.npm_registry），
+    npm 子进程环境：继承当前环境；若 effective_npm_registry() 非空（含界面覆盖），
     则设置 npm_config_registry（与 npm 官方约定一致）。
 
     未配置 NPM_REGISTRY 时：若环境里只有大写的 NPM_CONFIG_REGISTRY（常见于 Docker Compose），
     会同步为 npm_config_registry，因 npm 只读取后者。
     """
     env = dict(os.environ)
-    reg = (getattr(settings, "npm_registry", None) or "").strip()
+    reg = (effective_npm_registry() or "").strip()
     if reg:
         env["npm_config_registry"] = reg.rstrip("/")
         return env
@@ -95,7 +96,7 @@ def _npm_install(work_dir: Path, timeout: int = 900) -> None:
         raise RuntimeError(f"npm install 失败: {err[-2500:]}")
 
 
-def _ensure_starlight_content_layer(work_dir: Path) -> None:
+def _ensure_starlight_content_layer(work_dir: Path, ws: WikiI18n) -> None:
     """
     Astro 6 + Starlight 0.38 要求显式声明 docs 集合（见 Starlight Manual Setup）。
     缺省时 Astro 会弃用地自动推断 docs，且 Starlight 的 404 路由仍期望集合中存在 id 为 404 的条目；
@@ -118,14 +119,15 @@ export const collections = {
     docs.mkdir(parents=True, exist_ok=True)
     # 与 https://starlight.astro.build/guides/customization/#custom-404-page 一致，避免多余嵌套 frontmatter
     # 在个别 Astro/Zod 版本下触发校验边角问题。
+    tag_yaml = json.dumps(ws.not_found_tagline, ensure_ascii=False)
     (docs / "404.md").write_text(
-        """---
+        f"""---
 title: '404'
 template: splash
 editUrl: false
 hero:
   title: '404'
-  tagline: 未找到页面。请检查网址或使用站内搜索。
+  tagline: {tag_yaml}
 ---
 
 """,
@@ -133,41 +135,45 @@ hero:
     )
 
 
-def _starlight_sidebar(symbol_nav_files: list[str]) -> list[dict[str, Any]]:
+def _starlight_sidebar(symbol_nav_files: list[str], ws: WikiI18n) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = [
-        {"label": "首页", "link": "/"},
-        {"label": "架构总览", "link": "/architecture"},
-        {"label": "文件索引", "link": "/file-index"},
+        {"label": ws.nav_home, "link": "/"},
+        {"label": ws.nav_architecture, "link": "/architecture"},
+        {"label": ws.nav_file_index, "link": "/file-index"},
     ]
     if len(symbol_nav_files) == 1:
         fn = symbol_nav_files[0].replace(".md", "").replace(".MD", "")
-        items.append({"label": "符号索引", "link": f"/{fn}"})
+        items.append({"label": ws.nav_symbol_index, "link": f"/{fn}"})
     else:
         sym_items = []
         for i, raw in enumerate(symbol_nav_files):
             fn = raw.replace(".md", "").replace(".MD", "")
-            label = "符号索引" if i == 0 else f"符号索引（第 {i + 1} 部分）"
+            label = ws.nav_symbol_index if i == 0 else ws.nav_symbol_index_part.format(n=i + 1)
             sym_items.append({"label": label, "link": f"/{fn}"})
-        items.append({"label": f"符号索引（共 {len(symbol_nav_files)} 部分）", "items": sym_items})
+        items.append(
+            {"label": ws.nav_symbol_index_multi.format(n=len(symbol_nav_files)), "items": sym_items}
+        )
     return items
 
 
-def _vitepress_sidebar(symbol_nav_files: list[str]) -> list[dict[str, Any]]:
+def _vitepress_sidebar(symbol_nav_files: list[str], ws: WikiI18n) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = [
-        {"text": "首页", "link": "/"},
-        {"text": "架构总览", "link": "/architecture"},
-        {"text": "文件索引", "link": "/file-index"},
+        {"text": ws.nav_home, "link": "/"},
+        {"text": ws.nav_architecture, "link": "/architecture"},
+        {"text": ws.nav_file_index, "link": "/file-index"},
     ]
     if len(symbol_nav_files) == 1:
         fn = symbol_nav_files[0].replace(".md", "").replace(".MD", "")
-        items.append({"text": "符号索引", "link": f"/{fn}"})
+        items.append({"text": ws.nav_symbol_index, "link": f"/{fn}"})
     else:
         sym_items = []
         for i, raw in enumerate(symbol_nav_files):
             fn = raw.replace(".md", "").replace(".MD", "")
-            text = "符号索引" if i == 0 else f"符号索引（第 {i + 1} 部分）"
+            text = ws.nav_symbol_index if i == 0 else ws.nav_symbol_index_part.format(n=i + 1)
             sym_items.append({"text": text, "link": f"/{fn}"})
-        items.append({"text": f"符号索引（共 {len(symbol_nav_files)} 部分）", "items": sym_items})
+        items.append(
+            {"text": ws.nav_symbol_index_multi.format(n=len(symbol_nav_files)), "items": sym_items}
+        )
     return items
 
 
@@ -178,14 +184,16 @@ def build_starlight_site(
     symbol_nav_files: list[str],
     *,
     public_base: str,
+    wiki_ui: Optional[WikiI18n] = None,
 ) -> None:
     if not node_available() or not npm_available():
         raise RuntimeError("WIKI_BACKEND=starlight 需要可用的 node 与 npm（请安装 Node.js LTS）")
+    ws = wiki_ui or wiki_i18n("zh")
     site_out.mkdir(parents=True, exist_ok=True)
     abs_out = str(site_out.resolve())
     base = _normalized_site_base(public_base)
     base_js = json.dumps(base, ensure_ascii=False)
-    sidebar = _starlight_sidebar(symbol_nav_files)
+    sidebar = _starlight_sidebar(symbol_nav_files, ws)
     title_js = json.dumps(site_title, ensure_ascii=False)
     out_js = json.dumps(abs_out, ensure_ascii=False)
     sidebar_js = json.dumps(sidebar, ensure_ascii=False)
@@ -227,7 +235,7 @@ export default defineConfig({{
 }});
 """
     (work_dir / "astro.config.mjs").write_text(astro, encoding="utf-8")
-    _ensure_starlight_content_layer(work_dir)
+    _ensure_starlight_content_layer(work_dir, ws)
     # 与 Starlight 官方示例一致（见 https://github.com/withastro/starlight/blob/main/examples/basics/package.json ）：
     # Astro 6 + Starlight 0.38；当前 astro@6.0.8 要求 Node ">=22.12.0"（Dockerfile 已用 NodeSource 22.x）。
     # 勿再 npm overrides 锁 zod，易与 Starlight 内部 astro/zod 合并冲突（曾导致 processedDirs / record 校验异常）。
@@ -268,13 +276,16 @@ def build_vitepress_site(
     symbol_nav_files: list[str],
     *,
     public_base: str,
+    wiki_ui: Optional[WikiI18n] = None,
 ) -> None:
     if not node_available() or not npm_available():
         raise RuntimeError("WIKI_BACKEND=vitepress 需要可用的 node 与 npm（请安装 Node.js LTS）")
+    ws = wiki_ui or wiki_i18n("zh")
     site_out.mkdir(parents=True, exist_ok=True)
     abs_out = str(site_out.resolve())
     base = _normalized_site_base(public_base)
-    sidebar = _vitepress_sidebar(symbol_nav_files)
+    sidebar = _vitepress_sidebar(symbol_nav_files, ws)
+    vp_lang = "zh-CN" if ws.lang == "zh" else "en-US"
     vp_dir = work_dir / "docs" / ".vitepress"
     vp_dir.mkdir(parents=True, exist_ok=True)
 
@@ -283,7 +294,7 @@ import {{ defineConfig }} from "vitepress";
 
 export default defineConfig({{
   title: {json.dumps(site_title, ensure_ascii=False)},
-  lang: "zh-CN",
+  lang: {json.dumps(vp_lang)},
   base: {json.dumps(base, ensure_ascii=False)},
   outDir: {json.dumps(abs_out)},
   themeConfig: {{

@@ -17,6 +17,7 @@ openai==1.12.0
 # Config & utils
 pydantic-settings==2.1.0
 python-dotenv==1.0.1
+PyJWT==2.8.0
 PyYAML==6.0.1
 
 # 静态 Wiki（索引完成后 mkdocs build）

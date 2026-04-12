@@ -7,7 +7,8 @@ from typing import Callable, Optional, Any
 
 import git
 from app.config import settings
-from app.code_parser import parse_files
+from app.effective_settings import effective_wiki_enabled
+from app.code_parser import EXT_TO_LANG, parse_files
 from app.analyzer import describe_functions_batch
 from app.vector_store import get_vector_store
 
@@ -111,6 +112,56 @@ def collect_code_files(repo_path: Path) -> list[tuple[str, str]]:
     return out
 
 
+# 文件扩展名 → Markdown 围栏语言（与前端 highlight.js 常见 id 对齐）
+_EXTRA_FENCE_LANG: dict[str, str] = {
+    ".sql": "sql",
+    ".yaml": "yaml",
+    ".yml": "yaml",
+    ".json": "json",
+    ".md": "markdown",
+    ".html": "xml",
+    ".txt": "plaintext",
+    ".css": "css",
+    ".scss": "scss",
+    ".php": "php",
+}
+
+# tree-sitter 语言名 → 高亮常用 id
+_PARSER_LANG_TO_FENCE: dict[str, str] = {
+    "tsx": "typescript",
+    "vue": "typescript",
+}
+
+
+def _fence_lang_for_path(path: str) -> str:
+    """根据路径推断围栏语言标识，便于前端语法高亮。"""
+    p = Path(path)
+    ext = p.suffix.lower()
+    name = p.name
+    if name == "Makefile" or name.endswith(".mk"):
+        return "makefile"
+    if name == "Dockerfile" or name.startswith("Dockerfile."):
+        return "dockerfile"
+    if ext in _EXTRA_FENCE_LANG:
+        return _EXTRA_FENCE_LANG[ext]
+    pl = EXT_TO_LANG.get(ext)
+    if pl:
+        return _PARSER_LANG_TO_FENCE.get(pl, pl)
+    return "plaintext"
+
+
+def _fenced_code_block(code: str, path: str) -> tuple[str, str | None]:
+    """
+    将代码段包成 Markdown 围栏；返回 (追加到正文的片段, 语言或 None)。
+    空代码返回 ("", None)。
+    """
+    raw = (code or "").strip()
+    if not raw:
+        return "", None
+    lang = _fence_lang_for_path(path)
+    return (f"\n```{lang}\n{code.rstrip()}\n```", lang)
+
+
 def _chunks_to_embedding_docs(project_id: str, chunks: list[dict]) -> list[dict]:
     """将已含 description 的 chunk 转为向量库格式（不再重复调用 LLM）。"""
     out = []
@@ -126,7 +177,8 @@ def _chunks_to_embedding_docs(project_id: str, chunks: list[dict]) -> list[dict]
             content += f"\n{desc}"
         if calls:
             content += "\nCalls: " + ", ".join(str(x) for x in calls)
-        content += f"\n{code}"
+        fence_suffix, code_lang = _fenced_code_block(code, path)
+        content += fence_suffix
         meta = {
             "path": path,
             "name": name,
@@ -135,13 +187,14 @@ def _chunks_to_embedding_docs(project_id: str, chunks: list[dict]) -> list[dict]
             "end_line": c.get("end_line"),
             "calls": calls,
         }
+        if code_lang is not None:
+            meta["code_lang"] = code_lang
         out.append({"content": content, "metadata": meta})
     return out
 
 
 def _file_fallback_chunks(files: list[tuple[str, str]], max_files: int = 500) -> list[dict]:
     """当函数级解析得到 0 条时，按文件生成简单 chunk，保证有内容可检索。"""
-    from app.code_parser import EXT_TO_LANG
     code_exts = set(EXT_TO_LANG.keys()) | {".tsx"}
     out = []
     for path, content in files[:max_files]:
@@ -214,7 +267,7 @@ def run_index_pipeline(
         function_chunks = describe_functions_batch(function_chunks)
 
         skip_wiki = os.environ.get("SKIP_WIKI", "").strip().lower() in ("1", "true", "yes")
-        if settings.wiki_enabled and not skip_wiki:
+        if effective_wiki_enabled() and not skip_wiki:
             _report("generate_wiki", percent=62, chunk_count=len(function_chunks))
             try:
                 from app.wiki_generator import generate_project_wiki
@@ -237,7 +290,7 @@ def run_index_pipeline(
             return
         _report("upsert_vector_store", percent=80, doc_count=len(docs))
         store = get_vector_store()
-        store.upsert_project(project_id, docs)
+        store.upsert_project(project_id, docs, project_name=project_name)
         logger.info("Indexed project %s with %s chunks", project_id, len(docs))
         _report("done", percent=100, status="done", doc_count=len(docs))
     except Exception as e:

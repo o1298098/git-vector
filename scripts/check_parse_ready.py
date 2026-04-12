@@ -7,7 +7,7 @@ import os
 import sys
 
 root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-parser_path = os.path.join(root, "app", "code_parser.py")
+parser_path = os.path.join(root, "backend", "app", "code_parser.py")
 
 def main():
     with open(parser_path, "r", encoding="utf-8") as f:

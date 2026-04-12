@@ -74,13 +74,17 @@ async def list_index_jobs(
     offset: int = Query(0, ge=0),
 ):
     store = get_job_store()
+    filters = {"status": status, "project_id": project_id}
+    total = await asyncio.to_thread(store.count_jobs, **filters)
     jobs = await asyncio.to_thread(
         store.list_jobs,
-        **{"status": status, "project_id": project_id, "limit": limit, "offset": offset},
+        **{**filters, "limit": limit, "offset": offset},
     )
     current = get_job_queue().get_current_job_id()
     return {
-        "total": len(jobs),
+        "total": total,
+        "limit": limit,
+        "offset": offset,
         "jobs": [
             {
                 "job_id": j.job_id,

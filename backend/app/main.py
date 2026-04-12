@@ -1,7 +1,10 @@
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
@@ -40,12 +43,70 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+_cors = [o.strip() for o in (settings.cors_origins or "").split(",") if o.strip()]
+if _cors:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
 app.include_router(webhook_router, prefix="/webhook", tags=["webhook"])
 # 查询接口供 Dify 或前端调用
+from app.auth_ui import router as auth_ui_router
+
+app.include_router(auth_ui_router, prefix="/api", tags=["auth-ui"])
 from app.query import router as query_router
+
 app.include_router(query_router, prefix="/api", tags=["query"])
 from app.jobs_api import router as jobs_router
+
 app.include_router(jobs_router, prefix="/api", tags=["jobs"])
+from app.settings_api import router as settings_router
+
+app.include_router(settings_router, prefix="/api", tags=["settings"])
+from app.code_chat_api import router as code_chat_router
+
+app.include_router(code_chat_router, prefix="/api", tags=["code-chat"])
+
+
+def _admin_dist() -> Path | None:
+    """
+    镜像内：/app/frontend/dist（与 app 包同级）。
+    本地：在 backend/ 下运行时，前端构建产物在仓库根目录的 frontend/dist。
+    """
+    pkg_root = Path(__file__).resolve().parent.parent
+    for base in (pkg_root, pkg_root.parent):
+        p = base / "frontend" / "dist"
+        if p.is_dir() and (p / "index.html").is_file():
+            return p
+    return None
+
+
+@app.get("/admin")
+@app.get("/admin/")
+async def admin_spa_index():
+    dist = _admin_dist()
+    if not dist:
+        raise HTTPException(status_code=404, detail="Admin UI not built (run: cd frontend && npm run build)")
+    return FileResponse(dist / "index.html")
+
+
+@app.get("/admin/{rest:path}")
+async def admin_spa_or_asset(rest: str):
+    dist = _admin_dist()
+    if not dist:
+        raise HTTPException(status_code=404, detail="Admin UI not built (run: cd frontend && npm run build)")
+    candidate = (dist / rest).resolve()
+    try:
+        candidate.relative_to(dist.resolve())
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Invalid path")
+    if candidate.is_file():
+        return FileResponse(candidate)
+    return FileResponse(dist / "index.html")
 
 _wiki_root = settings.data_path / "wiki_sites"
 _wiki_root.mkdir(parents=True, exist_ok=True)
@@ -66,8 +127,11 @@ def root():
     return {
         "service": "gitlab-vetor",
         "docs": "/docs",
+        "admin": "/admin/",
         "webhook": "POST /webhook/gitlab",
         "query": "POST /api/query",
+        "code_chat": "POST /api/code-chat",
+        "code_chat_stream": "POST /api/code-chat/stream",
         "wiki": "GET /wiki/<project_id>/site/",
         "wiki_meta": "GET /api/wiki/{project_id}",
     }

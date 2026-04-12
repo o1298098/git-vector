@@ -9,8 +9,14 @@ import os
 import sys
 from urllib.parse import urlparse
 
-# 确保项目根在 path 中
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# 本地：仓库根/backend；容器内：WORKDIR 为含 app 包的目录（如 /app）
+_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+for _base in (os.path.join(_root, "backend"), _root):
+    if os.path.isfile(os.path.join(_base, "app", "__init__.py")):
+        sys.path.insert(0, _base)
+        break
+else:
+    sys.path.insert(0, os.path.join(_root, "backend"))
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)

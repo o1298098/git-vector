@@ -1,6 +1,8 @@
 import logging
 from typing import Any
 
+from app.content_locale import analyze_repo_system_user, describe_batch_system_user
+from app.effective_settings import effective_content_language
 from app.llm_client import get_llm_client
 
 logger = logging.getLogger(__name__)
@@ -30,6 +32,10 @@ def describe_functions_batch(chunks: list[dict[str, Any]]) -> list[dict[str, Any
     if not client:
         return chunks
 
+    lang = effective_content_language()
+    system, user_head = describe_batch_system_user(lang)
+    tmpl_lbl = "模板" if lang == "zh" else "Template"
+    fn_lbl = "函数/方法" if lang == "zh" else "Function/method"
     out: list[dict[str, Any]] = []
     for i in range(0, len(chunks), MAX_FUNCS_PER_BATCH):
         batch = chunks[i : i + MAX_FUNCS_PER_BATCH]
@@ -37,24 +43,12 @@ def describe_functions_batch(chunks: list[dict[str, Any]]) -> list[dict[str, Any
         for j, c in enumerate(batch):
             code = (c.get("code") or "")[:MAX_CODE_LEN]
             kind = c.get("kind") or ""
-            label = "模板" if kind == "vue_template" else "函数/方法"
+            label = tmpl_lbl if kind == "vue_template" else fn_lbl
             parts.append(f"[{j}] ({label}) {c.get('path', '')} :: {c.get('name', '')}\n{code}")
-        prompt = (
-            "以下每一项要么是函数/方法代码，要么是界面模板或标记类片段（如 HTML、组件模板等）。"
-            "请为每一个用**一行中文**较为详细地、准确地描述："
-            "对函数/方法写清业务逻辑、关键输入输出、重要条件或副作用等；"
-            "对模板写清页面结构、主要交互元素、条件/列表渲染、数据绑定意图等。"
-            "不要凭空臆测与代码无关的业务含义。只输出描述本身，每行一个，与 [0][1]... 顺序严格对应，"
-            "不要换行、不要编号、不要重复文件路径或名称：\n\n"
-            + "\n\n---\n\n".join(parts)
-        )
+        prompt = user_head + "\n\n---\n\n".join(parts)
         try:
             text = client.chat(
-                system=(
-                    "你是代码分析助手。根据提供的函数/方法或模板/标记片段，只输出一行中文描述，"
-                    "可以适当详细；模板项侧重 UI 结构与交互含义，函数项侧重逻辑与副作用。"
-                    "不要换行、不要添加额外前缀。每一行只对应一个输入项。"
-                ),
+                system=system,
                 user=prompt,
             )
             lines = [ln.strip() for ln in (text or "").strip().split("\n") if ln.strip()]
@@ -91,23 +85,6 @@ def _build_file_context(batch: list[tuple[str, str]]) -> str:
     return "\n\n".join(parts)
 
 
-SYSTEM_PROMPT = """你是一个代码分析助手。根据提供的项目代码文件内容，用中文生成简洁的「功能说明」。
-要求：
-1. 按模块/文件归纳功能，说明这段代码在做什么、对外提供什么能力。
-2. 输出多段说明，每段对应一个逻辑模块或文件，格式为：
-   [模块名或文件路径]
-   功能说明内容（一两句话即可）
-3. 不要复制大段代码，只写自然语言说明。"""
-
-
-def _user_prompt(files_context: str, project_id: str) -> str:
-    return f"""项目标识: {project_id}
-
-请分析以下代码并生成功能说明（多段，每段对应一个模块/文件）：
-
-{files_context}
-
-请直接输出多段 [模块/路径] + 功能说明，不要其他前缀。"""
 
 
 def analyze_repo_and_describe(
@@ -116,27 +93,30 @@ def analyze_repo_and_describe(
 ) -> list[dict[str, Any]]:
     """对仓库文件分批调用 LLM 生成功能说明，返回用于向量化的文档列表。"""
     client = get_llm_client()
+    lang = effective_content_language()
     if not client:
         logger.warning("No LLM client configured, using file names as descriptions")
-        return [
-            {"path": path, "content": f"文件: {path}\n(未配置 LLM，未生成说明)", "metadata": {"path": path}}
-            for path, _ in files[:200]
-        ]
-
+        tpl = (
+            "文件: {p}\n(未配置 LLM，未生成说明)"
+            if lang == "zh"
+            else "File: {p}\n(LLM not configured; no description)"
+        )
+        return [{"path": path, "content": tpl.format(p=path), "metadata": {"path": path}} for path, _ in files[:200]]
     all_chunks: list[dict[str, Any]] = []
     batches = _batch_files(files)
 
     for batch in batches:
         context = _build_file_context(batch)
-        user = _user_prompt(context, project_id)
+        system, user = analyze_repo_system_user(lang, project_id, context)
         try:
-            text = client.chat(system=SYSTEM_PROMPT, user=user)
+            text = client.chat(system=system, user=user)
         except Exception as e:
             logger.exception("LLM call failed: %s", e)
+            fail_tpl = "文件: {p}\n(分析失败: {err})" if lang == "zh" else "File: {p}\n(Analysis failed: {err})"
             for path, content in batch:
                 all_chunks.append({
                     "path": path,
-                    "content": f"文件: {path}\n(分析失败: {e})",
+                    "content": fail_tpl.format(p=path, err=e),
                     "metadata": {"path": path},
                 })
             continue
@@ -170,10 +150,11 @@ def analyze_repo_and_describe(
                 })
 
     if not all_chunks:
+        stub = "文件: {p}" if lang == "zh" else "File: {p}"
         for path, _ in files[:100]:
             all_chunks.append({
                 "path": path,
-                "content": f"文件: {path}",
+                "content": stub.format(p=path),
                 "metadata": {"path": path},
             })
     return all_chunks

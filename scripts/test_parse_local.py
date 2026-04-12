@@ -6,7 +6,13 @@
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+for _base in (os.path.join(_root, "backend"), _root):
+    if os.path.isfile(os.path.join(_base, "app", "__init__.py")):
+        sys.path.insert(0, _base)
+        break
+else:
+    sys.path.insert(0, os.path.join(_root, "backend"))
 
 # 内联 TSX 示例：包含 function、const X = () => {}、class
 SAMPLE_TSX = """

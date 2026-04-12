@@ -20,6 +20,7 @@ export REPO_URL PROJECT_ID
 echo "Using DIFY_BASE_URL=$DIFY_BASE_URL DATA_DIR=$DATA_DIR"
 echo "Repo: $REPO_URL Project: $PROJECT_ID"
 echo "Running index pipeline (vector store write skipped)..."
+export PYTHONPATH="$(pwd)/backend${PYTHONPATH:+:$PYTHONPATH}"
 . .venv/bin/activate
 python3 -c "
 import logging

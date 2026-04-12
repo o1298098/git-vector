@@ -24,6 +24,14 @@ from typing import Any
 import yaml
 
 from app.config import settings
+from app.content_locale import WikiI18n, wiki_i18n
+from app.effective_settings import (
+    effective_content_language,
+    effective_wiki_backend,
+    effective_wiki_enabled,
+    effective_wiki_max_file_pages,
+    effective_wiki_symbol_rows_per_file,
+)
 from app.wiki_node_build import build_starlight_site, build_vitepress_site
 from app.llm_client import get_llm_client
 
@@ -61,6 +69,7 @@ class WikiDocContext:
     h1_line: str
     max_file_pages: int
     rows_per: int
+    i18n: WikiI18n
 
 
 def _safe_project_id(project_id: str) -> str:
@@ -166,6 +175,7 @@ def _file_tree_insert(
 
 def _render_file_tree_md(
     node: _DirNode,
+    ws: WikiI18n,
     indent: int = 0,
     *,
     mkdocs_style_links: bool,
@@ -179,6 +189,7 @@ def _render_file_tree_md(
         lines.extend(
             _render_file_tree_md(
                 node.dirs[dname],
+                ws,
                 indent + 1,
                 mkdocs_style_links=mkdocs_style_links,
                 node_deploy_prefix=node_deploy_prefix,
@@ -192,11 +203,12 @@ def _render_file_tree_md(
                 mkdocs_style=mkdocs_style_links,
                 node_deploy_prefix=node_deploy_prefix,
             )
-            lines.append(f"{sp}- [{fname}]({href}) — {cnt} 个符号")
-        else:
             lines.append(
-                f"{sp}- `{fname}` — {cnt} 个符号（未生成单独页面，请用顶部搜索）"
+                sp
+                + ws.ft_symbols_line.format(fname=fname, href=href, cnt=cnt)
             )
+        else:
+            lines.append(sp + ws.ft_symbols_plain.format(fname=fname, cnt=cnt))
     return lines
 
 
@@ -231,10 +243,10 @@ def _file_symbol_heading(name: str, kind: str, anchor: str) -> str:
 MAX_FUNCTION_SUMMARY_CHARS = 6000
 
 
-def _trim_summary(text: str) -> str:
+def _trim_summary(text: str, ws: WikiI18n) -> str:
     t = (text or "").strip()
     if len(t) > MAX_FUNCTION_SUMMARY_CHARS:
-        return t[: MAX_FUNCTION_SUMMARY_CHARS].rstrip() + "\n\n…（已截断）"
+        return t[: MAX_FUNCTION_SUMMARY_CHARS].rstrip() + ws.trim_truncated
     return t
 
 
@@ -351,27 +363,21 @@ def _yaml_double_quoted(s: str) -> str:
     return (s or "").replace("\\", "\\\\").replace('"', '\\"')
 
 
-def _wiki_llm_function_description(chunk: dict[str, Any]) -> str:
+def _wiki_llm_function_description(chunk: dict[str, Any], ws: WikiI18n) -> str:
     """
     Wiki「功能说明」**仅**使用索引阶段 `describe_functions_batch` 写入的 LLM 描述，
     与向量库检索用的自然语言一致；不用源码 docstring 冒充功能说明。
     """
     llm = (chunk.get("description") or "").strip()
     if llm:
-        return _trim_summary(llm)
+        return _trim_summary(llm, ws)
     kind = str(chunk.get("kind", ""))
     if kind == "file":
-        return (
-            "（无 LLM 描述：当前为文件级索引，未对单个函数生成说明；"
-            "可配置 LLM 并尽量使用函数级解析后重新索引，或查看下方代码摘录。）"
-        )
-    return (
-        "（无 LLM 描述：请在环境中配置 Dify / Azure OpenAI / OpenAI 后重新索引本仓库；"
-        "若已配置仍为空，请查看索引日志中 describe 阶段是否报错。）"
-    )
+        return ws.wiki_desc_none_file
+    return ws.wiki_desc_none_fn
 
 
-def _wiki_source_docstring_supplement(chunk: dict[str, Any]) -> str | None:
+def _wiki_source_docstring_supplement(chunk: dict[str, Any], ws: WikiI18n) -> str | None:
     """
     源码中的文档字符串/注释，单独展示，避免与「功能说明」混淆。
     若与 LLM 描述实质相同（去空白后一致）则不重复列出。
@@ -382,8 +388,8 @@ def _wiki_source_docstring_supplement(chunk: dict[str, Any]) -> str | None:
     doc = _docstring_from_code(code, path)
     if not doc.strip():
         return None
-    doc_t = _trim_summary(doc)
-    if llm and _normalize_ws(doc_t) == _normalize_ws(_trim_summary(llm)):
+    doc_t = _trim_summary(doc, ws)
+    if llm and _normalize_ws(doc_t) == _normalize_ws(_trim_summary(llm, ws)):
         return None
     return doc_t
 
@@ -467,54 +473,50 @@ def _architecture_markdown(
     repo_path: Path,
     chunks: list[dict[str, Any]],
     tree_text: str,
+    ws: WikiI18n,
     project_name: str = "",
 ) -> str:
     pname = (project_name or "").strip()
     if pname:
-        project_header = f"## 项目信息\n\n- **项目名称**: {pname}\n- **project_id**: `{project_id}`\n\n"
+        project_header = (
+            ws.project_info_h2
+            + ws.project_name_bullet.format(pname=pname)
+            + ws.project_id_bullet.format(pid=project_id)
+        )
     else:
-        project_header = f"## 项目信息\n\n- **project_id**: `{project_id}`\n\n"
+        project_header = ws.project_info_h2 + ws.project_id_bullet.format(pid=project_id)
 
     samples: list[str] = []
     for c in chunks[:ARCH_SAMPLE_CHUNKS]:
         p = _normalize_rel_path(str(c.get("path", "")))
         n = str(c.get("name", ""))
         k = str(c.get("kind", "function"))
-        summary = _wiki_llm_function_description(c)
+        summary = _wiki_llm_function_description(c, ws)
         line = f"- `{p}` :: `{n}` ({k}) — {summary}"
         samples.append(line)
 
+    samples_block = "\n".join(samples)
     client = get_llm_client()
     if not client:
         return (
-            "# 架构与功能总览\n\n"
+            f"# {ws.arch_md_h1}\n\n"
             + project_header
-            + "未配置 LLM，无法自动生成架构说明。以下为目录树节选与代码单元列表，请使用左侧搜索或「符号索引」浏览。\n\n"
-            "## 目录树（节选）\n\n```text\n"
-            f"{tree_text}\n```\n\n"
-            "## 代码单元摘要（节选）\n\n"
-            + "\n".join(samples)
+            + ws.arch_no_llm_intro
+            + "\n\n"
+            + f"## {ws.arch_tree_heading}\n\n```text\n{tree_text}\n```\n\n"
+            + f"## {ws.arch_samples_heading}\n\n"
+            + samples_block
             + "\n"
         )
 
     if pname:
-        pname_line = f"项目展示名称：`{pname}`\n项目标识 project_id：`{project_id}`\n\n"
+        pname_line = ws.pname_line_with_name.format(pname=pname, pid=project_id)
     else:
-        pname_line = f"项目标识 project_id：`{project_id}`\n\n"
-    user = (
-        "你是资深软件架构师。根据下面「目录树节选」与「代码单元摘要」，用**中文 Markdown** 写一份「架构与功能总览」。\n\n"
-        "必须包含三级标题：## 模块与职责、## 主要数据与控制流、## 与外部系统的交互（若无则写「未从材料中观察到」）。\n"
-        "要求：只根据材料推断，不要编造材料中不存在的功能或依赖；可适度使用列表与加粗。\n\n"
-        + pname_line
-        + "## 目录树（节选）\n```text\n"
-        + f"{tree_text}\n```\n\n"
-        + "## 代码单元摘要（节选）\n"
-        + "\n".join(samples)
-        + "\n\n请直接输出 Markdown 正文（从一级标题 `# 架构与功能总览` 开始）。"
-    )
+        pname_line = ws.pname_line_id_only.format(pid=project_id)
+    user = ws.arch_user_prompt.format(pname_line=pname_line, tree_text=tree_text, samples=samples_block)
     try:
         body = client.chat(
-            system="只输出 Markdown 正文，不要前言或后语。",
+            system=ws.arch_system,
             user=user,
         ).strip()
         if body:
@@ -522,13 +524,13 @@ def _architecture_markdown(
     except Exception as e:
         logger.warning("Architecture LLM failed: %s", e)
     return (
-        "# 架构与功能总览\n\n"
-        "（自动生成失败，以下为节选材料。）\n\n"
+        f"# {ws.arch_md_h1}\n\n"
+        + ws.arch_llm_fail_note
+        + "\n\n"
         + project_header
-        + "## 目录树（节选）\n\n```text\n"
-        f"{tree_text}\n```\n\n"
-        "## 代码单元摘要（节选）\n\n"
-        + "\n".join(samples)
+        + f"## {ws.arch_tree_heading}\n\n```text\n{tree_text}\n```\n\n"
+        + f"## {ws.arch_samples_heading}\n\n"
+        + samples_block
         + "\n"
     )
 
@@ -538,6 +540,7 @@ def _write_file_pages(
     by_file: dict[str, list[dict[str, Any]]],
     slug_map: dict[str, str],
     max_pages: int,
+    ws: WikiI18n,
     *,
     use_pymdownx_admonitions: bool,
 ) -> None:
@@ -551,7 +554,7 @@ def _write_file_pages(
         path_norm = _normalize_rel_path(rel_path)
         ext = _ext_of(path_norm)
         title_esc = _safe_yaml_double_quoted_title(path_norm)
-        desc_esc = _safe_yaml_double_quoted_title(f"文件 {path_norm} 内的符号与说明")
+        desc_esc = _safe_yaml_double_quoted_title(ws.file_page_desc.format(path=path_norm))
         lines: list[str] = [
             "---",
             f'title: "{title_esc}"',
@@ -560,10 +563,10 @@ def _write_file_pages(
             "",
             f"# `{path_norm}`",
             "",
-            f"- **语言/扩展名**: `{ext or 'n/a'}`",
-            f"- **符号数量**: {len(syms)}",
+            ws.lang_ext_label.format(ext=ext or "n/a"),
+            ws.sym_count_label.format(n=len(syms)),
             "",
-            "## 符号列表",
+            ws.sym_list_h2,
             "",
         ]
         for c in sorted(syms, key=lambda x: (int(x.get("start_line") or 0), str(x.get("name", "")))):
@@ -571,35 +574,38 @@ def _write_file_pages(
             kind = str(c.get("kind", "function"))
             sl = c.get("start_line")
             el = c.get("end_line")
-            llm_desc = _wiki_llm_function_description(c)
+            llm_desc = _wiki_llm_function_description(c, ws)
             calls = c.get("calls") or []
             anchor = _symbol_anchor(kind, name)
             lines.append(_file_symbol_heading(name, kind, anchor))
             lines.append("")
-            lines.append("- **功能说明**（LLM 生成）:")
+            lines.append(ws.func_desc_llm_label)
             lines.extend(_md_list_item_body(llm_desc))
-            src_doc = _wiki_source_docstring_supplement(c)
+            src_doc = _wiki_source_docstring_supplement(c, ws)
             if src_doc:
                 lines.append("")
-                lines.append("- **源码文档**（docstring / 注释）:")
+                lines.append(ws.source_doc_bullet)
                 lines.extend(_md_list_item_body(src_doc))
             lines.append("")
-            lines.append(f"- **位置**: 第 {sl}–{el} 行" if el else f"- **位置**: 第 {sl} 行起")
+            if el:
+                lines.append(ws.pos_lines_range.format(sl=sl, el=el))
+            else:
+                lines.append(ws.pos_lines_from.format(sl=sl))
             if calls:
-                lines.append(f"- **调用**: {', '.join(str(x) for x in calls[:40])}")
+                lines.append(f"{ws.calls_label}{', '.join(str(x) for x in calls[:40])}")
             code = (c.get("code") or "").strip()
             if code:
                 snippet = code[:MAX_CODE_IN_WIKI]
                 if len(code) > MAX_CODE_IN_WIKI:
-                    snippet += "\n\n/* … 已截断 … */"
+                    snippet += ws.truncated_comment
                 if use_pymdownx_admonitions:
-                    lines.extend(["", '??? note "代码摘录"', "", "```text", snippet, "```", ""])
+                    lines.extend(["", ws.code_extract_admonition, "", "```text", snippet, "```", ""])
                 else:
                     lines.extend(
                         [
                             "",
                             "<details>",
-                            "<summary>代码摘录</summary>",
+                            f"<summary>{ws.code_extract_summary_text}</summary>",
                             "",
                             "```text",
                             snippet,
@@ -619,6 +625,7 @@ def _write_symbol_index_parts(
     slug_map: dict[str, str],
     rows_per_file: int,
     paths_with_file_page: set[str],
+    ws: WikiI18n,
     *,
     mkdocs_style_links: bool,
     node_deploy_prefix: str | None,
@@ -642,16 +649,18 @@ def _write_symbol_index_parts(
     for pi, group in enumerate(parts):
         md_filename = "symbol-index.md" if pi == 0 else f"symbol-index-{pi + 1}.md"
         nav_names.append(md_filename)
-        title = "符号索引" if pi == 0 else f"符号索引（第 {pi + 1} 部分）"
+        title = ws.sym_idx_title if pi == 0 else ws.sym_idx_part_title.format(n=pi + 1)
+        title_esc = _safe_yaml_double_quoted_title(title)
+        desc_esc = _safe_yaml_double_quoted_title(ws.sym_idx_desc_yaml)
         lines: list[str] = [
             "---",
-            f'title: "{title}"',
-            "description: 全量符号与所在文件",
+            f'title: "{title_esc}"',
+            f'description: "{desc_esc}"',
             "---",
             "",
-            "# 符号索引",
+            ws.sym_idx_h1,
             "",
-            "按 **文件** 分组列出符号；长路径只在每组标题出现一次，表格更易阅读。",
+            ws.sym_idx_intro,
             "",
         ]
         for path_norm, file_chunks_iter in groupby(
@@ -664,11 +673,12 @@ def _write_symbol_index_parts(
             lines.append(f"## `{path_esc}`")
             lines.append("")
             if path_norm in paths_with_file_page:
-                lines.append(
-                    f"[打开该文件说明页]({_wiki_link_to_file_page(slug, mkdocs_style=mkdocs_style_links, node_deploy_prefix=node_deploy_prefix)})"
+                href = _wiki_link_to_file_page(
+                    slug, mkdocs_style=mkdocs_style_links, node_deploy_prefix=node_deploy_prefix
                 )
+                lines.append(ws.open_file_page_link.format(href=href))
                 lines.append("")
-            lines.append("| 符号 | 类型 | 行号 | 功能说明 |")
+            lines.append(f"| {ws.tbl_symbol} | {ws.tbl_kind} | {ws.tbl_lines} | {ws.tbl_desc} |")
             lines.append("| --- | --- | --- | --- |")
             for c in file_chunks:
                 sym_name = str(c.get("name", ""))
@@ -676,7 +686,7 @@ def _write_symbol_index_parts(
                 sl = c.get("start_line", "")
                 el = c.get("end_line", "")
                 row_line = f"{sl}-{el}" if el else str(sl)
-                desc = _escape_md_table_cell(_wiki_llm_function_description(c))
+                desc = _escape_md_table_cell(_wiki_llm_function_description(c, ws))
                 anchor = _symbol_anchor(kind, sym_name)
                 sym_cell = (
                     f"[`{_escape_md_table_cell(sym_name)}`]("
@@ -704,37 +714,39 @@ def _write_wiki_documentation(
     """
     pname = (ctx.project_name or "").strip()
     project_id = ctx.project_id
+    ws = ctx.i18n
 
+    idx_desc_esc = _safe_yaml_double_quoted_title(ws.index_desc_yaml)
     index_lines = [
         "---",
         f'title: "{ctx.page_title}"',
-        "description: 代码索引与符号说明（自动生成）",
+        f'description: "{idx_desc_esc}"',
         "---",
         "",
         f"# {ctx.h1_line}",
         "",
-        "## 元数据",
+        ws.meta_h2,
         "",
     ]
     if pname:
         index_lines.extend(
             [
-                f"- **项目名称**: {pname}",
-                f"- **project_id**: `{project_id}`",
+                ws.project_name_bullet.format(pname=pname).strip(),
+                ws.project_id_bullet.format(pid=project_id).strip(),
             ]
         )
     else:
-        index_lines.append(f"- **project_id**: `{project_id}`")
+        index_lines.append(ws.project_id_bullet.format(pid=project_id).strip())
     index_lines.extend(
         [
-            f"- **Git 提交**: `{ctx.commit}`",
-            f"- **生成时间（UTC）**: {ctx.generated_at}",
-            f"- **符号/单元总数**: {len(ctx.chunks)}",
-            f"- **文件数（有符号）**: {len(ctx.by_file)}",
+            ws.git_commit_label.format(commit=ctx.commit),
+            ws.gen_time_label.format(t=ctx.generated_at),
+            ws.total_units_label.format(n=len(ctx.chunks)),
+            ws.files_with_syms_label.format(n=len(ctx.by_file)),
             "",
-            "## 语言 / 扩展名分布",
+            ws.ext_dist_h2,
             "",
-            "| 扩展名 | 文件数 |",
+            f"| {ws.ext_col} | {ws.files_col} |",
             "| --- | --- |",
         ]
     )
@@ -743,28 +755,26 @@ def _write_wiki_documentation(
     index_lines.extend(
         [
             "",
-            "## 使用说明",
+            ws.usage_h2,
             "",
-            "使用顶部 **搜索框** 可全文检索路径、函数名与说明。",
+            ws.usage_search,
             "",
-            "**功能说明** 一栏仅展示索引阶段由 LLM（Dify / OpenAI / Azure OpenAI）生成的描述，与向量语义检索一致；"
-            "若未配置 LLM 或生成失败，会显示提示文案。源码中的 docstring 如有且与 LLM 描述不同，会单独出现在 **源码文档** 中。",
+            ws.usage_feature_line,
             "",
         ]
     )
     if ctx.readme:
-        index_lines.extend(["## README 摘录", "", ctx.readme, ""])
+        index_lines.extend([ws.readme_h2, "", ctx.readme, ""])
     (docs_dir / "index.md").write_text("\n".join(index_lines), encoding="utf-8")
 
     arch_body = _architecture_markdown(
-        project_id, ctx.repo_path, ctx.chunks, ctx.tree_text, project_name=pname
+        project_id, ctx.repo_path, ctx.chunks, ctx.tree_text, ws, project_name=pname
     )
-    # Starlight 将文档按内容集合 + Zod 校验，title 必填；正文内重复的「一级标题」去掉以免与侧栏标题叠显。
-    arch_body = re.sub(r"^#\s*架构与功能总览\s*\n+", "", arch_body.lstrip(), count=1)
-    arch_title = _safe_yaml_double_quoted_title("架构与功能总览")
-    arch_desc = _safe_yaml_double_quoted_title(
-        "基于目录树与代码单元摘要的自动说明（可能含 LLM 生成内容）"
-    )
+    # Starlight：去掉正文重复的一级标题
+    h1_esc = re.escape(ws.arch_md_h1)
+    arch_body = re.sub(rf"^#\s*{h1_esc}\s*\n+", "", arch_body.lstrip(), count=1)
+    arch_title = _safe_yaml_double_quoted_title(ws.arch_title_yaml)
+    arch_desc = _safe_yaml_double_quoted_title(ws.arch_desc_yaml)
     arch_doc = (
         "---\n"
         f'title: "{arch_title}"\n'
@@ -784,35 +794,38 @@ def _write_wiki_documentation(
         _file_tree_insert(tree_root, path_norm, slug, len(syms), has_page)
     tree_lines = _render_file_tree_md(
         tree_root,
+        ws,
         mkdocs_style_links=use_pymdownx_admonitions,
         node_deploy_prefix=node_deploy_prefix,
     )
     overflow_files = len(ctx.by_file) - min(len(ctx.by_file), ctx.max_file_pages)
+    fi_title_esc = _safe_yaml_double_quoted_title(ws.fi_title_yaml)
+    fi_desc_esc = _safe_yaml_double_quoted_title(ws.fi_desc_yaml)
     fi_lines = [
         "---",
-        'title: "文件索引"',
-        "description: 按路径浏览生成的文件说明页",
+        f'title: "{fi_title_esc}"',
+        f'description: "{fi_desc_esc}"',
         "---",
         "",
-        "# 文件索引",
+        ws.fi_h1,
         "",
-        "按仓库 **目录树** 浏览；点击文件名进入该文件的符号说明页。也可使用顶部 **搜索** 按路径或符号名查找。",
+        ws.fi_intro,
         "",
         *tree_lines,
         "",
     ]
     if overflow_files > 0:
         fi_lines.append(
-            f"超出单仓页面上限（`WIKI_MAX_FILE_PAGES={ctx.max_file_pages}`）的文件仍出现在上表中，"
-            f"但**未生成单独文档页**（共 {overflow_files} 个）；请用搜索或「符号索引」查看。"
+            ws.fi_overflow.format(max_pages=ctx.max_file_pages, overflow=overflow_files)
         )
         fi_lines.append("")
 
+    note_q = ws.fi_flat_list_summary.replace('"', '\\"')
     if use_pymdownx_admonitions:
         fi_lines.extend(
             [
-                '??? note "扁平路径列表（备选，便于复制完整路径）"',
-                "    | 路径 | 符号数 | 文档 |",
+                f'??? note "{note_q}"',
+                f"    | {ws.fi_tbl_path} | {ws.fi_tbl_syms} | {ws.fi_tbl_doc} |",
                 "    | --- | ---: | --- |",
             ]
         )
@@ -821,9 +834,9 @@ def _write_wiki_documentation(
         fi_lines.extend(
             [
                 "<details>",
-                "<summary>扁平路径列表（备选，便于复制完整路径）</summary>",
+                f"<summary>{ws.fi_flat_list_summary}</summary>",
                 "",
-                "| 路径 | 符号数 | 文档 |",
+                f"| {ws.fi_tbl_path} | {ws.fi_tbl_syms} | {ws.fi_tbl_doc} |",
                 "| --- | ---: | --- |",
             ]
         )
@@ -831,9 +844,7 @@ def _write_wiki_documentation(
 
     for i, (path_norm, syms) in enumerate(sorted_file_items):
         if i >= ctx.max_file_pages:
-            fi_lines.append(
-                f"{row_prefix}| … | … | *另有 {overflow_files} 个文件未单独建页* |"
-            )
+            fi_lines.append(row_prefix + ws.fi_more_files_row.format(n=overflow_files))
             break
         slug = ctx.slug_map[path_norm]
         open_href = _wiki_link_to_file_page(
@@ -842,7 +853,7 @@ def _write_wiki_documentation(
             node_deploy_prefix=node_deploy_prefix,
         )
         fi_lines.append(
-            f"{row_prefix}| `{_escape_md_table_cell(path_norm)}` | {len(syms)} | [打开]({open_href}) |"
+            f"{row_prefix}| `{_escape_md_table_cell(path_norm)}` | {len(syms)} | [{ws.fi_open}]({open_href}) |"
         )
     if not use_pymdownx_admonitions:
         fi_lines.extend(["", "</details>"])
@@ -854,6 +865,7 @@ def _write_wiki_documentation(
         ctx.by_file,
         ctx.slug_map,
         ctx.max_file_pages,
+        ws,
         use_pymdownx_admonitions=use_pymdownx_admonitions,
     )
     return _write_symbol_index_parts(
@@ -862,6 +874,7 @@ def _write_wiki_documentation(
         ctx.slug_map,
         ctx.rows_per,
         paths_with_file_page,
+        ws,
         mkdocs_style_links=use_pymdownx_admonitions,
         node_deploy_prefix=node_deploy_prefix,
     )
@@ -878,7 +891,7 @@ def generate_project_wiki(
     生成静态 Wiki 源文件并执行 build。失败时抛出异常（由 indexer 捕获）。
     project_name：可选展示名（如中文项目名），由触发接口或 Webhook 传入。
     """
-    if not settings.wiki_enabled:
+    if not effective_wiki_enabled():
         return {"skipped": True, "reason": "wiki_disabled"}
 
     pname = (project_name or "").strip()
@@ -889,18 +902,10 @@ def generate_project_wiki(
     work_dir = settings.data_path / "wiki_work" / safe
     site_out = wiki_root / "site"
 
-    max_file_pages = int(
-        os.environ.get("WIKI_MAX_FILE_PAGES")
-        or getattr(settings, "wiki_max_file_pages", DEFAULT_MAX_FILE_PAGES)
-    )
-    rows_per = int(
-        os.environ.get("WIKI_SYMBOL_ROWS_PER_FILE")
-        or getattr(settings, "wiki_symbol_rows_per_file", DEFAULT_SYMBOL_ROWS_PER_FILE)
-    )
+    max_file_pages = effective_wiki_max_file_pages()
+    rows_per = effective_wiki_symbol_rows_per_file()
 
-    backend = str(
-        os.environ.get("WIKI_BACKEND") or getattr(settings, "wiki_backend", "mkdocs") or "mkdocs"
-    ).strip().lower()
+    backend = str(effective_wiki_backend()).strip().lower()
     if backend not in ("mkdocs", "starlight", "vitepress"):
         logger.warning("未知 WIKI_BACKEND=%s，回退 mkdocs", backend)
         backend = "mkdocs"
@@ -932,9 +937,13 @@ def generate_project_wiki(
 
     readme = _readme_excerpt(collected_files or [], limit=8000)
 
-    page_title = _safe_yaml_double_quoted_title(
-        f"{pname}（{project_id}）" if pname else f"项目 Wiki — {project_id}"
+    ws = wiki_i18n(effective_content_language())
+    raw_page_title = (
+        ws.page_title_pair.format(pname=pname, pid=project_id)
+        if pname
+        else ws.wiki_title_suffix.format(pid=project_id)
     )
+    page_title = _safe_yaml_double_quoted_title(raw_page_title)
     site_title = f"{pname} · {project_id}" if pname else f"Wiki — {project_id}"
     h1_line = pname if pname else project_id
 
@@ -955,6 +964,7 @@ def generate_project_wiki(
         h1_line=h1_line,
         max_file_pages=max_file_pages,
         rows_per=rows_per,
+        i18n=ws,
     )
 
     use_pymdownx = backend == "mkdocs"
@@ -968,25 +978,27 @@ def generate_project_wiki(
     site_out.parent.mkdir(parents=True, exist_ok=True)
 
     if backend == "mkdocs":
-        nav: list[Any] = [
-            {"首页": "index.md"},
-            {"架构总览": "architecture.md"},
-            {"文件索引": "file-index.md"},
+        nav = [
+            {ws.mkdocs_nav_home: "index.md"},
+            {ws.mkdocs_nav_arch: "architecture.md"},
+            {ws.mkdocs_nav_files: "file-index.md"},
         ]
         if len(symbol_nav) == 1:
-            nav.append({"符号索引": symbol_nav[0]})
+            nav.append({ws.mkdocs_nav_symbols: symbol_nav[0]})
         else:
-            nested = [{f"第 {i + 1} 部分": n} for i, n in enumerate(symbol_nav)]
-            nav.append({f"符号索引（共 {len(symbol_nav)} 部分）": nested})
+            nested = [{ws.mkdocs_nav_part.format(n=i + 1): n} for i, n in enumerate(symbol_nav)]
+            nav.append({ws.mkdocs_nav_symbols_multi.format(n=len(symbol_nav)): nested})
 
         mkdocs_path = work_dir / "mkdocs.yml"
+        mk_lang = "zh" if ws.lang == "zh" else "en"
+        search_lang = ["zh"] if ws.lang == "zh" else ["en"]
         mkdocs_content: dict[str, Any] = {
             "site_name": site_title,
             "docs_dir": "docs",
             "site_dir": str(site_out.resolve()),
             "theme": {
                 "name": "material",
-                "language": "zh",
+                "language": mk_lang,
                 "features": [
                     "navigation.indexes",
                     "navigation.expand",
@@ -1002,7 +1014,7 @@ def generate_project_wiki(
                 "pymdownx.superfences",
             ],
             "plugins": [
-                {"search": {"lang": ["en"]}},
+                {"search": {"lang": search_lang}},
             ],
             "nav": nav,
         }
@@ -1035,7 +1047,12 @@ def generate_project_wiki(
             work_dir,
         )
         build_starlight_site(
-            work_dir, site_out, site_title, symbol_nav, public_base=wiki_browse_base
+            work_dir,
+            site_out,
+            site_title,
+            symbol_nav,
+            public_base=wiki_browse_base,
+            wiki_ui=ws,
         )
     else:
         logger.info(
@@ -1045,7 +1062,12 @@ def generate_project_wiki(
             work_dir,
         )
         build_vitepress_site(
-            work_dir, site_out, site_title, symbol_nav, public_base=wiki_browse_base
+            work_dir,
+            site_out,
+            site_title,
+            symbol_nav,
+            public_base=wiki_browse_base,
+            wiki_ui=ws,
         )
 
     manifest = {

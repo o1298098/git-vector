@@ -623,7 +623,7 @@ def parse_files(
         logger.info(
             "parse_files: %s files, 0 function chunks。"
             " get_parser 来源=%s；parser_tsx=%s，parser_typescript=%s。"
-            " 若来源为空：在同一 venv 执行 pip install -r requirements.txt（需 tree-sitter-language-pack）。"
+            " 若来源为空：在同一 venv 执行 pip install -r backend/requirements.txt（需 tree-sitter-language-pack）。"
             " 若来源非空但 Parser 为 None：多为当前平台无可用预编译语言包或加载失败，可将日志级别调到 DEBUG 查看 “No parser for”。",
             len(files),
             _GET_PARSER_MODULE or "(未安装 tree_sitter_language_pack / tree_sitter_languages)",

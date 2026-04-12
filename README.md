@@ -14,6 +14,17 @@ This service indexes GitLab repositories into a searchable vector knowledge base
 
 ---
 
+## Repository layout
+
+| Path | Purpose |
+|------|---------|
+| `backend/app/` | Python / FastAPI service, indexing, wiki, vector store |
+| `backend/requirements.txt` | Backend dependencies |
+| `frontend/` | React + Vite admin UI (built assets served at `/admin/`) |
+| `scripts/` | Helper scripts |
+
+---
+
 ## Workflow (matches the code)
 
 ```text
@@ -141,7 +152,7 @@ Response shape:
 
 ### Projects / index status
 
-- **GET** `/api/projects`: list indexed projects and doc counts
+- **GET** `/api/projects`: list indexed projects and doc counts; each item includes `project_name` (display name, may be `null`); optional `q` (matches `project_id` or `project_name` substring), `limit`/`offset` pagination (omit `limit` for full list, backward compatible)
 - **GET** `/api/project/index-status?project_id=xxx`: check whether a project is indexed (`indexed/doc_count`)
 
 ### Static Wiki (MkDocs / Starlight / VitePress)
@@ -159,7 +170,7 @@ Pages include overview, architecture (when an LLM is configured), file index (tr
 
 Indexing runs through a **serial queue** (avoids concurrent writes to Chroma / local repo dirs). Job state is persisted in SQLite so you can still query history after restarts.
 
-- **List jobs**: `GET /api/index-jobs?limit=50&offset=0` (optional `status` / `project_id` filters)
+- **List jobs**: `GET /api/index-jobs?limit=50&offset=0` (optional `status` / `project_id` filters; response `total` is the full match count, `jobs` is the current page, `limit`/`offset` echo the request)
 - **Get one job**: `GET /api/index-jobs/{job_id}`
 
 Key fields:
@@ -226,12 +237,19 @@ By default under `DATA_DIR`:
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r backend/requirements.txt
 cp .env.example .env
-uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+cd backend && uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+```
+
+Admin UI local dev (optional, second terminal; set `CORS_ORIGINS=http://localhost:5173`):
+
+```bash
+cd frontend && npm install && npm run dev
 ```
 
 Notes:
 
+- When started from `backend/`, the default `DATA_DIR=./data` resolves to `backend/data/`; set `DATA_DIR=../data` in `.env` if you want data at the repository root.
 - On startup the service attempts to start the indexing queue worker; vector store/embedding objects are typically loaded on first index or first query.
 - If you see `No function-level chunks parsed ...; using file-level fallback`, parsing produced zero function chunks and the service fell back to file-level chunks (retrieval still works, but granularity is coarser).
