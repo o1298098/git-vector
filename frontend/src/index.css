@@ -165,6 +165,220 @@
     margin-bottom: 0;
   }
 
+  /* 助手 Markdown 围栏代码块：接近 ChatGPT 的分区顶栏 + 小圆角 + 等宽字体 */
+  .x-markdown-light .gv-xmd-fenced-wrap {
+    /* 上贴前文，下留空给后续段落（原先被 x-markdown 写在 pre>code 的 margin 上，已一并重置） */
+    margin-block: 0 1rem;
+    overflow: hidden;
+    border-radius: 10px;
+    border: 1px solid rgb(0 0 0 / 0.12);
+    background: #fafafa;
+  }
+
+  .x-markdown-light .gv-xmd-fenced-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.375rem;
+    padding: 0.5rem 0.75rem;
+    color: rgb(0 0 0 / 0.55);
+    font-size: 12px;
+    line-height: 1.25;
+    border-bottom: 1px solid rgb(0 0 0 / 0.08);
+  }
+
+  .x-markdown-light .gv-xmd-fenced-lang {
+    display: inline-flex;
+    min-width: 0;
+    align-items: center;
+    gap: 0.35rem;
+    font-family: ui-sans-serif, system-ui, sans-serif;
+    font-weight: 500;
+    letter-spacing: 0.01em;
+  }
+
+  .x-markdown-light .gv-xmd-fenced-lang-icon {
+    width: 1rem;
+    height: 1rem;
+    flex-shrink: 0;
+    opacity: 0.65;
+  }
+
+  .x-markdown-light .gv-xmd-fenced-copy {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.2rem;
+    flex-shrink: 0;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    padding: 0 4px;
+    min-height: 0;
+    font: inherit;
+    font-size: 12px;
+    font-weight: 500;
+    color: inherit;
+    cursor: pointer;
+    transition: background-color 0.15s ease;
+  }
+
+  .x-markdown-light .gv-xmd-fenced-copy:hover:not(:disabled) {
+    background: rgb(0 0 0 / 0.06);
+    color: rgb(0 0 0 / 0.85);
+  }
+
+  .x-markdown-light .gv-xmd-fenced-copy:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
+  }
+
+  .x-markdown-light .gv-xmd-fenced-pre {
+    box-sizing: border-box;
+    width: 100%;
+    min-width: 0;
+    margin: 0;
+    overflow-x: auto;
+    padding: 0.75rem 1rem 1rem;
+  }
+
+  .x-markdown-light .gv-xmd-fenced-code--plain {
+    color: rgb(0 0 0 / 0.88);
+    white-space: pre;
+  }
+
+  .x-markdown-dark .gv-xmd-fenced-wrap {
+    margin-block: 0 1rem;
+    overflow: hidden;
+    border-radius: 10px;
+    /* 与页面同色相（slate），避免纯中性灰在冷色底上发褐 */
+    border: 1px solid hsl(var(--border));
+    background: hsl(var(--muted));
+  }
+
+  .x-markdown-dark .gv-xmd-fenced-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.375rem;
+    padding: 0.5rem 0.75rem;
+    color: hsl(var(--muted-foreground));
+    font-size: 12px;
+    line-height: 1.25;
+    border-bottom: 1px solid hsl(var(--border));
+  }
+
+  .x-markdown-dark .gv-xmd-fenced-lang {
+    display: inline-flex;
+    min-width: 0;
+    align-items: center;
+    gap: 0.35rem;
+    font-family: ui-sans-serif, system-ui, sans-serif;
+    font-weight: 500;
+    letter-spacing: 0.01em;
+  }
+
+  .x-markdown-dark .gv-xmd-fenced-lang-icon {
+    width: 1rem;
+    height: 1rem;
+    flex-shrink: 0;
+    opacity: 0.7;
+  }
+
+  .x-markdown-dark .gv-xmd-fenced-copy {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.2rem;
+    flex-shrink: 0;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    padding: 0 4px;
+    min-height: 0;
+    font: inherit;
+    font-size: 12px;
+    font-weight: 500;
+    color: inherit;
+    cursor: pointer;
+    transition: background-color 0.15s ease;
+  }
+
+  .x-markdown-dark .gv-xmd-fenced-copy:hover:not(:disabled) {
+    background: rgb(255 255 255 / 0.08);
+    color: rgb(255 255 255 / 0.92);
+  }
+
+  .x-markdown-dark .gv-xmd-fenced-copy:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
+  }
+
+  .x-markdown-dark .gv-xmd-fenced-pre {
+    box-sizing: border-box;
+    width: 100%;
+    min-width: 0;
+    margin: 0;
+    overflow-x: auto;
+    padding: 0.75rem 1rem 1rem;
+  }
+
+  .x-markdown-dark .gv-xmd-fenced-code--plain {
+    color: rgb(255 255 255 / 0.88);
+    white-space: pre;
+  }
+
+  /* 浅色/深色共用：等宽与字号 */
+  .x-markdown-light .gv-xmd-fenced-code,
+  .x-markdown-dark .gv-xmd-fenced-code {
+    display: block;
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    font-size: 13px;
+    line-height: 1.45;
+  }
+
+  /* 暗色：未单独配色的 token 跟父级字色；具体 token 见下方 .hljs-* */
+  .x-markdown-dark .gv-xmd-fenced-pre code.hljs {
+    color: inherit;
+  }
+
+  .x-markdown-dark .gv-xmd-fenced-pre .hljs-keyword,
+  .x-markdown-dark .gv-xmd-fenced-pre .hljs-selector-tag,
+  .x-markdown-dark .gv-xmd-fenced-pre .hljs-section,
+  .x-markdown-dark .gv-xmd-fenced-pre .hljs-deletion {
+    color: #ff7b72;
+  }
+
+  .x-markdown-dark .gv-xmd-fenced-pre .hljs-string,
+  .x-markdown-dark .gv-xmd-fenced-pre .hljs-attr,
+  .x-markdown-dark .gv-xmd-fenced-pre .hljs-template-variable,
+  .x-markdown-dark .gv-xmd-fenced-pre .hljs-template-tag,
+  .x-markdown-dark .gv-xmd-fenced-pre .hljs-addition {
+    color: #a5d6ff;
+  }
+
+  .x-markdown-dark .gv-xmd-fenced-pre .hljs-function .hljs-keyword,
+  .x-markdown-dark .gv-xmd-fenced-pre .hljs-title.function_ {
+    color: #d2a8ff;
+  }
+
+  .x-markdown-dark .gv-xmd-fenced-pre .hljs-title,
+  .x-markdown-dark .gv-xmd-fenced-pre .hljs-name {
+    color: #ffa657;
+  }
+
+  .x-markdown-dark .gv-xmd-fenced-pre .hljs-number,
+  .x-markdown-dark .gv-xmd-fenced-pre .hljs-literal {
+    color: #79c0ff;
+  }
+
+  .x-markdown-dark .gv-xmd-fenced-pre .hljs-comment {
+    color: #8b949e;
+  }
+
+  .x-markdown-dark .gv-xmd-fenced-pre .hljs-built_in,
+  .x-markdown-dark .gv-xmd-fenced-pre .hljs-type {
+    color: #ffa657;
+  }
+
   /* 输入区：圆角容器 + 内边距（Sender 主框由 index 内联样式控制） */
   .gv-code-chat-sender.ant-sender-main {
     border-radius: 1.75rem;
@@ -198,4 +412,29 @@
   body {
     @apply bg-background text-foreground antialiased;
   }
+}
+
+/*
+ * x-markdown 的 light/dark.css 在 .x-markdown-* pre code 上写了 background/padding !important，
+ * 且通常在打包后晚于本文件注入；须用更高特异性 + !important 压住 var(--light-bg) / var(--dark-bg)。
+ */
+.x-markdown-light .gv-xmd-fenced-wrap pre.gv-xmd-fenced-pre > code.gv-xmd-fenced-code,
+.x-markdown-dark .gv-xmd-fenced-wrap pre.gv-xmd-fenced-pre > code.gv-xmd-fenced-code {
+  /* 抵消 x-markdown 灰底/大 padding；保留一点下边距，避免最后一行贴 pre 底 */
+  margin: 0 0 0.25rem 0 !important;
+  padding: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+}
+
+.gv-embed-codeblock pre.gv-embed-codeblock-pre > code.hljs {
+  margin: 0 !important;
+  padding: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+}
+
+.gv-embed-codeblock-pre {
+  box-sizing: border-box;
+  padding: 0.75rem 1rem 1rem;
 }

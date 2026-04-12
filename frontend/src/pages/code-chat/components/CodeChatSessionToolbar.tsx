@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { SlidersHorizontal } from "lucide-react";
 import { Button, Popover } from "antd";
 import { Label } from "@/components/ui/label";
@@ -17,11 +17,26 @@ export type CodeChatSessionSettingsProps = {
   onTopKChange: (v: number) => void;
 };
 
+function clampTopKChat(n: number): number {
+  if (!Number.isFinite(n)) return 12;
+  return Math.min(30, Math.max(1, Math.round(n)));
+}
+
 export function CodeChatRetrievalSettingsForm(props: CodeChatSessionSettingsProps) {
   const { t } = useI18n();
   const { projectId, topK, projects, projectsLoading, disabled, onProjectChange, onTopKChange } = props;
+  const [topKDraft, setTopKDraft] = useState(() => String(topK));
+
+  useEffect(() => {
+    setTopKDraft(String(topK));
+  }, [topK]);
+
   return (
-    <div className="w-[min(calc(100vw-2.5rem),18rem)] space-y-3 sm:w-80">
+    <div
+      className="w-[min(calc(100vw-2.5rem),18rem)] space-y-3 sm:w-80"
+      onMouseDown={(e) => e.stopPropagation()}
+      onPointerDown={(e) => e.stopPropagation()}
+    >
       <p className="text-xs leading-snug text-muted-foreground">{t("chat.contextDesc")}</p>
       <div className="space-y-3">
         <div className="min-w-0 space-y-1.5">
@@ -42,12 +57,35 @@ export function CodeChatRetrievalSettingsForm(props: CodeChatSessionSettingsProp
           </Label>
           <Input
             id="code-chat-session-topk"
-            type="number"
-            min={1}
-            max={30}
-            value={topK}
+            type="text"
+            inputMode="numeric"
+            autoComplete="off"
+            value={topKDraft}
             disabled={disabled}
-            onChange={(e) => onTopKChange(Math.min(30, Math.max(1, Number(e.target.value) || 12)))}
+            onChange={(e) => {
+              const raw = e.target.value.trim();
+              if (raw === "") {
+                setTopKDraft("");
+                return;
+              }
+              if (!/^\d+$/.test(raw)) return;
+              setTopKDraft(raw);
+              const n = clampTopKChat(Number(raw));
+              onTopKChange(n);
+              if (String(n) !== raw) setTopKDraft(String(n));
+            }}
+            onBlur={() => {
+              const raw = topKDraft.trim();
+              if (raw === "" || !/^\d+$/.test(raw)) {
+                const fallback = clampTopKChat(topK);
+                setTopKDraft(String(fallback));
+                onTopKChange(fallback);
+                return;
+              }
+              const n = clampTopKChat(Number(raw));
+              setTopKDraft(String(n));
+              onTopKChange(n);
+            }}
           />
           <p className="text-xs text-muted-foreground">{t("chat.topKHint")}</p>
         </div>

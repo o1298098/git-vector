@@ -3,6 +3,7 @@ import XMarkdown from "@ant-design/x-markdown";
 import type { StoredHit as Hit } from "@/lib/codeChatStorage";
 import { useI18n } from "@/i18n/I18nContext";
 import { formatMetaLine } from "./formatMetaLine";
+import { MarkdownPre } from "./MarkdownPre";
 
 type Props = {
   full: string;
@@ -21,6 +22,7 @@ export function AssistantMarkdownBubble({ full, sources, retrievalQuery, resolve
     <div className={resolvedDark ? "x-markdown-dark" : "x-markdown-light"}>
       <XMarkdown
         content={full}
+        components={{ pre: MarkdownPre }}
         streaming={
           streaming
             ? {
