@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, NavLink, Outlet, useLocation } from "react-router-dom";
-import { BarChart3, Check, Home, Languages, ListOrdered, LogOut, MessageCircle, Search, Settings } from "lucide-react";
+import { BarChart3, Check, Home, Languages, ListOrdered, LogOut, Menu, MessageCircle, Search, Settings, X } from "lucide-react";
 import { ThemeMenu } from "@/components/ThemeMenu";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/contexts/AuthContext";
@@ -13,6 +13,7 @@ export function Layout() {
   const { uiLoginRequired, username, logout } = useAuth();
   const { locale, setLocale, t } = useI18n();
   const [langOpen, setLangOpen] = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const langMenuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -31,6 +32,24 @@ export function Layout() {
     };
   }, [langOpen]);
 
+  useEffect(() => {
+    setMobileMenuOpen(false);
+  }, [pathname]);
+
+  useEffect(() => {
+    if (!mobileMenuOpen) return;
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setMobileMenuOpen(false);
+    }
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.body.style.overflow = prevOverflow;
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [mobileMenuOpen]);
+
   const nav: {
     to: string;
     labelKey: string;
@@ -48,15 +67,22 @@ export function Layout() {
     <div className="flex min-h-screen flex-col">
       <header className="sticky top-0 z-50 w-full border-b bg-background/95 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-background/80">
         <div className="mx-auto flex h-14 w-full max-w-none items-center gap-2 px-4 sm:gap-4 sm:px-6">
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="size-9 shrink-0 md:hidden"
+            aria-label={mobileMenuOpen ? t("layout.closeMenuAria") : t("layout.openMenuAria")}
+            onClick={() => setMobileMenuOpen((v) => !v)}
+          >
+            {mobileMenuOpen ? <X className="size-4" aria-hidden /> : <Menu className="size-4" aria-hidden />}
+          </Button>
           <Link to="/" className="min-w-0 shrink-0 pr-1 sm:pr-2">
             <div className="font-semibold leading-tight text-foreground">{t("layout.brandTitle")}</div>
             <div className="hidden text-xs text-muted-foreground sm:block">{t("layout.brandSub")}</div>
           </Link>
 
-          <nav
-            className="flex min-w-0 flex-1 items-center justify-start gap-0.5 overflow-x-auto sm:gap-1"
-            aria-label="主导航"
-          >
+          <nav className="hidden min-w-0 flex-1 items-center justify-start gap-1 md:flex" aria-label={t("layout.mainNavAria")}>
             {nav.map(({ to, labelKey, icon: Icon, end }) => (
               <NavLink
                 key={to}
@@ -75,7 +101,7 @@ export function Layout() {
             ))}
           </nav>
 
-          <div className="flex shrink-0 items-center justify-end gap-1.5 border-l border-border/60 pl-2 sm:gap-2 sm:pl-3 md:pl-4">
+          <div className="ml-auto flex shrink-0 items-center justify-end gap-1.5 border-l border-border/60 pl-2 sm:gap-2 sm:pl-3 md:ml-0 md:pl-4">
             <ThemeMenu />
             <div ref={langMenuRef} className="relative">
               <Button
@@ -130,7 +156,7 @@ export function Layout() {
               title={t("nav.settings")}
               className={({ isActive }) =>
                 cn(
-                  "inline-flex size-9 shrink-0 items-center justify-center rounded-md transition-colors",
+                  "hidden size-9 shrink-0 items-center justify-center rounded-md transition-colors md:inline-flex",
                   isActive
                     ? "bg-primary/10 text-primary"
                     : "text-muted-foreground hover:bg-muted hover:text-foreground",
@@ -156,11 +182,66 @@ export function Layout() {
                 </Button>
               </>
             ) : (
-              <span className="text-xs text-muted-foreground">{t("layout.noLogin")}</span>
+              <span className="hidden text-xs text-muted-foreground sm:inline">{t("layout.noLogin")}</span>
             )}
           </div>
         </div>
       </header>
+      {mobileMenuOpen ? (
+        <div className="fixed inset-x-0 bottom-0 top-14 z-40 md:hidden">
+          <button
+            type="button"
+            className="absolute inset-0 bg-black/45"
+            aria-label={t("layout.closeMenuAria")}
+            onClick={() => setMobileMenuOpen(false)}
+          />
+          <aside className="absolute left-0 top-0 h-full w-[min(84vw,320px)] overflow-y-auto border-r bg-background p-3 shadow-xl">
+            <nav className="space-y-1" aria-label={t("layout.mainNavAria")}>
+              {nav.map(({ to, labelKey, icon: Icon, end }) => (
+                <NavLink
+                  key={to}
+                  to={to}
+                  end={end}
+                  className={({ isActive }) =>
+                    cn(
+                      "flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+                      isActive ? "bg-primary/10 text-primary" : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                    )
+                  }
+                >
+                  <Icon className="size-4" aria-hidden />
+                  {t(labelKey)}
+                </NavLink>
+              ))}
+              <NavLink
+                to="/settings"
+                className={({ isActive }) =>
+                  cn(
+                    "flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+                    isActive ? "bg-primary/10 text-primary" : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                  )
+                }
+              >
+                <Settings className="size-4" aria-hidden />
+                {t("nav.settings")}
+              </NavLink>
+            </nav>
+            <div className="mt-4 border-t pt-3">
+              {uiLoginRequired ? (
+                <div className="space-y-2">
+                  <p className="truncate px-3 text-xs text-muted-foreground">{username}</p>
+                  <Button type="button" variant="outline" className="w-full justify-start gap-2" onClick={() => logout()}>
+                    <LogOut className="size-4" aria-hidden />
+                    {t("layout.logoutAria")}
+                  </Button>
+                </div>
+              ) : (
+                <p className="px-3 text-xs text-muted-foreground">{t("layout.noLogin")}</p>
+              )}
+            </div>
+          </aside>
+        </div>
+      ) : null}
 
       <main
         className={cn(

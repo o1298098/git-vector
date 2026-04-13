@@ -1,12 +1,13 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Bubble, Sender, XProvider } from "@ant-design/x";
 import "@ant-design/x-markdown/themes/light.css";
 import "@ant-design/x-markdown/themes/dark.css";
 import enUS_X from "@ant-design/x/locale/en_US";
 import zhCN_X from "@ant-design/x/locale/zh_CN";
-import { theme } from "antd";
+import { Button, theme } from "antd";
 import enUS from "antd/locale/en_US";
 import zhCN from "antd/locale/zh_CN";
+import { X } from "lucide-react";
 import { useI18n } from "@/i18n/I18nContext";
 import { useTheme } from "@/theme/ThemeContext";
 import { CODE_CHAT_BUBBLE_ROLE } from "./components/codeChatBubbleRole";
@@ -19,6 +20,7 @@ export function CodeChat() {
   const { t, locale: uiLocale } = useI18n();
   const { resolvedDark } = useTheme();
   const chat = useCodeChat();
+  const [mobileHistoryOpen, setMobileHistoryOpen] = useState(false);
 
   const mergedLocale = useMemo(
     () => (uiLocale === "zh" ? { ...zhCN, ...zhCN_X } : { ...enUS, ...enUS_X }),
@@ -44,19 +46,48 @@ export function CodeChat() {
     handleRetryAssistant: chat.handleRetryAssistant,
   });
 
+  useEffect(() => {
+    if (!mobileHistoryOpen) return;
+    function onKeyDown(ev: KeyboardEvent) {
+      if (ev.key === "Escape") setMobileHistoryOpen(false);
+    }
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.body.style.overflow = prevOverflow;
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [mobileHistoryOpen]);
+
+  const handleHistoryNewChat = () => {
+    chat.newChat();
+    setMobileHistoryOpen(false);
+  };
+
+  const handleHistorySelectSession = (id: string) => {
+    chat.selectSession(id);
+    setMobileHistoryOpen(false);
+  };
+
+  const handleHistoryDeleteSession = (id: string) => {
+    chat.deleteSession(id);
+    setMobileHistoryOpen(false);
+  };
+
   return (
     <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden lg:flex-row lg:items-stretch lg:min-h-0">
       <aside
-        className="order-2 flex min-h-[120px] max-h-[32vh] w-full shrink-0 flex-col border-t border-border bg-muted/55 dark:border-border dark:bg-muted/30 lg:order-none lg:h-auto lg:max-h-none lg:min-h-0 lg:w-[14rem] lg:shrink-0 lg:self-stretch lg:border-t-0 lg:border-r"
+        className="order-2 hidden min-h-[120px] max-h-[32vh] w-full shrink-0 flex-col border-t border-border bg-muted/55 dark:border-border dark:bg-muted/30 lg:order-none lg:flex lg:h-auto lg:max-h-none lg:min-h-0 lg:w-[14rem] lg:shrink-0 lg:self-stretch lg:border-t-0 lg:border-r"
         aria-label={t("chat.sidebarAria")}
       >
         <CodeChatHistoryCard
           sortedSessions={chat.sortedSessions}
           activeId={chat.activeId}
           loading={chat.loading}
-          onNewChat={chat.newChat}
-          onSelectSession={chat.selectSession}
-          onDeleteSession={chat.deleteSession}
+          onNewChat={handleHistoryNewChat}
+          onSelectSession={handleHistorySelectSession}
+          onDeleteSession={handleHistoryDeleteSession}
         />
       </aside>
 
@@ -120,6 +151,7 @@ export function CodeChat() {
                       disabled={chat.loading}
                       onProjectChange={chat.setProjectId}
                       onTopKChange={chat.setTopK}
+                      onOpenHistory={() => setMobileHistoryOpen(true)}
                     />
                   }
                   value={chat.input}
@@ -138,6 +170,41 @@ export function CodeChat() {
           </div>
         </XProvider>
       </div>
+      {mobileHistoryOpen ? (
+        <div className="fixed inset-0 z-50 lg:hidden">
+          <button
+            type="button"
+            className="absolute inset-0 bg-black/45"
+            aria-label={t("chat.closeHistoryDrawer")}
+            onClick={() => setMobileHistoryOpen(false)}
+          />
+          <aside className="absolute inset-x-0 bottom-0 h-[min(72dvh,560px)] rounded-t-2xl border-t bg-background shadow-2xl">
+            <div className="flex justify-center pt-2">
+              <span className="h-1.5 w-10 rounded-full bg-muted-foreground/30" aria-hidden />
+            </div>
+            <div className="flex items-center justify-between border-b px-3 py-2">
+              <h2 className="text-sm font-medium">{t("chat.historyTitle")}</h2>
+              <Button
+                type="text"
+                size="small"
+                icon={<X className="size-4" aria-hidden />}
+                aria-label={t("chat.closeHistoryDrawer")}
+                onClick={() => setMobileHistoryOpen(false)}
+              />
+            </div>
+            <div className="h-[calc(100%-3rem)] pb-2">
+              <CodeChatHistoryCard
+                sortedSessions={chat.sortedSessions}
+                activeId={chat.activeId}
+                loading={chat.loading}
+                onNewChat={handleHistoryNewChat}
+                onSelectSession={handleHistorySelectSession}
+                onDeleteSession={handleHistoryDeleteSession}
+              />
+            </div>
+          </aside>
+        </div>
+      ) : null}
     </div>
   );
 }

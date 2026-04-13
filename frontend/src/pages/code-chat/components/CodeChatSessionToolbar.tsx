@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { SlidersHorizontal } from "lucide-react";
+import { List, SlidersHorizontal } from "lucide-react";
 import { Button, Popover } from "antd";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
@@ -15,6 +15,7 @@ export type CodeChatSessionSettingsProps = {
   disabled: boolean;
   onProjectChange: (v: string) => void;
   onTopKChange: (v: number) => void;
+  onOpenHistory?: () => void;
 };
 
 function clampTopKChat(n: number): number {
@@ -24,7 +25,7 @@ function clampTopKChat(n: number): number {
 
 export function CodeChatRetrievalSettingsForm(props: CodeChatSessionSettingsProps) {
   const { t } = useI18n();
-  const { projectId, topK, projects, projectsLoading, disabled, onProjectChange, onTopKChange } = props;
+  const { projectId, topK, projects, projectsLoading, disabled, onProjectChange, onTopKChange, onOpenHistory } = props;
   const [topKDraft, setTopKDraft] = useState(() => String(topK));
 
   useEffect(() => {
@@ -37,6 +38,18 @@ export function CodeChatRetrievalSettingsForm(props: CodeChatSessionSettingsProp
       onMouseDown={(e) => e.stopPropagation()}
       onPointerDown={(e) => e.stopPropagation()}
     >
+      {onOpenHistory ? (
+        <Button
+          type="default"
+          size="small"
+          className="mb-2 inline-flex h-8 items-center gap-1.5 rounded-md border-border/60 lg:hidden"
+          disabled={disabled}
+          onClick={() => onOpenHistory()}
+          icon={<List className="size-3.5" aria-hidden />}
+        >
+          {t("chat.historyTitle")}
+        </Button>
+      ) : null}
       <p className="text-xs leading-snug text-muted-foreground">{t("chat.contextDesc")}</p>
       <div className="space-y-3">
         <div className="min-w-0 space-y-1.5">
@@ -97,7 +110,8 @@ export function CodeChatRetrievalSettingsForm(props: CodeChatSessionSettingsProp
 /** 输入框左侧：仅图标 + Popover，避免顶栏横条（更接近 ChatGPT 输入区） */
 export function CodeChatComposerPrefix(props: CodeChatSessionSettingsProps) {
   const { t } = useI18n();
-  const { projectId, topK, disabled, projects } = props;
+  const { projectId, topK, disabled, projects, onOpenHistory } = props;
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const projectSummary = useMemo(() => {
     if (!projectId.trim()) return t("projectSelect.all");
     const p = projects.find((x) => x.project_id === projectId);
@@ -111,8 +125,22 @@ export function CodeChatComposerPrefix(props: CodeChatSessionSettingsProps) {
     <Popover
       placement="topLeft"
       trigger="click"
+      open={settingsOpen}
+      onOpenChange={setSettingsOpen}
       title={<span className="text-sm font-medium">{t("chat.contextTitle")}</span>}
-      content={<CodeChatRetrievalSettingsForm {...props} />}
+      content={
+        <CodeChatRetrievalSettingsForm
+          {...props}
+          onOpenHistory={
+            onOpenHistory
+              ? () => {
+                  setSettingsOpen(false);
+                  onOpenHistory();
+                }
+              : undefined
+          }
+        />
+      }
     >
       <Button
         type="text"

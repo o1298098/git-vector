@@ -2,15 +2,15 @@ import { BrowserRouter, Navigate, Outlet, Route, Routes, useLocation } from "rea
 import { AuthProvider, useAuth } from "@/contexts/AuthContext";
 import { useI18n } from "@/i18n/I18nContext";
 import { Layout } from "@/components/Layout";
-import { Dashboard } from "@/pages/Dashboard";
-import { Enqueue } from "@/pages/Enqueue";
-import { Jobs } from "@/pages/Jobs";
-import { Login } from "@/pages/Login";
+import { Dashboard } from "@/pages/dashboard";
+import { Enqueue } from "@/pages/enqueue";
+import { Jobs } from "@/pages/jobs";
+import { Login } from "@/pages/login";
 import { CodeChat } from "@/pages/code-chat";
-import { Search } from "@/pages/Search";
-import { Settings } from "@/pages/Settings";
-import { Vectors } from "@/pages/Vectors";
-import { LlmUsage } from "@/pages/LlmUsage";
+import { Search } from "@/pages/search";
+import { Settings } from "@/pages/settings";
+import { Vectors } from "@/pages/vectors";
+import { LlmUsage } from "@/pages/llm-usage";
 
 function RequireAuth() {
   const { ready, uiLoginRequired, username } = useAuth();
