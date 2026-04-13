@@ -1,3 +1,4 @@
+import { Link } from "react-router-dom";
 import { useI18n } from "@/i18n/I18nContext";
 import { Button } from "@/components/ui/button";
 
@@ -14,9 +15,14 @@ export function JobsPageHeader({ onRefresh }: JobsPageHeaderProps) {
         <h1 className="text-2xl font-semibold tracking-tight">{t("jobs.title")}</h1>
         <p className="text-muted-foreground">{t("jobs.subtitle")}</p>
       </div>
-      <Button variant="outline" size="sm" onClick={onRefresh}>
-        {t("jobs.refresh")}
-      </Button>
+      <div className="flex flex-wrap items-center gap-2">
+        <Button variant="outline" size="sm" asChild>
+          <Link to="/enqueue">{t("jobs.newIndex")}</Link>
+        </Button>
+        <Button variant="outline" size="sm" onClick={onRefresh}>
+          {t("jobs.refresh")}
+        </Button>
+      </div>
     </div>
   );
 }

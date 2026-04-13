@@ -216,6 +216,7 @@ Indexing runs through a **serial queue** (avoids concurrent writes to Chroma / l
 
 - **List jobs**: `GET /api/index-jobs?limit=50&offset=0` (optional `status` / `project_id` filters; response `total` is the full match count, `jobs` is the current page, `limit`/`offset` echo the request)
 - **Get one job**: `GET /api/index-jobs/{job_id}`
+- **Cancel a job**: `POST /api/index-jobs/{job_id}/cancel` (supports `queued` and `running`; running jobs are terminated)
 
 Key fields:
 
@@ -250,6 +251,8 @@ Key fields:
 | `OLLAMA_BASE_URL` | Ollama base URL (default `http://localhost:11434` in code; Docker examples often use `http://host.docker.internal:11434`) |
 | `EMBED_MODEL` | Ollama **embeddings** model name (must exist in Ollama). **If you change the model, clear `DATA_DIR/chroma` and re-index** (dimension changes). |
 | `SKIP_VECTOR_STORE` | If `1`, runs clone/parse/(optional LLM) but skips Chroma upsert (useful for local validation). |
+| `INCREMENTAL_INDEX` | Set to `1` / `true` to enable incremental vector indexing (default off). Requires `project_index.sqlite3` to already have `last_indexed_commit` and vectors to use stable `gv2_` IDs; otherwise it automatically falls back to full indexing. |
+| `FORCE_FULL_INDEX` | Force a full vector reindex for a run (overrides incremental mode). |
 | `WIKI_BACKEND` | `mkdocs` (default) / `starlight` / `vitepress` (last two need Node.js + npm; Docker image includes them). |
 | `WIKI_ENABLED` | `false` / `0` disables wiki generation after describe (default: on). |
 | `SKIP_WIKI` | `1` skips wiki for a run without changing `WIKI_ENABLED`. |
@@ -277,6 +280,7 @@ By default under `DATA_DIR`:
 - **Repo mirrors**: `DATA_DIR/repos/<project_id>/...`
 - **Vector store**: `DATA_DIR/chroma/`
 - **Jobs DB**: `DATA_DIR/index_jobs.sqlite3`
+- **Project vector index metadata**: `DATA_DIR/project_index.sqlite3` (`doc_count`, display name, plus incremental fields `last_indexed_commit` / `last_embed_model`)
 - **Static wiki**: `DATA_DIR/wiki_sites/<project_id>/site/` plus `manifest.json` (intermediate `wiki_work/` removed unless `WIKI_KEEP_WORK=1`)
 
 ---

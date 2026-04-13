@@ -10,6 +10,8 @@ export function Jobs() {
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(10);
   const [error, setError] = useState<string | null>(null);
+  const [cancellingId, setCancellingId] = useState<string | null>(null);
+  const [cancelError, setCancelError] = useState<string | null>(null);
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize) || 1);
 
@@ -53,10 +55,35 @@ export function Jobs() {
     setPage(0);
   }
 
+  async function cancelJob(jobId: string) {
+    setCancelError(null);
+    setCancellingId(jobId);
+    try {
+      const res = await apiFetch(`/api/index-jobs/${encodeURIComponent(jobId)}/cancel`, { method: "POST" });
+      if (!res.ok) {
+        let message = `HTTP ${res.status}`;
+        try {
+          const json = (await res.json()) as { detail?: unknown };
+          if (json?.detail != null) {
+            message = typeof json.detail === "string" ? json.detail : JSON.stringify(json.detail);
+          }
+        } catch {
+          /* ignore */
+        }
+        setCancelError(message);
+        return;
+      }
+      await load();
+    } finally {
+      setCancellingId(null);
+    }
+  }
+
   return (
     <div className="space-y-6">
       <JobsPageHeader onRefresh={() => void load()} />
       {error ? <p className="text-sm text-destructive">{error}</p> : null}
+      {cancelError ? <p className="text-sm text-destructive">{cancelError}</p> : null}
       <JobsTableCard
         jobs={jobs}
         total={total}
@@ -66,6 +93,8 @@ export function Jobs() {
         onPageSizeChange={onPageSizeChange}
         onPrevPage={() => setPage((currentPage) => Math.max(0, currentPage - 1))}
         onNextPage={() => setPage((currentPage) => currentPage + 1)}
+        cancellingJobId={cancellingId}
+        onCancelJob={(id) => void cancelJob(id)}
       />
     </div>
   );

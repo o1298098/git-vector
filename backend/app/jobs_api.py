@@ -35,6 +35,18 @@ async def enqueue_index_job(body: EnqueueBody):
     }
 
 
+@router.post("/index-jobs/{job_id}/cancel")
+async def cancel_index_job(job_id: str):
+    """取消排队中或正在执行的索引任务（正在执行时会终止子进程）。"""
+    q = get_job_queue()
+    result = await asyncio.to_thread(q.request_cancel, job_id)
+    if result == "not_found":
+        raise HTTPException(status_code=404, detail="job not found")
+    if result == "already_done":
+        raise HTTPException(status_code=409, detail="job already finished")
+    return {"ok": True, "result": result}
+
+
 @router.get("/index-jobs/{job_id}")
 async def get_index_job(job_id: str):
     store = get_job_store()

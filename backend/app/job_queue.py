@@ -249,6 +249,37 @@ class JobStore:
             self._conn.execute(sql, tuple(values))
             self._conn.commit()
 
+    def cancel_job_if_queued(self, job_id: str) -> bool:
+        """若任务仍为 queued，标记为 cancelled。返回是否更新成功（用于与 worker 抢跑）。"""
+        finished = _utc_now_iso()
+        msg = "已从队列取消"
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                UPDATE index_jobs
+                SET status='cancelled', progress=0, step='cancelled', message=?, finished_at=?
+                WHERE job_id=? AND status='queued'
+                """,
+                (sanitize_text(msg), finished, job_id),
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def try_mark_running(self, job_id: str, *, started_at: str) -> bool:
+        """仅在仍为 queued 时置为 running，避免取消任务后被 worker 覆盖回 running。"""
+        msg = "开始执行"
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                UPDATE index_jobs
+                SET status='running', progress=1, step='starting', message=?, started_at=?
+                WHERE job_id=? AND status='queued'
+                """,
+                (sanitize_text(msg), started_at, job_id),
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
+
     def get_job(self, job_id: str) -> Optional[IndexJob]:
         with self._lock:
             row = self._conn.execute("SELECT * FROM index_jobs WHERE job_id=?", (job_id,)).fetchone()
@@ -491,6 +522,8 @@ class IndexJobQueue:
         self._worker: Optional[threading.Thread] = None
         self._current_job_id: str = ""
         self._current_process: Optional[mp.Process] = None
+        self._ctl_lock = threading.Lock()
+        self._cancel_user_requested: set[str] = set()
 
     def start(self) -> None:
         if self._worker and self._worker.is_alive():
@@ -511,6 +544,58 @@ class IndexJobQueue:
 
     def get_current_job_id(self) -> str:
         return self._current_job_id
+
+    def request_cancel(self, job_id: str) -> str:
+        """
+        取消排队中或正在执行的索引任务。
+        返回: not_found | already_done | cancelled_queued | cancelled_running | cancelled_stale
+        """
+        store = self.store
+        job = store.get_job(job_id)
+        if not job:
+            return "not_found"
+        if job.status in ("succeeded", "failed", "cancelled"):
+            return "already_done"
+
+        if job.status == "queued":
+            if store.cancel_job_if_queued(job_id):
+                return "cancelled_queued"
+            job = store.get_job(job_id)
+            if not job:
+                return "not_found"
+            if job.status in ("succeeded", "failed", "cancelled"):
+                return "already_done"
+
+        if job.status != "running":
+            return "already_done"
+
+        with self._ctl_lock:
+            cur = self._current_job_id
+            proc = self._current_process
+        if cur != job_id:
+            job2 = store.get_job(job_id)
+            if not job2:
+                return "not_found"
+            if job2.status in ("succeeded", "failed", "cancelled"):
+                return "already_done"
+            finished = _utc_now_iso()
+            store.update_job(
+                job_id,
+                status="cancelled",
+                progress=int(job2.progress or 0),
+                step="cancelled",
+                message="任务已取消",
+                finished_at=finished,
+            )
+            return "cancelled_stale"
+
+        with self._ctl_lock:
+            self._cancel_user_requested.add(job_id)
+            proc = self._current_process
+        if proc is not None and proc.is_alive():
+            logger.info("User requested cancel: terminating index subprocess job_id=%s", job_id)
+            proc.terminate()
+        return "cancelled_running"
 
     def shutdown(self, wait: bool = True) -> None:
         """停止队列线程；若正在跑子进程索引则 terminate。"""
@@ -536,16 +621,12 @@ class IndexJobQueue:
                 self._q.task_done()
                 continue
 
-            self._current_job_id = job_id
             started = _utc_now_iso()
-            self.store.update_job(
-                job_id,
-                status="running",
-                progress=1,
-                step="starting",
-                message="开始执行",
-                started_at=started,
-            )
+            if not self.store.try_mark_running(job_id, started_at=started):
+                self._q.task_done()
+                continue
+
+            self._current_job_id = job_id
 
             proc: Optional[mp.Process] = None
             try:
@@ -581,6 +662,24 @@ class IndexJobQueue:
                             progress=j.progress,
                             step="cancelled",
                             message="服务关闭，任务已终止",
+                            finished_at=_utc_now_iso(),
+                        )
+                elif job_id in self._cancel_user_requested:
+                    with self._ctl_lock:
+                        self._cancel_user_requested.discard(job_id)
+                    j2 = self.store.get_job(job_id)
+                    if j2 and j2.status == "succeeded":
+                        pass
+                    elif j2 and j2.status == "cancelled":
+                        pass
+                    else:
+                        prog = int(j2.progress) if j2 and j2.progress is not None else 0
+                        self.store.update_job(
+                            job_id,
+                            status="cancelled",
+                            progress=max(0, min(100, prog)),
+                            step="cancelled",
+                            message="用户已取消",
                             finished_at=_utc_now_iso(),
                         )
                 elif ec not in (0, None) and j and j.status == "running":
