@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type SetStateAction } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type SetStateAction } from "react";
 import { apiFetch, apiJson } from "@/lib/api";
 import { randomId } from "@/lib/randomId";
 import {
@@ -11,6 +11,9 @@ import {
 } from "@/lib/codeChatStorage";
 import { useI18n } from "@/i18n/I18nContext";
 import type { CodeChatProjectOption } from "./types";
+
+/** 流式「打字机」：与网络分包解耦，按固定节奏逐字（略加速追赶积压） */
+const STREAM_TYPING_TICK_MS = 26;
 
 export function useCodeChat() {
   const { t } = useI18n();
@@ -37,7 +40,12 @@ export function useCodeChat() {
     [sessions],
   );
 
+  /** 流式输出时跳过写入，避免每个 token 都 JSON.stringify 全量会话阻塞主线程 */
   useEffect(() => {
+    const streamingNow = sessions.some(
+      (s) => s.id === activeId && s.turns.some((t) => t.streaming),
+    );
+    if (streamingNow) return;
     persistCodeChatState(sessions, activeId);
   }, [sessions, activeId]);
 
@@ -64,6 +72,60 @@ export function useCodeChat() {
       );
     },
     [activeId],
+  );
+
+  const streamTypeRef = useRef({
+    target: "",
+    displayLen: 0,
+    timer: null as ReturnType<typeof setInterval> | null,
+  });
+
+  const clearStreamTyping = useCallback(() => {
+    const t = streamTypeRef.current.timer;
+    if (t != null) {
+      clearInterval(t);
+      streamTypeRef.current.timer = null;
+    }
+  }, []);
+
+  const resetStreamTyping = useCallback(() => {
+    clearStreamTyping();
+    streamTypeRef.current.target = "";
+    streamTypeRef.current.displayLen = 0;
+  }, [clearStreamTyping]);
+
+  const startStreamTyping = useCallback(
+    (assistantId: string) => {
+      clearStreamTyping();
+      streamTypeRef.current.timer = setInterval(() => {
+        const target = streamTypeRef.current.target;
+        let len = streamTypeRef.current.displayLen;
+        if (len >= target.length) return;
+        const lag = target.length - len;
+        const step = lag > 180 ? Math.min(4, Math.max(2, Math.ceil(lag / 90))) : 1;
+        const next = Math.min(len + step, target.length);
+        streamTypeRef.current.displayLen = next;
+        setTurns((prev) =>
+          prev.map((x) => (x.id === assistantId ? { ...x, content: target.slice(0, next) } : x)),
+        );
+      }, STREAM_TYPING_TICK_MS);
+    },
+    [clearStreamTyping, setTurns],
+  );
+
+  const snapStreamToTarget = useCallback(
+    (assistantId: string, patch: { streaming: boolean; contentOverride?: string }) => {
+      clearStreamTyping();
+      const content = patch.contentOverride ?? streamTypeRef.current.target;
+      streamTypeRef.current.target = content;
+      streamTypeRef.current.displayLen = content.length;
+      setTurns((prev) =>
+        prev.map((x) =>
+          x.id === assistantId ? { ...x, content, streaming: patch.streaming } : x,
+        ),
+      );
+    },
+    [clearStreamTyping, setTurns],
   );
 
   const setProjectId = useCallback(
@@ -184,6 +246,7 @@ export function useCodeChat() {
           ]);
           return;
         }
+        resetStreamTyping();
         const dec = new TextDecoder();
         let buf = "";
         let metaReceived = false;
@@ -215,6 +278,8 @@ export function useCodeChat() {
               if (!metaReceived) {
                 metaReceived = true;
                 setLoading(false);
+                streamTypeRef.current.target = "";
+                streamTypeRef.current.displayLen = 0;
                 setTurns((prev) => [
                   ...prev,
                   {
@@ -226,44 +291,47 @@ export function useCodeChat() {
                     streaming: true,
                   },
                 ]);
+                startStreamTyping(aid);
               }
             } else if (ev === "delta" && data.text) {
               if (!metaReceived) {
                 metaReceived = true;
                 setLoading(false);
+                streamTypeRef.current.target = data.text ?? "";
+                streamTypeRef.current.displayLen = 0;
                 setTurns((prev) => [
                   ...prev,
                   {
                     id: aid,
                     role: "assistant",
-                    content: data.text ?? "",
+                    content: "",
                     streaming: true,
                   },
                 ]);
+                startStreamTyping(aid);
               } else {
-                setTurns((prev) =>
-                  prev.map((x) => (x.id === aid ? { ...x, content: x.content + data.text! } : x)),
-                );
+                streamTypeRef.current.target += data.text;
               }
             } else if (ev === "done") {
-              setTurns((prev) =>
-                prev.map((x) => (x.id === aid ? { ...x, streaming: false } : x)),
-              );
+              snapStreamToTarget(aid, { streaming: false });
             } else if (ev === "error") {
               const errText = data.message ?? t("chat.sendFail");
               setLoading(false);
               if (!metaReceived) {
                 metaReceived = true;
+                resetStreamTyping();
                 setTurns((prev) => [
                   ...prev,
                   { id: aid, role: "assistant", content: errText, streaming: false },
                 ]);
               } else {
-                setTurns((prev) =>
-                  prev.map((x) =>
-                    x.id === aid ? { ...x, content: x.content || errText, streaming: false } : x,
-                  ),
-                );
+                snapStreamToTarget(aid, {
+                  streaming: false,
+                  contentOverride:
+                    streamTypeRef.current.target.trim().length > 0
+                      ? streamTypeRef.current.target
+                      : errText,
+                });
               }
             }
           }
@@ -279,11 +347,10 @@ export function useCodeChat() {
             },
           ]);
         } else {
-          setTurns((prev) =>
-            prev.map((x) => (x.id === aid && x.streaming ? { ...x, streaming: false } : x)),
-          );
+          snapStreamToTarget(aid, { streaming: false });
         }
       } catch (e: unknown) {
+        clearStreamTyping();
         setTurns((prev) => [
           ...prev,
           {
@@ -296,7 +363,16 @@ export function useCodeChat() {
         setLoading(false);
       }
     },
-    [projectId, topK, t, setTurns],
+    [
+      projectId,
+      topK,
+      t,
+      setTurns,
+      resetStreamTyping,
+      startStreamTyping,
+      snapStreamToTarget,
+      clearStreamTyping,
+    ],
   );
 
   const doSend = useCallback(

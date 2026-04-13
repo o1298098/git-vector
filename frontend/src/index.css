@@ -165,6 +165,79 @@
     margin-bottom: 0;
   }
 
+  /*
+   * Markdown 引用块（模型常用 > 作补充说明）：做成信息提示样式，替代主题默认的扁灰条
+   */
+  .gv-code-chat-bubbles .x-markdown-light blockquote {
+    margin: 1rem 0;
+    padding: 0.75rem 1rem 0.75rem 0.95rem;
+    border: 1px solid hsl(var(--primary) / 0.22);
+    border-left: 3px solid hsl(var(--primary));
+    border-radius: 10px;
+    background: hsl(var(--primary) / 0.06);
+    box-shadow: 0 1px 2px hsl(0 0% 0% / 0.04);
+    transition:
+      background-color 0.2s ease,
+      border-color 0.2s ease,
+      box-shadow 0.2s ease;
+  }
+
+  .gv-code-chat-bubbles .x-markdown-light blockquote:hover {
+    background: hsl(var(--primary) / 0.09);
+    border-color: hsl(var(--primary) / 0.3);
+    box-shadow: 0 2px 6px hsl(var(--primary) / 0.08);
+  }
+
+  .gv-code-chat-bubbles .x-markdown-light blockquote p,
+  .gv-code-chat-bubbles .x-markdown-light blockquote li {
+    color: hsl(var(--foreground) / 0.82);
+    font-size: 0.9375rem;
+    line-height: 1.65;
+  }
+
+  .gv-code-chat-bubbles .x-markdown-light blockquote p {
+    margin-bottom: 0.5em;
+  }
+
+  .gv-code-chat-bubbles .x-markdown-light blockquote p:last-child {
+    margin-bottom: 0;
+  }
+
+  .gv-code-chat-bubbles .x-markdown-dark blockquote {
+    margin: 1rem 0;
+    padding: 0.75rem 1rem 0.75rem 0.95rem;
+    border: 1px solid hsl(var(--primary) / 0.35);
+    border-left: 3px solid hsl(var(--primary));
+    border-radius: 10px;
+    background: hsl(var(--primary) / 0.12);
+    box-shadow: 0 1px 3px hsl(0 0% 0% / 0.35);
+    transition:
+      background-color 0.2s ease,
+      border-color 0.2s ease,
+      box-shadow 0.2s ease;
+  }
+
+  .gv-code-chat-bubbles .x-markdown-dark blockquote:hover {
+    background: hsl(var(--primary) / 0.16);
+    border-color: hsl(var(--primary) / 0.45);
+    box-shadow: 0 2px 8px hsl(0 0% 0% / 0.4);
+  }
+
+  .gv-code-chat-bubbles .x-markdown-dark blockquote p,
+  .gv-code-chat-bubbles .x-markdown-dark blockquote li {
+    color: hsl(var(--foreground) / 0.88);
+    font-size: 0.9375rem;
+    line-height: 1.65;
+  }
+
+  .gv-code-chat-bubbles .x-markdown-dark blockquote p {
+    margin-bottom: 0.5em;
+  }
+
+  .gv-code-chat-bubbles .x-markdown-dark blockquote p:last-child {
+    margin-bottom: 0;
+  }
+
   /* 助手 Markdown 围栏代码块：接近 ChatGPT 的分区顶栏 + 小圆角 + 等宽字体 */
   .x-markdown-light .gv-xmd-fenced-wrap {
     /* 上贴前文，下留空给后续段落（原先被 x-markdown 写在 pre>code 的 margin 上，已一并重置） */
