@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { ChevronLeft, ChevronRight, ExternalLink, MessageCircle, Search, Trash2 } from "lucide-react";
+import { ChevronLeft, ChevronRight, ExternalLink, MessageCircle, RefreshCw, Search, Trash2 } from "lucide-react";
 import { apiJson } from "@/lib/api";
 import { safeProjectId } from "@/lib/projectId";
 import {
@@ -60,7 +60,9 @@ export function Dashboard() {
   const [debouncedQ, setDebouncedQ] = useState("");
   const [err, setErr] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [reindexingId, setReindexingId] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<ProjectRow | null>(null);
+  const [reindexTarget, setReindexTarget] = useState<ProjectRow | null>(null);
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize) || 1);
 
@@ -92,6 +94,7 @@ export function Dashboard() {
     }
   }, [page, pageSize, debouncedQ, t]);
 
+
   useEffect(() => {
     void load();
   }, [load]);
@@ -120,6 +123,22 @@ export function Dashboard() {
       setErr(e instanceof Error ? e.message : t("dashboard.deleteFail"));
     } finally {
       setDeletingId(null);
+    }
+  }
+
+  async function performReindex(p: ProjectRow) {
+    setReindexingId(p.project_id);
+    setErr(null);
+    try {
+      await apiJson<{ status: string; job_id: string }>(
+        `/api/projects/${encodeURIComponent(p.project_id)}/reindex`,
+        { method: "POST" },
+      );
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : t("dashboard.reindexFail"));
+    } finally {
+      setReindexingId(null);
+      await load();
     }
   }
 
@@ -218,7 +237,7 @@ export function Dashboard() {
               <col className="w-20" />
               <col className="w-36" />
               <col className="w-36" />
-              <col className="w-24" />
+              <col className="w-28" />
             </colgroup>
             <TableHeader>
               <TableRow>
@@ -244,14 +263,22 @@ export function Dashboard() {
                   return (
                   <TableRow key={p.project_id}>
                     <TableCell className="font-mono text-sm">
-                      <span className="block truncate" title={p.project_id}>
+                      <Link
+                        to={`/vectors?project_id=${encodeURIComponent(p.project_id)}`}
+                        className="block truncate text-primary hover:underline"
+                        title={`${t("nav.vectors")}: ${p.project_id}`}
+                      >
                         {p.project_id}
-                      </span>
+                      </Link>
                     </TableCell>
                     <TableCell className="min-w-0 text-sm text-muted-foreground">
-                      <span className="block truncate" title={displayName === t("dashboard.dash") ? undefined : displayName}>
+                      <Link
+                        to={`/vectors?project_id=${encodeURIComponent(p.project_id)}`}
+                        className="block truncate hover:text-foreground hover:underline"
+                        title={displayName === t("dashboard.dash") ? undefined : `${t("nav.vectors")}: ${displayName}`}
+                      >
                         {displayName}
-                      </span>
+                      </Link>
                     </TableCell>
                     <TableCell className="whitespace-nowrap text-sm text-muted-foreground">
                       {formatProjectCreatedAt(p.created_at) || t("dashboard.dash")}
@@ -278,17 +305,36 @@ export function Dashboard() {
                       </Button>
                     </TableCell>
                     <TableCell className="text-center">
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon"
-                        className="size-9 text-destructive hover:bg-destructive/10 hover:text-destructive"
-                        disabled={deletingId !== null}
-                        aria-label={`${t("dashboard.delete")}: ${p.project_id}`}
-                        onClick={() => setDeleteTarget(p)}
-                      >
-                        <Trash2 className={cn("size-4", deletingId === p.project_id && "opacity-40")} />
-                      </Button>
+                      <div className="flex items-center justify-center gap-1">
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="size-9 text-primary hover:bg-primary/10 hover:text-primary"
+                          disabled={deletingId !== null || reindexingId !== null}
+                          aria-label={`${t("dashboard.reindex")}: ${p.project_id}`}
+                          onClick={() => setReindexTarget(p)}
+                        >
+                          <RefreshCw
+                            className={cn(
+                              "size-4",
+                              reindexingId === p.project_id && "animate-spin",
+                              reindexingId !== null && reindexingId !== p.project_id && "opacity-40",
+                            )}
+                          />
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="size-9 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                          disabled={deletingId !== null || reindexingId !== null}
+                          aria-label={`${t("dashboard.delete")}: ${p.project_id}`}
+                          onClick={() => setDeleteTarget(p)}
+                        >
+                          <Trash2 className={cn("size-4", deletingId === p.project_id && "opacity-40")} />
+                        </Button>
+                      </div>
                     </TableCell>
                   </TableRow>
                   );
@@ -347,6 +393,39 @@ export function Dashboard() {
           </div>
         </CardContent>
       </Card>
+
+      <AlertDialog
+        open={reindexTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setReindexTarget(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("dashboard.reindexDialogTitle")}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {reindexTarget
+                ? t("dashboard.reindexConfirm", {
+                    id: (reindexTarget.project_name ?? "").trim() || reindexTarget.project_id,
+                  })
+                : "\u00a0"}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={reindexingId !== null}>{t("dashboard.reindexCancel")}</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={reindexingId !== null}
+              onClick={() => {
+                const target = reindexTarget;
+                setReindexTarget(null);
+                if (target) void performReindex(target);
+              }}
+            >
+              {reindexingId !== null ? "…" : t("dashboard.reindex")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <AlertDialog
         open={deleteTarget !== null}

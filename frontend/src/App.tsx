@@ -9,6 +9,8 @@ import { Login } from "@/pages/Login";
 import { CodeChat } from "@/pages/code-chat";
 import { Search } from "@/pages/Search";
 import { Settings } from "@/pages/Settings";
+import { Vectors } from "@/pages/Vectors";
+import { LlmUsage } from "@/pages/LlmUsage";
 
 function RequireAuth() {
   const { ready, uiLoginRequired, username } = useAuth();
@@ -36,6 +38,8 @@ function AppRoutes() {
           <Route path="search" element={<Search />} />
           <Route path="chat" element={<CodeChat />} />
           <Route path="jobs" element={<Jobs />} />
+          <Route path="usage" element={<LlmUsage />} />
+          <Route path="vectors" element={<Vectors />} />
           <Route path="enqueue" element={<Enqueue />} />
           <Route path="settings" element={<Settings />} />
         </Route>

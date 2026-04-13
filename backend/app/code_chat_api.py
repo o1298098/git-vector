@@ -74,7 +74,7 @@ def _rewrite_retrieval_query(client: LLMClient, user_message: str, lang: str) ->
     """调用 LLM 得到检索用查询；失败或结果无效时返回原文。"""
     system = _retrieval_rewrite_system(lang)
     try:
-        raw = client.chat(system, user_message.strip())
+        raw = client.chat(system, user_message.strip(), feature="code_chat_rewrite")
         q = _normalize_retrieval_query(raw, user_message.strip())
         if q != user_message.strip():
             logger.info(
@@ -185,7 +185,7 @@ def code_chat(
     _msg, _pid, retrieval_query, results, system, user_payload = _code_chat_rag(body, client)
 
     try:
-        reply = client.chat(system, user_payload)
+        reply = client.chat(system, user_payload, feature="code_chat_answer")
     except Exception as e:
         logger.exception("code-chat LLM failed: %s", e)
         raise HTTPException(status_code=502, detail=f"模型调用失败：{e}") from e
@@ -224,7 +224,7 @@ def code_chat_stream(
             }
         )
         try:
-            for piece in client.chat_stream(system, user_payload):
+            for piece in client.chat_stream(system, user_payload, feature="code_chat_answer_stream"):
                 if piece:
                     yield _sse_line({"event": "delta", "text": piece})
             yield _sse_line({"event": "done"})

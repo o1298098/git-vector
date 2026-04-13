@@ -559,6 +559,79 @@ class VectorStore:
             out.append({"content": d, "metadata": m or {}, "distance": dist_f, "score": score})
         return out
 
+    def list_project_vectors(
+        self,
+        project_id: str,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        pid = str(project_id).strip()
+        if not pid:
+            raise ValueError("project_id 不能为空")
+        lim = max(1, min(200, int(limit)))
+        off = max(0, int(offset))
+
+        total_raw = self.collection.get(where={"project_id": pid}, include=[])
+        total = len(total_raw.get("ids") or [])
+
+        rows = self.collection.get(
+            where={"project_id": pid},
+            include=["documents", "metadatas"],
+            limit=lim,
+            offset=off,
+        )
+        ids = rows.get("ids") or []
+        docs = rows.get("documents") or []
+        metas = rows.get("metadatas") or []
+        items: list[dict[str, Any]] = []
+        for vid, doc, meta in zip(ids, docs, metas):
+            items.append(
+                {
+                    "id": str(vid),
+                    "content": str(doc or ""),
+                    "metadata": meta or {},
+                }
+            )
+        return {"total": total, "limit": lim, "offset": off, "items": items}
+
+    def update_project_vector(
+        self,
+        project_id: str,
+        vector_id: str,
+        *,
+        content: str,
+        metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        pid = str(project_id).strip()
+        vid = str(vector_id).strip()
+        if not pid:
+            raise ValueError("project_id 不能为空")
+        if not vid:
+            raise ValueError("vector_id 不能为空")
+
+        existing = self.collection.get(ids=[vid], include=["metadatas"])
+        existing_ids = existing.get("ids") or []
+        if not existing_ids:
+            raise ValueError("向量条目不存在")
+        existing_meta = (existing.get("metadatas") or [{}])[0] or {}
+        existing_pid = str(existing_meta.get("project_id") or "").strip()
+        if existing_pid and existing_pid != pid:
+            raise ValueError("向量条目不属于该项目")
+
+        text = str(content or "")
+        clean_meta = self._sanitize_metadata(metadata or {})
+        clean_meta["project_id"] = pid
+        emb_with_idx = _embed([text], prefix="passage: ")
+        emb = emb_with_idx[0][1]
+        self.collection.upsert(
+            ids=[vid],
+            embeddings=[emb],
+            documents=[text],
+            metadatas=[clean_meta],
+        )
+        return {"id": vid, "project_id": pid}
+
 
 _store: VectorStore | None = None
 

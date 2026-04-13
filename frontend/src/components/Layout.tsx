@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, NavLink, Outlet, useLocation } from "react-router-dom";
-import { Check, Home, Languages, ListOrdered, LogOut, MessageCircle, Search, Settings } from "lucide-react";
+import { BarChart3, Check, Home, Languages, ListOrdered, LogOut, MessageCircle, Search, Settings } from "lucide-react";
 import { ThemeMenu } from "@/components/ThemeMenu";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/contexts/AuthContext";
@@ -41,6 +41,7 @@ export function Layout() {
     { to: "/search", labelKey: "nav.search", icon: Search },
     { to: "/chat", labelKey: "nav.chat", icon: MessageCircle },
     { to: "/jobs", labelKey: "nav.jobs", icon: ListOrdered },
+    { to: "/usage", labelKey: "nav.usage", icon: BarChart3 },
   ];
 
   return (

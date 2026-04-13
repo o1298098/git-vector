@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Annotated, Optional
+import asyncio
+from typing import Annotated, Any, Optional
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -16,6 +17,24 @@ class QueryBody(BaseModel):
     query: str
     project_id: Optional[str] = None
     top_k: int = 10
+
+
+class VectorItem(BaseModel):
+    id: str
+    content: str
+    metadata: dict[str, Any]
+
+
+class VectorListResponse(BaseModel):
+    total: int
+    limit: int
+    offset: int
+    items: list[VectorItem]
+
+
+class UpdateVectorBody(BaseModel):
+    content: str
+    metadata: dict[str, Any]
 
 
 @router.post("/query")
@@ -155,6 +174,81 @@ def delete_project(
         "removed_docs": r["removed_docs"],
         "wiki_removed": wiki_removed,
     }
+
+
+@router.post("/projects/{project_id:path}/reindex")
+async def reindex_project(
+    project_id: str,
+    _user: Annotated[Optional[str], Depends(require_ui_session)],
+):
+    """
+    基于该项目最近一次任务中的仓库 URL 重新入队索引。
+
+    - 若从未有过该项目的历史任务，返回 404。
+    - 仅复用最近一次任务中的 ``repo_url`` 与 ``project_name``。
+    """
+    from app.job_queue import get_job_queue, get_job_store
+
+    store = get_job_store()
+    jobs = await asyncio.to_thread(store.list_jobs, project_id=project_id, limit=1, offset=0)
+    if not jobs:
+        raise HTTPException(status_code=404, detail="未找到该项目的历史任务，无法重建索引")
+    latest = jobs[0]
+    if not latest.repo_url:
+        raise HTTPException(status_code=400, detail="该项目缺少可用仓库地址，无法重建索引")
+
+    q = get_job_queue()
+    job = await asyncio.to_thread(q.enqueue, latest.project_id, latest.repo_url, latest.project_name or "")
+    return {
+        "status": "queued",
+        "job_id": job.job_id,
+        "project_id": job.project_id,
+        "project_name": job.project_name or None,
+    }
+
+
+@router.get("/projects/{project_id:path}/vectors", response_model=VectorListResponse)
+def list_project_vectors(
+    project_id: str,
+    limit: int = Query(20, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    _user: Annotated[Optional[str], Depends(require_ui_session)] = None,
+):
+    from app.vector_store import get_vector_store
+
+    store = get_vector_store()
+    try:
+        data = store.list_project_vectors(project_id=project_id, limit=limit, offset=offset)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return data
+
+
+@router.patch("/projects/{project_id:path}/vectors/{vector_id:path}")
+def update_project_vector(
+    project_id: str,
+    vector_id: str,
+    body: UpdateVectorBody,
+    _user: Annotated[Optional[str], Depends(require_ui_session)] = None,
+):
+    from app.vector_store import get_vector_store
+
+    store = get_vector_store()
+    try:
+        data = store.update_project_vector(
+            project_id=project_id,
+            vector_id=vector_id,
+            content=body.content,
+            metadata=body.metadata,
+        )
+    except ValueError as e:
+        msg = str(e)
+        if "不存在" in msg:
+            raise HTTPException(status_code=404, detail=msg) from e
+        raise HTTPException(status_code=400, detail=msg) from e
+    except Exception as e:  # noqa: S110
+        raise HTTPException(status_code=500, detail=f"更新向量失败: {e}") from e
+    return {"ok": True, **data}
 
 
 @router.get("/search")

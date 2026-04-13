@@ -20,18 +20,19 @@ from app.effective_settings import (
     effective_openai_base_url,
     effective_openai_model,
 )
+from app.llm_usage import record_llm_usage
 
 logger = logging.getLogger(__name__)
 
 
 class LLMClient(ABC):
     @abstractmethod
-    def chat(self, system: str, user: str) -> str:
+    def chat(self, system: str, user: str, *, feature: str = "general") -> str:
         pass
 
-    def chat_stream(self, system: str, user: str) -> Iterator[str]:
+    def chat_stream(self, system: str, user: str, *, feature: str = "general") -> Iterator[str]:
         """逐段产出模型文本；默认退化为单次 blocking 回复。"""
-        yield self.chat(system, user)
+        yield self.chat(system, user, feature=feature)
 
 
 class DifyChatClient(LLMClient):
@@ -42,7 +43,7 @@ class DifyChatClient(LLMClient):
         self.base_url = base_url.rstrip("/")
         self.chat_url = f"{self.base_url}/chat-messages"
 
-    def chat(self, system: str, user: str) -> str:
+    def chat(self, system: str, user: str, *, feature: str = "general") -> str:
         # 与 Dify 官方示例一致：blocking 模式取完整 answer。对话型应用无独立 system 字段时，
         # 将 system 与 user 拼入 query，避免指令与 RAG 说明被丢弃。
         st = (system or "").strip()
@@ -53,30 +54,53 @@ class DifyChatClient(LLMClient):
             len(query),
             query[:400],
         )
-        with httpx.Client(timeout=120) as client:
-            r = client.post(
-                self.chat_url,
-                headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
-                json={
-                    "inputs": {},
-                    "query": query,
-                    "response_mode": "blocking",
-                    "conversation_id": "",
-                    "user": "gitlab-vetor-indexer",
-                },
+        try:
+            with httpx.Client(timeout=120) as client:
+                r = client.post(
+                    self.chat_url,
+                    headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+                    json={
+                        "inputs": {},
+                        "query": query,
+                        "response_mode": "blocking",
+                        "conversation_id": "",
+                        "user": "gitlab-vetor-indexer",
+                    },
+                )
+                if r.status_code == 400:
+                    try:
+                        body = r.text[:500] if r.text else ""
+                        logger.warning("Dify 400 BAD REQUEST (url=%s): %s", self.chat_url, body)
+                    except Exception:
+                        pass
+                r.raise_for_status()
+                data = r.json()
+                answer = (data.get("answer") or "").strip()
+                usage = ((data.get("metadata") or {}).get("usage") or {}) if isinstance(data, dict) else {}
+                record_llm_usage(
+                    provider="dify",
+                    model="dify-chat",
+                    feature=feature,
+                    prompt_tokens=usage.get("prompt_tokens") if isinstance(usage, dict) else None,
+                    completion_tokens=usage.get("completion_tokens") if isinstance(usage, dict) else None,
+                    total_tokens=usage.get("total_tokens") if isinstance(usage, dict) else None,
+                    prompt_text=query,
+                    completion_text=answer,
+                    success=True,
+                )
+                return answer
+        except Exception:
+            record_llm_usage(
+                provider="dify",
+                model="dify-chat",
+                feature=feature,
+                prompt_text=query,
+                completion_text="",
+                success=False,
             )
-            if r.status_code == 400:
-                try:
-                    body = r.text[:500] if r.text else ""
-                    logger.warning("Dify 400 BAD REQUEST (url=%s): %s", self.chat_url, body)
-                except Exception:
-                    pass
-            r.raise_for_status()
-            data = r.json()
-            answer = (data.get("answer") or "").strip()
-            return answer
+            raise
 
-    def chat_stream(self, system: str, user: str) -> Iterator[str]:
+    def chat_stream(self, system: str, user: str, *, feature: str = "general") -> Iterator[str]:
         st = (system or "").strip()
         query = f"{st}\n\n---\n\n{user}" if st else user
         logger.info(
@@ -84,53 +108,81 @@ class DifyChatClient(LLMClient):
             len(query),
             query[:400],
         )
-        with httpx.Client(timeout=120) as client:
-            with client.stream(
-                "POST",
-                self.chat_url,
-                headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
-                json={
-                    "inputs": {},
-                    "query": query,
-                    "response_mode": "streaming",
-                    "conversation_id": "",
-                    "user": "gitlab-vetor-indexer",
-                },
-            ) as r:
-                if r.status_code == 400:
-                    try:
-                        logger.warning("Dify stream 400 (url=%s): %s", self.chat_url, r.text[:500])
-                    except Exception:
-                        pass
-                r.raise_for_status()
-                acc_answer = ""
-                for line in r.iter_lines():
-                    if not line or not line.startswith("data:"):
-                        continue
-                    raw = line[5:].strip()
-                    if not raw:
-                        continue
-                    try:
-                        data = json.loads(raw)
-                    except json.JSONDecodeError:
-                        continue
-                    ev = data.get("event")
-                    if ev == "error":
-                        msg = data.get("message") or data.get("code") or str(data)
-                        raise RuntimeError(f"Dify stream error: {msg}")
-                    if ev == "message" and data.get("answer"):
-                        cur = str(data["answer"])
-                        # Dify 部分版本为增量片段，部分为累计全文：两种都兼容
-                        if acc_answer and cur.startswith(acc_answer):
-                            new_part = cur[len(acc_answer) :]
-                            acc_answer = cur
-                        else:
-                            new_part = cur
-                            acc_answer = acc_answer + cur
-                        if new_part:
-                            yield new_part
-                    if ev == "message_end":
-                        break
+        acc_answer = ""
+        usage_info: dict[str, Any] | None = None
+        try:
+            with httpx.Client(timeout=120) as client:
+                with client.stream(
+                    "POST",
+                    self.chat_url,
+                    headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+                    json={
+                        "inputs": {},
+                        "query": query,
+                        "response_mode": "streaming",
+                        "conversation_id": "",
+                        "user": "gitlab-vetor-indexer",
+                    },
+                ) as r:
+                    if r.status_code == 400:
+                        try:
+                            logger.warning("Dify stream 400 (url=%s): %s", self.chat_url, r.text[:500])
+                        except Exception:
+                            pass
+                    r.raise_for_status()
+                    for line in r.iter_lines():
+                        if not line or not line.startswith("data:"):
+                            continue
+                        raw = line[5:].strip()
+                        if not raw:
+                            continue
+                        try:
+                            data = json.loads(raw)
+                        except json.JSONDecodeError:
+                            continue
+                        ev = data.get("event")
+                        if ev == "error":
+                            msg = data.get("message") or data.get("code") or str(data)
+                            raise RuntimeError(f"Dify stream error: {msg}")
+                        if ev == "message" and data.get("answer"):
+                            cur = str(data["answer"])
+                            # Dify 部分版本为增量片段，部分为累计全文：两种都兼容
+                            if acc_answer and cur.startswith(acc_answer):
+                                new_part = cur[len(acc_answer) :]
+                                acc_answer = cur
+                            else:
+                                new_part = cur
+                                acc_answer = acc_answer + cur
+                            if new_part:
+                                yield new_part
+                        if ev == "message_end":
+                            meta = data.get("metadata") or {}
+                            if isinstance(meta, dict):
+                                u = meta.get("usage")
+                                if isinstance(u, dict):
+                                    usage_info = u
+                            break
+            record_llm_usage(
+                provider="dify",
+                model="dify-chat",
+                feature=feature,
+                prompt_tokens=(usage_info or {}).get("prompt_tokens") if usage_info else None,
+                completion_tokens=(usage_info or {}).get("completion_tokens") if usage_info else None,
+                total_tokens=(usage_info or {}).get("total_tokens") if usage_info else None,
+                prompt_text=query,
+                completion_text=acc_answer,
+                success=True,
+            )
+        except Exception:
+            record_llm_usage(
+                provider="dify",
+                model="dify-chat",
+                feature=feature,
+                prompt_text=query,
+                completion_text=acc_answer,
+                success=False,
+            )
+            raise
 
 
 class OpenAICompatibleClient(LLMClient):
@@ -152,90 +204,153 @@ class OpenAICompatibleClient(LLMClient):
             return {"api-key": self.api_key, "Content-Type": "application/json"}
         return {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
 
-    def chat(self, system: str, user: str) -> str:
-        with httpx.Client(timeout=120) as client:
-            body: dict[str, Any] = {
-                "model": self.model,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-            }
-            # 记录缩略请求体
-            try:
-                user_preview = (user or "")[:400]
-                logger.info(
-                    "OpenAI-compatible request: model=%s, user_len=%s, user_preview=%r",
-                    self.model,
-                    len(user or ""),
-                    user_preview,
-                )
-            except Exception:
-                pass
-            # 新版本 Azure 模型用 max_completion_tokens，旧版用 max_tokens
-            if self.use_azure_header:
-                body["max_completion_tokens"] = 4096
-            else:
-                body["max_tokens"] = 4096
-            r = client.post(self.chat_url, headers=self._headers(), json=body)
-            if r.status_code == 400:
+    def chat(self, system: str, user: str, *, feature: str = "general") -> str:
+        prompt_text = f"{system}\n\n{user}"
+        try:
+            with httpx.Client(timeout=120) as client:
+                body: dict[str, Any] = {
+                    "model": self.model,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
+                }
+                # 记录缩略请求体
                 try:
-                    logger.warning("OpenAI/Azure 400: %s", r.text[:400])
+                    user_preview = (user or "")[:400]
+                    logger.info(
+                        "OpenAI-compatible request: model=%s, user_len=%s, user_preview=%r",
+                        self.model,
+                        len(user or ""),
+                        user_preview,
+                    )
                 except Exception:
                     pass
-            r.raise_for_status()
-            data = r.json()
-            choice = (data.get("choices") or [None])[0]
-            if not choice:
-                return ""
-            msg = choice.get("message") or {}
-            return (msg.get("content") or "").strip()
-
-    def chat_stream(self, system: str, user: str) -> Iterator[str]:
-        with httpx.Client(timeout=120) as client:
-            body: dict[str, Any] = {
-                "model": self.model,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                "stream": True,
-            }
-            if self.use_azure_header:
-                body["max_completion_tokens"] = 4096
-            else:
-                body["max_tokens"] = 4096
-            try:
-                logger.info(
-                    "OpenAI-compatible stream: model=%s, user_len=%s",
-                    self.model,
-                    len(user or ""),
-                )
-            except Exception:
-                pass
-            with client.stream("POST", self.chat_url, headers=self._headers(), json=body) as r:
+                # 新版本 Azure 模型用 max_completion_tokens，旧版用 max_tokens
+                if self.use_azure_header:
+                    body["max_completion_tokens"] = 4096
+                else:
+                    body["max_tokens"] = 4096
+                r = client.post(self.chat_url, headers=self._headers(), json=body)
                 if r.status_code == 400:
                     try:
-                        logger.warning("OpenAI-compatible stream 400: %s", r.text[:400])
+                        logger.warning("OpenAI/Azure 400: %s", r.text[:400])
                     except Exception:
                         pass
                 r.raise_for_status()
-                for line in r.iter_lines():
-                    if not line or not line.startswith("data:"):
-                        continue
-                    payload = line[5:].strip()
-                    if payload == "[DONE]":
-                        break
-                    try:
-                        data = json.loads(payload)
-                    except json.JSONDecodeError:
-                        continue
-                    choice = (data.get("choices") or [None])[0]
-                    if not choice:
-                        continue
-                    delta = (choice.get("delta") or {}).get("content")
-                    if delta:
-                        yield str(delta)
+                data = r.json()
+                choice = (data.get("choices") or [None])[0]
+                if not choice:
+                    record_llm_usage(
+                        provider="openai_compatible",
+                        model=self.model,
+                        feature=feature,
+                        prompt_text=prompt_text,
+                        completion_text="",
+                        success=True,
+                    )
+                    return ""
+                msg = choice.get("message") or {}
+                answer = (msg.get("content") or "").strip()
+                usage = data.get("usage") or {}
+                record_llm_usage(
+                    provider="openai_compatible",
+                    model=self.model,
+                    feature=feature,
+                    prompt_tokens=usage.get("prompt_tokens") if isinstance(usage, dict) else None,
+                    completion_tokens=usage.get("completion_tokens") if isinstance(usage, dict) else None,
+                    total_tokens=usage.get("total_tokens") if isinstance(usage, dict) else None,
+                    prompt_text=prompt_text,
+                    completion_text=answer,
+                    success=True,
+                )
+                return answer
+        except Exception:
+            record_llm_usage(
+                provider="openai_compatible",
+                model=self.model,
+                feature=feature,
+                prompt_text=prompt_text,
+                completion_text="",
+                success=False,
+            )
+            raise
+
+    def chat_stream(self, system: str, user: str, *, feature: str = "general") -> Iterator[str]:
+        prompt_text = f"{system}\n\n{user}"
+        acc_answer = ""
+        usage: dict[str, Any] | None = None
+        try:
+            with httpx.Client(timeout=120) as client:
+                body: dict[str, Any] = {
+                    "model": self.model,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
+                    "stream": True,
+                }
+                if self.use_azure_header:
+                    body["max_completion_tokens"] = 4096
+                else:
+                    body["max_tokens"] = 4096
+                    body["stream_options"] = {"include_usage": True}
+                try:
+                    logger.info(
+                        "OpenAI-compatible stream: model=%s, user_len=%s",
+                        self.model,
+                        len(user or ""),
+                    )
+                except Exception:
+                    pass
+                with client.stream("POST", self.chat_url, headers=self._headers(), json=body) as r:
+                    if r.status_code == 400:
+                        try:
+                            logger.warning("OpenAI-compatible stream 400: %s", r.text[:400])
+                        except Exception:
+                            pass
+                    r.raise_for_status()
+                    for line in r.iter_lines():
+                        if not line or not line.startswith("data:"):
+                            continue
+                        payload = line[5:].strip()
+                        if payload == "[DONE]":
+                            break
+                        try:
+                            data = json.loads(payload)
+                        except json.JSONDecodeError:
+                            continue
+                        if isinstance(data, dict) and isinstance(data.get("usage"), dict):
+                            usage = data.get("usage")
+                        choice = (data.get("choices") or [None])[0]
+                        if not choice:
+                            continue
+                        delta = (choice.get("delta") or {}).get("content")
+                        if delta:
+                            piece = str(delta)
+                            acc_answer += piece
+                            yield piece
+            record_llm_usage(
+                provider="openai_compatible",
+                model=self.model,
+                feature=feature,
+                prompt_tokens=(usage or {}).get("prompt_tokens") if usage else None,
+                completion_tokens=(usage or {}).get("completion_tokens") if usage else None,
+                total_tokens=(usage or {}).get("total_tokens") if usage else None,
+                prompt_text=prompt_text,
+                completion_text=acc_answer,
+                success=True,
+            )
+        except Exception:
+            record_llm_usage(
+                provider="openai_compatible",
+                model=self.model,
+                feature=feature,
+                prompt_text=prompt_text,
+                completion_text=acc_answer,
+                success=False,
+            )
+            raise
 
 
 class AzureOpenAISDKClient(LLMClient):
@@ -249,8 +364,9 @@ class AzureOpenAISDKClient(LLMClient):
         )
         self.deployment = deployment
 
-    def chat(self, system: str, user: str) -> str:
+    def chat(self, system: str, user: str, *, feature: str = "general") -> str:
         # gpt-5 等新模型用 max_completion_tokens，通过 extra_body 传入（SDK 可能未声明该参数）
+        prompt_text = f"{system}\n\n{user}"
         try:
             logger.info(
                 "AzureOpenAI request: deployment=%s, user_len=%s, user_preview=%r",
@@ -260,20 +376,57 @@ class AzureOpenAISDKClient(LLMClient):
             )
         except Exception:
             pass
-        resp = self._client.chat.completions.create(
-            model=self.deployment,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            extra_body={"max_completion_tokens": 4096},
-        )
-        choice = (resp.choices or [None])[0]
-        if not choice or not choice.message:
-            return ""
-        return (choice.message.content or "").strip()
+        try:
+            resp = self._client.chat.completions.create(
+                model=self.deployment,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                extra_body={"max_completion_tokens": 4096},
+            )
+            choice = (resp.choices or [None])[0]
+            if not choice or not choice.message:
+                record_llm_usage(
+                    provider="azure_openai",
+                    model=self.deployment,
+                    feature=feature,
+                    prompt_text=prompt_text,
+                    completion_text="",
+                    success=True,
+                )
+                return ""
+            answer = (choice.message.content or "").strip()
+            u = getattr(resp, "usage", None)
+            prompt_tokens = int(getattr(u, "prompt_tokens", 0)) if u is not None and getattr(u, "prompt_tokens", None) is not None else None
+            completion_tokens = int(getattr(u, "completion_tokens", 0)) if u is not None and getattr(u, "completion_tokens", None) is not None else None
+            total_tokens = int(getattr(u, "total_tokens", 0)) if u is not None and getattr(u, "total_tokens", None) is not None else None
+            record_llm_usage(
+                provider="azure_openai",
+                model=self.deployment,
+                feature=feature,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+                prompt_text=prompt_text,
+                completion_text=answer,
+                success=True,
+            )
+            return answer
+        except Exception:
+            record_llm_usage(
+                provider="azure_openai",
+                model=self.deployment,
+                feature=feature,
+                prompt_text=prompt_text,
+                completion_text="",
+                success=False,
+            )
+            raise
 
-    def chat_stream(self, system: str, user: str) -> Iterator[str]:
+    def chat_stream(self, system: str, user: str, *, feature: str = "general") -> Iterator[str]:
+        prompt_text = f"{system}\n\n{user}"
+        acc_answer = ""
         try:
             logger.info(
                 "AzureOpenAI stream: deployment=%s, user_len=%s",
@@ -282,24 +435,45 @@ class AzureOpenAISDKClient(LLMClient):
             )
         except Exception:
             pass
-        stream = self._client.chat.completions.create(
-            model=self.deployment,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            stream=True,
-            extra_body={"max_completion_tokens": 4096},
-        )
-        for chunk in stream:
-            if not chunk.choices:
-                continue
-            c0 = chunk.choices[0]
-            if not c0.delta or c0.delta.content is None:
-                continue
-            piece = c0.delta.content
-            if piece:
-                yield str(piece)
+        try:
+            stream = self._client.chat.completions.create(
+                model=self.deployment,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                stream=True,
+                extra_body={"max_completion_tokens": 4096},
+            )
+            for chunk in stream:
+                if not chunk.choices:
+                    continue
+                c0 = chunk.choices[0]
+                if not c0.delta or c0.delta.content is None:
+                    continue
+                piece = c0.delta.content
+                if piece:
+                    text = str(piece)
+                    acc_answer += text
+                    yield text
+            record_llm_usage(
+                provider="azure_openai",
+                model=self.deployment,
+                feature=feature,
+                prompt_text=prompt_text,
+                completion_text=acc_answer,
+                success=True,
+            )
+        except Exception:
+            record_llm_usage(
+                provider="azure_openai",
+                model=self.deployment,
+                feature=feature,
+                prompt_text=prompt_text,
+                completion_text=acc_answer,
+                success=False,
+            )
+            raise
 
 
 _cached_client: LLMClient | None = None

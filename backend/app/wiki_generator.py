@@ -518,6 +518,7 @@ def _architecture_markdown(
         body = client.chat(
             system=ws.arch_system,
             user=user,
+            feature="wiki_architecture",
         ).strip()
         if body:
             return body

@@ -50,6 +50,7 @@ def describe_functions_batch(chunks: list[dict[str, Any]]) -> list[dict[str, Any
             text = client.chat(
                 system=system,
                 user=prompt,
+                feature="index_describe_chunks",
             )
             lines = [ln.strip() for ln in (text or "").strip().split("\n") if ln.strip()]
             for j, c in enumerate(batch):
@@ -109,7 +110,7 @@ def analyze_repo_and_describe(
         context = _build_file_context(batch)
         system, user = analyze_repo_system_user(lang, project_id, context)
         try:
-            text = client.chat(system=system, user=user)
+            text = client.chat(system=system, user=user, feature="index_analyze_repo")
         except Exception as e:
             logger.exception("LLM call failed: %s", e)
             fail_tpl = "文件: {p}\n(分析失败: {err})" if lang == "zh" else "File: {p}\n(Analysis failed: {err})"
