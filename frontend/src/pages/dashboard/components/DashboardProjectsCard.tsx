@@ -66,10 +66,10 @@ export function DashboardProjectsCard({
           />
         </div>
 
-        <Table className="table-fixed">
+        <Table className="table-fixed min-w-[67rem]">
           <colgroup>
             <col className="w-60" />
-            <col />
+            <col className="min-w-[11rem]" />
             <col className="w-44" />
             <col className="w-20" />
             <col className="w-36" />
@@ -78,8 +78,8 @@ export function DashboardProjectsCard({
           </colgroup>
           <TableHeader>
             <TableRow>
-              <TableHead className="align-middle">{t("dashboard.colProjectId")}</TableHead>
-              <TableHead className="min-w-0 align-middle">{t("dashboard.colProjectName")}</TableHead>
+              <TableHead className="whitespace-nowrap align-middle">{t("dashboard.colProjectId")}</TableHead>
+              <TableHead className="whitespace-nowrap align-middle">{t("dashboard.colProjectName")}</TableHead>
               <TableHead className="whitespace-nowrap align-middle">{t("dashboard.colCreatedAt")}</TableHead>
               <TableHead className="whitespace-nowrap text-right align-middle">{t("dashboard.colVectors")}</TableHead>
               <TableHead className="align-middle">{t("dashboard.colRepo")}</TableHead>

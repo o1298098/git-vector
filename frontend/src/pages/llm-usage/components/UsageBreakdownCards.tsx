@@ -2,7 +2,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useI18n } from "@/i18n/I18nContext";
 import { SOFT_CARD_BORDER_CLASS, SOFT_INNER_BORDER_CLASS, type UsageRow } from "../types";
-import { numberText } from "../utils";
+import { compactNum, numberText } from "../utils";
 
 type UsageBreakdownCardsProps = {
   hasData: boolean;
@@ -40,9 +40,15 @@ function UsageTable({ rows, nameKey }: { rows: UsageRow[]; nameKey: "provider" |
                   {label}
                 </TableCell>
                 <TableCell className="text-right font-mono tabular-nums">{numberText(row.calls)}</TableCell>
-                <TableCell className="text-right font-mono tabular-nums">{numberText(row.prompt_tokens)}</TableCell>
-                <TableCell className="text-right font-mono tabular-nums">{numberText(row.completion_tokens)}</TableCell>
-                <TableCell className="text-right font-mono tabular-nums">{numberText(row.total_tokens)}</TableCell>
+                <TableCell className="text-right font-mono tabular-nums" title={numberText(row.prompt_tokens)}>
+                  {compactNum(row.prompt_tokens)}
+                </TableCell>
+                <TableCell className="text-right font-mono tabular-nums" title={numberText(row.completion_tokens)}>
+                  {compactNum(row.completion_tokens)}
+                </TableCell>
+                <TableCell className="text-right font-mono tabular-nums" title={numberText(row.total_tokens)}>
+                  {compactNum(row.total_tokens)}
+                </TableCell>
               </TableRow>
             );
           })}

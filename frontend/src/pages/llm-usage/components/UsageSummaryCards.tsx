@@ -1,7 +1,7 @@
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useI18n } from "@/i18n/I18nContext";
 import { SOFT_CARD_BORDER_CLASS, SUMMARY_LABEL_CLASS, SUMMARY_VALUE_CLASS, type UsageSummary } from "../types";
-import { numberText } from "../utils";
+import { compactNum, numberText } from "../utils";
 
 type UsageSummaryCardsProps = {
   totals: UsageSummary["totals"];
@@ -15,19 +15,25 @@ export function UsageSummaryCards({ totals }: UsageSummaryCardsProps) {
       <Card className={SOFT_CARD_BORDER_CLASS}>
         <CardHeader className="space-y-1.5 pb-2">
           <CardDescription className={SUMMARY_LABEL_CLASS}>{t("usage.totalTokens")}</CardDescription>
-          <CardTitle className={SUMMARY_VALUE_CLASS}>{numberText(totals.total_tokens)}</CardTitle>
+          <CardTitle className={SUMMARY_VALUE_CLASS}>
+            <span title={numberText(totals.total_tokens)}>{compactNum(totals.total_tokens)}</span>
+          </CardTitle>
         </CardHeader>
       </Card>
       <Card className={SOFT_CARD_BORDER_CLASS}>
         <CardHeader className="space-y-1.5 pb-2">
           <CardDescription className={SUMMARY_LABEL_CLASS}>{t("usage.inputTokens")}</CardDescription>
-          <CardTitle className={SUMMARY_VALUE_CLASS}>{numberText(totals.prompt_tokens)}</CardTitle>
+          <CardTitle className={SUMMARY_VALUE_CLASS}>
+            <span title={numberText(totals.prompt_tokens)}>{compactNum(totals.prompt_tokens)}</span>
+          </CardTitle>
         </CardHeader>
       </Card>
       <Card className={SOFT_CARD_BORDER_CLASS}>
         <CardHeader className="space-y-1.5 pb-2">
           <CardDescription className={SUMMARY_LABEL_CLASS}>{t("usage.outputTokens")}</CardDescription>
-          <CardTitle className={SUMMARY_VALUE_CLASS}>{numberText(totals.completion_tokens)}</CardTitle>
+          <CardTitle className={SUMMARY_VALUE_CLASS}>
+            <span title={numberText(totals.completion_tokens)}>{compactNum(totals.completion_tokens)}</span>
+          </CardTitle>
         </CardHeader>
       </Card>
       <Card className={SOFT_CARD_BORDER_CLASS}>

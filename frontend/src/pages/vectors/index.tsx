@@ -66,14 +66,12 @@ export function Vectors() {
     }
   }, [searchParams, projectId]);
 
+  const qFromUrl = (searchParams.get("q") || "").trim();
   useEffect(() => {
-    const query = (searchParams.get("q") || "").trim();
-    if (query !== searchInput) {
-      setSearchInput(query);
-      setDebouncedQ(query);
-      setPage(0);
-    }
-  }, [searchParams, searchInput]);
+    setSearchInput(qFromUrl);
+    setDebouncedQ(qFromUrl);
+    setPage(0);
+  }, [qFromUrl]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => setDebouncedQ(searchInput.trim()), SEARCH_DEBOUNCE_MS);

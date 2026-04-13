@@ -52,9 +52,9 @@ export function LoginInkFlowField({ dark }: LoginInkFlowFieldProps) {
       { r: 132, g: 74, b: 52 },
     ];
     const inkLight: Rgb[] = [
-      { r: 2, g: 132, b: 199 },
-      { r: 109, g: 40, b: 217 },
-      { r: 194, g: 65, b: 12 },
+      { r: 130, g: 198, b: 232 },
+      { r: 188, g: 168, b: 232 },
+      { r: 228, g: 188, b: 168 },
     ];
 
     const resize = () => {
@@ -101,8 +101,8 @@ export function LoginInkFlowField({ dark }: LoginInkFlowFieldProps) {
         pts.forEach((p, i) => {
           const c = inks[i];
           const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r);
-          const core = dark ? 0.28 : 0.22;
-          const mid = dark ? 0.09 : 0.09;
+          const core = dark ? 0.28 : 0.14;
+          const mid = dark ? 0.09 : 0.055;
           g.addColorStop(0, `rgba(${c.r},${c.g},${c.b},${core})`);
           g.addColorStop(0.5, `rgba(${c.r},${c.g},${c.b},${mid})`);
           g.addColorStop(1, `rgba(${c.r},${c.g},${c.b},0)`);
@@ -127,7 +127,7 @@ export function LoginInkFlowField({ dark }: LoginInkFlowFieldProps) {
   return (
     <canvas
       ref={canvasRef}
-      className="absolute inset-0 h-full w-full opacity-100 blur-[18px] saturate-[1.18] contrast-[1.02] dark:saturate-[0.88] dark:contrast-[0.98]"
+      className="absolute inset-0 h-full w-full opacity-100 blur-[18px] saturate-100 contrast-[1.02] dark:saturate-[0.88] dark:contrast-[0.98]"
       aria-hidden
     />
   );
