@@ -78,6 +78,8 @@ export function useCodeChat() {
     target: "",
     displayLen: 0,
     timer: null as ReturnType<typeof setInterval> | null,
+    done: false,
+    assistantId: "",
   });
 
   const clearStreamTyping = useCallback(() => {
@@ -92,23 +94,70 @@ export function useCodeChat() {
     clearStreamTyping();
     streamTypeRef.current.target = "";
     streamTypeRef.current.displayLen = 0;
+    streamTypeRef.current.done = false;
+    streamTypeRef.current.assistantId = "";
   }, [clearStreamTyping]);
 
   const startStreamTyping = useCallback(
     (assistantId: string) => {
       clearStreamTyping();
+      streamTypeRef.current.done = false;
+      streamTypeRef.current.assistantId = assistantId;
       streamTypeRef.current.timer = setInterval(() => {
         const target = streamTypeRef.current.target;
         let len = streamTypeRef.current.displayLen;
-        if (len >= target.length) return;
+        if (len >= target.length) {
+          if (streamTypeRef.current.done && streamTypeRef.current.assistantId === assistantId) {
+            clearStreamTyping();
+            setTurns((prev) =>
+              prev.map((x) =>
+                x.id === assistantId ? { ...x, content: target, streaming: false } : x,
+              ),
+            );
+          }
+          return;
+        }
         const lag = target.length - len;
         const step = lag > 180 ? Math.min(4, Math.max(2, Math.ceil(lag / 90))) : 1;
         const next = Math.min(len + step, target.length);
         streamTypeRef.current.displayLen = next;
+        const finishNow =
+          next >= target.length &&
+          streamTypeRef.current.done &&
+          streamTypeRef.current.assistantId === assistantId;
         setTurns((prev) =>
-          prev.map((x) => (x.id === assistantId ? { ...x, content: target.slice(0, next) } : x)),
+          prev.map((x) =>
+            x.id === assistantId
+              ? {
+                  ...x,
+                  content: target.slice(0, next),
+                  ...(finishNow ? { streaming: false } : {}),
+                }
+              : x,
+          ),
         );
+        if (finishNow) {
+          clearStreamTyping();
+        }
       }, STREAM_TYPING_TICK_MS);
+    },
+    [clearStreamTyping, setTurns],
+  );
+
+  const markStreamDone = useCallback(
+    (assistantId: string) => {
+      streamTypeRef.current.done = true;
+      streamTypeRef.current.assistantId = assistantId;
+      if (streamTypeRef.current.displayLen >= streamTypeRef.current.target.length) {
+        clearStreamTyping();
+        setTurns((prev) =>
+          prev.map((x) =>
+            x.id === assistantId
+              ? { ...x, content: streamTypeRef.current.target, streaming: false }
+              : x,
+          ),
+        );
+      }
     },
     [clearStreamTyping, setTurns],
   );
@@ -313,7 +362,7 @@ export function useCodeChat() {
                 streamTypeRef.current.target += data.text;
               }
             } else if (ev === "done") {
-              snapStreamToTarget(aid, { streaming: false });
+              markStreamDone(aid);
             } else if (ev === "error") {
               const errText = data.message ?? t("chat.sendFail");
               setLoading(false);
@@ -347,7 +396,7 @@ export function useCodeChat() {
             },
           ]);
         } else {
-          snapStreamToTarget(aid, { streaming: false });
+          markStreamDone(aid);
         }
       } catch (e: unknown) {
         clearStreamTyping();
@@ -370,6 +419,7 @@ export function useCodeChat() {
       setTurns,
       resetStreamTyping,
       startStreamTyping,
+      markStreamDone,
       snapStreamToTarget,
       clearStreamTyping,
     ],
