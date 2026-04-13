@@ -62,6 +62,8 @@ class Settings(BaseSettings):
     jwt_expire_minutes: int = 60 * 24
     # 逗号分隔，如 http://localhost:5173（Vite 管理端本地开发时跨域调 API）
     cors_origins: str = ""
+    # 索引时按 Git 变更增量更新向量（需已有一次成功索引并写入 last_indexed_commit；旧版 :: 序号 id 会自动全量重建）
+    incremental_index: bool = False
 
     @field_validator("content_language", mode="before")
     @classmethod
@@ -76,6 +78,14 @@ class Settings(BaseSettings):
         if s in ("mkdocs", "starlight", "vitepress"):
             return s
         return "mkdocs"
+
+    @field_validator("incremental_index", mode="before")
+    @classmethod
+    def _normalize_incremental_index(cls, v: object) -> bool:
+        if isinstance(v, bool):
+            return v
+        s = str(v or "").strip().lower()
+        return s in ("1", "true", "yes", "on")
 
     @property
     def data_path(self) -> Path:

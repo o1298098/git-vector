@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-import sqlite3
+import hashlib
+import json
 import logging
 import os
-import json
+import re
+import sqlite3
 import threading
 from datetime import datetime, timezone
 from typing import Any
@@ -34,6 +36,36 @@ COLLECTION_NAME = "gitlab_code_docs"
 _chroma_client: chromadb.PersistentClient | None = None
 _project_index_db_lock = threading.Lock()
 
+# 旧版向量 id：`{project_id}::{从 0 起的序号}`；新版稳定 id：`gv2_` + sha256 十六进制
+_LEGACY_VECTOR_ID = re.compile(r"^.*::\d+$")
+
+
+def normalize_index_path(path: str) -> str:
+    """与 chunk path / git diff 路径对齐（正斜杠、去首尾空白）。"""
+    return str(path or "").strip().replace("\\", "/")
+
+
+def stable_vector_id(project_id: str, meta: dict[str, Any]) -> str:
+    """
+    跨次索引稳定的向量 id，用于增量 upsert / 按路径删除。
+    勿改拼接规则，否则已入库 id 全部失效需全量重建。
+    """
+    pid = str(project_id or "").strip()
+    path = normalize_index_path(str(meta.get("path") or ""))
+    name = str(meta.get("name") or "").strip()
+    kind = str(meta.get("kind") or "").strip()
+    sl = meta.get("start_line", "")
+    el = meta.get("end_line", "")
+    raw = f"{pid}\x00{path}\x00{name}\x00{kind}\x00{sl}\x00{el}"
+    return "gv2_" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def is_legacy_vector_id(vid: str) -> bool:
+    s = str(vid or "")
+    if s.startswith("gv2_"):
+        return False
+    return bool(_LEGACY_VECTOR_ID.match(s))
+
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -57,6 +89,10 @@ def _init_project_index_db(conn: sqlite3.Connection) -> None:
     cols = {row[1] for row in conn.execute("PRAGMA table_info(project_index)").fetchall()}
     if "project_name" not in cols:
         conn.execute("ALTER TABLE project_index ADD COLUMN project_name TEXT NOT NULL DEFAULT ''")
+    if "last_indexed_commit" not in cols:
+        conn.execute("ALTER TABLE project_index ADD COLUMN last_indexed_commit TEXT NOT NULL DEFAULT ''")
+    if "last_embed_model" not in cols:
+        conn.execute("ALTER TABLE project_index ADD COLUMN last_embed_model TEXT NOT NULL DEFAULT ''")
     conn.commit()
 
 
@@ -115,8 +151,50 @@ def _delete_project_index_row(project_id: str) -> None:
             conn.close()
 
 
-def _upsert_project_index_in_db(project_id: str, doc_count: int, project_name: str = "") -> None:
+def get_project_index_meta(project_id: str) -> dict[str, Any] | None:
+    """读取 project_index 行（含增量索引用的 commit / 嵌入模型记录）。"""
+    pid = str(project_id or "").strip()
+    if not pid:
+        return None
+    db_path = _project_index_db_path()
+    with _project_index_db_lock:
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        try:
+            _init_project_index_db(conn)
+            row = conn.execute(
+                """
+                SELECT project_id, doc_count, project_name,
+                       COALESCE(last_indexed_commit, '') AS last_indexed_commit,
+                       COALESCE(last_embed_model, '') AS last_embed_model
+                FROM project_index WHERE project_id=?
+                """,
+                (pid,),
+            ).fetchone()
+        finally:
+            conn.close()
+    if not row:
+        return None
+    return {
+        "project_id": str(row["project_id"]),
+        "doc_count": int(row["doc_count"]),
+        "project_name": (row["project_name"] or "").strip(),
+        "last_indexed_commit": str(row["last_indexed_commit"] or "").strip(),
+        "last_embed_model": str(row["last_embed_model"] or "").strip(),
+    }
+
+
+def _upsert_project_index_in_db(
+    project_id: str,
+    doc_count: int,
+    project_name: str = "",
+    *,
+    last_indexed_commit: str = "",
+    last_embed_model: str = "",
+) -> None:
     pname = (project_name or "").strip()
+    lc = (last_indexed_commit or "").strip()
+    em = (last_embed_model or "").strip()
     now = _utc_now_iso()
     db_path = _project_index_db_path()
     with _project_index_db_lock:
@@ -126,17 +204,26 @@ def _upsert_project_index_in_db(project_id: str, doc_count: int, project_name: s
             _init_project_index_db(conn)
             conn.execute(
                 """
-                INSERT INTO project_index (project_id, doc_count, updated_at, project_name)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO project_index
+                    (project_id, doc_count, updated_at, project_name, last_indexed_commit, last_embed_model)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(project_id) DO UPDATE SET
                     doc_count = excluded.doc_count,
                     updated_at = excluded.updated_at,
                     project_name = CASE
                         WHEN TRIM(excluded.project_name) != '' THEN TRIM(excluded.project_name)
                         ELSE project_index.project_name
+                    END,
+                    last_indexed_commit = CASE
+                        WHEN TRIM(excluded.last_indexed_commit) != '' THEN TRIM(excluded.last_indexed_commit)
+                        ELSE project_index.last_indexed_commit
+                    END,
+                    last_embed_model = CASE
+                        WHEN TRIM(excluded.last_embed_model) != '' THEN TRIM(excluded.last_embed_model)
+                        ELSE project_index.last_embed_model
                     END
                 """,
-                (project_id, int(doc_count), now, pname),
+                (project_id, int(doc_count), now, pname, lc, em),
             )
             conn.commit()
         finally:
@@ -152,8 +239,9 @@ def _replace_project_index_in_db(project_stats: dict[str, int]) -> None:
             conn.execute("DELETE FROM project_index")
             conn.executemany(
                 """
-                INSERT INTO project_index (project_id, doc_count, updated_at, project_name)
-                VALUES (?, ?, ?, '')
+                INSERT INTO project_index
+                    (project_id, doc_count, updated_at, project_name, last_indexed_commit, last_embed_model)
+                VALUES (?, ?, ?, '', '', '')
                 """,
                 [(pid, int(count), _utc_now_iso()) for pid, count in project_stats.items()],
             )
@@ -446,19 +534,82 @@ class VectorStore:
                 out[k] = repr(v)
         return out
 
+    def project_has_legacy_vector_ids(self, project_id: str) -> bool:
+        """是否存在旧版 `{project_id}::序号` 向量 id（与增量模式不兼容，需先全量重建）。"""
+        pid = str(project_id or "").strip()
+        if not pid:
+            return False
+        try:
+            probe = self.collection.get(where={"project_id": pid}, limit=5, include=[])
+            for vid in probe.get("ids") or []:
+                if is_legacy_vector_id(str(vid)):
+                    return True
+        except Exception as e:  # noqa: S110
+            logger.warning("project_has_legacy_vector_ids probe failed for %s: %s", pid, e)
+        return False
+
+    def delete_vectors_for_paths(self, project_id: str, paths: set[str]) -> int:
+        """
+        删除 metadata.path 属于给定集合（规范化后精确匹配）的向量。
+        用于增量索引：删文件、或变更文件前先清掉该路径下旧符号行号对应的条目。
+        """
+        pid = str(project_id or "").strip()
+        if not pid or not paths:
+            return 0
+        want = {normalize_index_path(p) for p in paths if str(p).strip()}
+        if not want:
+            return 0
+        ids_to_del: list[str] = []
+        try:
+            chunk = self.collection.get(
+                where={"project_id": pid},
+                include=["metadatas"],
+                limit=100_000,
+            )
+        except TypeError:
+            chunk = self.collection.get(where={"project_id": pid}, include=["metadatas"])
+        ids = chunk.get("ids") or []
+        metas = chunk.get("metadatas") or []
+        for vid, meta in zip(ids, metas):
+            p = normalize_index_path(str((meta or {}).get("path") or ""))
+            if p in want:
+                ids_to_del.append(str(vid))
+        if not ids_to_del:
+            return 0
+        try:
+            self.collection.delete(ids=ids_to_del)
+        except Exception as e:  # noqa: S110
+            logger.warning("delete_vectors_for_paths delete failed for %s: %s", pid, e)
+            return 0
+        logger.info("Deleted %s vectors for project %s (path-based incremental)", len(ids_to_del), pid)
+        return len(ids_to_del)
+
+    def count_project_documents(self, project_id: str) -> int:
+        pid = str(project_id or "").strip()
+        if not pid:
+            return 0
+        try:
+            full = self.collection.get(where={"project_id": pid}, include=[])
+            return len(full.get("ids") or [])
+        except Exception as e:  # noqa: S110
+            logger.warning("count_project_documents failed for %s: %s", pid, e)
+            return 0
+
     def upsert_project(
         self,
         project_id: str,
         chunks: list[dict[str, Any]],
         *,
         project_name: str = "",
+        last_indexed_commit: str = "",
+        last_embed_model: str = "",
     ) -> None:
         if not chunks:
             return
-        ids = [f"{project_id}::{i}" for i in range(len(chunks))]
         documents = [c.get("content", "") for c in chunks]
         raw_metas = [{**c.get("metadata", {}), "project_id": project_id} for c in chunks]
         metadatas = [self._sanitize_metadata(m) for m in raw_metas]
+        ids = [stable_vector_id(project_id, m) for m in metadatas]
         # 存文档时加 passage 前缀；若某条向量生成失败，只跳过该条；若全部失败则跳过整个项目
         try:
             emb_with_idx = _embed(documents, prefix="passage: ")
@@ -498,7 +649,7 @@ class VectorStore:
             )
             return
 
-        # 重新索引时，保证旧向量不会残留导致 doc_count 不准确。
+        # 全量：先删该项目全部向量，再写入（稳定 id 与旧 :: 序号 id 不混用）
         try:
             self.collection.delete(where={"project_id": project_id})
         except Exception as e:  # noqa: S110
@@ -510,7 +661,7 @@ class VectorStore:
             documents=kept_docs,
             metadatas=kept_metas,
         )
-        logger.info("Upserted %s chunks for project %s", len(chunks), project_id)
+        logger.info("Upserted %s chunks for project %s (full)", len(kept_ids), project_id)
 
         # 探测实际写入数量，写入缓存，避免 delete/upsert 部分失败导致统计不一致。
         try:
@@ -519,7 +670,85 @@ class VectorStore:
         except Exception as e:  # noqa: S110
             logger.warning("Failed to probe doc_count after upsert for %s: %s", project_id, e)
             doc_count = len(kept_ids)
-        _upsert_project_index_in_db(project_id, doc_count, project_name)
+        _upsert_project_index_in_db(
+            project_id,
+            doc_count,
+            project_name,
+            last_indexed_commit=last_indexed_commit,
+            last_embed_model=last_embed_model,
+        )
+
+    def upsert_project_incremental(
+        self,
+        project_id: str,
+        chunks: list[dict[str, Any]],
+        *,
+        project_name: str = "",
+        last_indexed_commit: str = "",
+        last_embed_model: str = "",
+    ) -> None:
+        """仅 upsert 给定条目，不删全项目；调用方应先按路径删除待刷新路径上的旧向量。"""
+        if not chunks:
+            return
+        documents = [c.get("content", "") for c in chunks]
+        raw_metas = [{**c.get("metadata", {}), "project_id": project_id} for c in chunks]
+        metadatas = [self._sanitize_metadata(m) for m in raw_metas]
+        ids = [stable_vector_id(project_id, m) for m in metadatas]
+        try:
+            emb_with_idx = _embed(documents, prefix="passage: ")
+        except Exception as e:  # noqa: S110
+            logger.error(
+                "Embedding failed for project %s (incremental), skip upsert: %s",
+                project_id,
+                e,
+            )
+            return
+
+        idx_to_emb: dict[int, list[float]] = {idx: emb for idx, emb in emb_with_idx}
+        kept_ids: list[str] = []
+        kept_docs: list[str] = []
+        kept_metas: list[dict[str, Any]] = []
+        kept_embs: list[list[float]] = []
+
+        for i, (id_, doc, meta) in enumerate(zip(ids, documents, metadatas)):
+            emb = idx_to_emb.get(i)
+            if emb is None:
+                logger.warning(
+                    "Skip incremental upsert for project %s, chunk index %s due to embedding failure.",
+                    project_id,
+                    i,
+                )
+                continue
+            kept_ids.append(id_)
+            kept_docs.append(doc)
+            kept_metas.append(meta)
+            kept_embs.append(emb)
+
+        if not kept_ids:
+            logger.error("No successful embeddings for project %s (incremental), skip upsert.", project_id)
+            return
+
+        self.collection.upsert(
+            ids=kept_ids,
+            embeddings=kept_embs,
+            documents=kept_docs,
+            metadatas=kept_metas,
+        )
+        logger.info("Incrementally upserted %s chunks for project %s", len(kept_ids), project_id)
+
+        try:
+            full = self.collection.get(where={"project_id": project_id}, include=[])
+            doc_count = len(full.get("ids") or [])
+        except Exception as e:  # noqa: S110
+            logger.warning("Failed to probe doc_count after incremental upsert for %s: %s", project_id, e)
+            doc_count = 0
+        _upsert_project_index_in_db(
+            project_id,
+            doc_count,
+            project_name,
+            last_indexed_commit=last_indexed_commit,
+            last_embed_model=last_embed_model,
+        )
 
     def query(
         self,

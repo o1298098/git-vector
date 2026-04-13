@@ -1,16 +1,22 @@
 import logging
 import os
 import shutil
+import subprocess
 import time
 from pathlib import Path
 from typing import Callable, Optional, Any
 
 import git
 from app.config import settings
-from app.effective_settings import effective_wiki_enabled
+from app.effective_settings import effective_embed_model, effective_wiki_enabled
 from app.code_parser import EXT_TO_LANG, parse_files
 from app.analyzer import describe_functions_batch
-from app.vector_store import get_vector_store
+from app.vector_store import (
+    _upsert_project_index_in_db,
+    get_project_index_meta,
+    get_vector_store,
+    normalize_index_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -162,6 +168,50 @@ def _fenced_code_block(code: str, path: str) -> tuple[str, str | None]:
     return (f"\n```{lang}\n{code.rstrip()}\n```", lang)
 
 
+def _git_rev_parse(repo_path: Path) -> Optional[str]:
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        if r.returncode != 0:
+            return None
+        s = (r.stdout or "").strip()
+        return s or None
+    except Exception as e:  # noqa: S110
+        logger.warning("git rev-parse failed for %s: %s", repo_path, e)
+        return None
+
+
+def _git_diff_name_only(repo_path: Path, old_commit: str, new_commit: str) -> Optional[list[str]]:
+    oc = (old_commit or "").strip()
+    nc = (new_commit or "").strip()
+    if not oc or not nc:
+        return None
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(repo_path), "diff", "--name-only", f"{oc}..{nc}"],
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=False,
+        )
+        if r.returncode != 0:
+            logger.warning(
+                "git diff --name-only failed for %s: %s",
+                repo_path,
+                (r.stderr or r.stdout or "")[:800],
+            )
+            return None
+        return [normalize_index_path(ln) for ln in (r.stdout or "").splitlines() if ln.strip()]
+    except Exception as e:  # noqa: S110
+        logger.warning("git diff --name-only error for %s: %s", repo_path, e)
+        return None
+
+
 def _chunks_to_embedding_docs(project_id: str, chunks: list[dict]) -> list[dict]:
     """将已含 description 的 chunk 转为向量库格式（不再重复调用 LLM）。"""
     out = []
@@ -235,6 +285,44 @@ def run_index_pipeline(
     try:
         _report("clone_or_pull", percent=5)
         repo_path = clone_or_pull(repo_url, project_id)
+        head = _git_rev_parse(repo_path) or ""
+        force_full = os.environ.get("FORCE_FULL_INDEX", "").strip().lower() in ("1", "true", "yes", "on")
+        use_incremental = bool(settings.incremental_index) and not force_full and bool(head)
+        meta_row = get_project_index_meta(project_id)
+        last_commit = (meta_row or {}).get("last_indexed_commit") or ""
+        last_model = (meta_row or {}).get("last_embed_model") or ""
+        embed_model = effective_embed_model()
+
+        if use_incremental and last_commit and head == last_commit and last_model == embed_model:
+            logger.info("Index unchanged (HEAD and embed model match last index) for %s", project_id)
+            _report("done", percent=100, status="skipped", reason="unchanged", head=head)
+            return
+
+        if use_incremental and last_commit:
+            _probe_store = get_vector_store()
+            if _probe_store.project_has_legacy_vector_ids(project_id):
+                logger.info("Legacy vector ids for %s — forcing full reindex", project_id)
+                use_incremental = False
+
+        if use_incremental and last_model and last_model != embed_model:
+            logger.info("Embed model changed (%s -> %s) for %s — forcing full reindex", last_model, embed_model, project_id)
+            use_incremental = False
+
+        paths_delta: set[str] = set()
+        if use_incremental and last_commit:
+            diff_list = _git_diff_name_only(repo_path, last_commit, head)
+            if diff_list is None:
+                logger.warning("Git diff failed for %s — forcing full reindex", project_id)
+                use_incremental = False
+            else:
+                paths_delta = set(diff_list)
+                if not paths_delta and last_commit != head:
+                    logger.warning("Empty diff but commits differ for %s — forcing full reindex", project_id)
+                    use_incremental = False
+
+        if use_incremental and not last_commit:
+            use_incremental = False
+
         _report("collect_files", percent=15)
         files = collect_code_files(repo_path)
         if not files:
@@ -287,13 +375,63 @@ def run_index_pipeline(
         docs = _chunks_to_embedding_docs(project_id, function_chunks)
         if os.environ.get("SKIP_VECTOR_STORE") == "1":
             logger.info("Indexed project %s with %s chunks (SKIP_VECTOR_STORE=1, skip upsert)", project_id, len(docs))
+            prev = get_project_index_meta(project_id) or {}
+            dc = int(prev.get("doc_count") or 0)
+            _upsert_project_index_in_db(
+                project_id,
+                dc,
+                project_name,
+                last_indexed_commit=head,
+                last_embed_model=embed_model,
+            )
             _report("done", percent=100, status="done", skipped_vector_store=True, doc_count=len(docs))
             return
         _report("upsert_vector_store", percent=80, doc_count=len(docs))
         store = get_vector_store()
-        store.upsert_project(project_id, docs, project_name=project_name)
-        logger.info("Indexed project %s with %s chunks", project_id, len(docs))
-        _report("done", percent=100, status="done", doc_count=len(docs))
+        if use_incremental and last_commit and paths_delta:
+            chunk_paths = {normalize_index_path(str(c.get("path") or "")) for c in function_chunks}
+            paths_refresh = {p for p in paths_delta if p in chunk_paths}
+            store.delete_vectors_for_paths(project_id, paths_delta)
+            sub_docs = [
+                d
+                for d in docs
+                if normalize_index_path(str((d.get("metadata") or {}).get("path") or "")) in paths_refresh
+            ]
+            if sub_docs:
+                store.upsert_project_incremental(
+                    project_id,
+                    sub_docs,
+                    project_name=project_name,
+                    last_indexed_commit=head,
+                    last_embed_model=embed_model,
+                )
+            else:
+                dc = store.count_project_documents(project_id)
+                _upsert_project_index_in_db(
+                    project_id,
+                    dc,
+                    project_name,
+                    last_indexed_commit=head,
+                    last_embed_model=embed_model,
+                )
+            logger.info(
+                "Incrementally indexed project %s (delta paths=%s, upserted_docs=%s)",
+                project_id,
+                len(paths_delta),
+                len(sub_docs),
+            )
+        else:
+            store.upsert_project(
+                project_id,
+                docs,
+                project_name=project_name,
+                last_indexed_commit=head,
+                last_embed_model=embed_model,
+            )
+            logger.info("Indexed project %s with %s chunks (full)", project_id, len(docs))
+        final_meta = get_project_index_meta(project_id) or {}
+        final_dc = int(final_meta.get("doc_count") or 0)
+        _report("done", percent=100, status="done", doc_count=final_dc)
     except Exception as e:
         logger.exception("Index pipeline failed for %s: %s", project_id, e)
         _report("done", percent=100, status="failed", error=str(e))
