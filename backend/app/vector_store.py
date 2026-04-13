@@ -67,6 +67,40 @@ def is_legacy_vector_id(vid: str) -> bool:
     return bool(_LEGACY_VECTOR_ID.match(s))
 
 
+def _extract_llm_description_from_document(
+    doc: str,
+    *,
+    path: str,
+    name: str,
+) -> str:
+    """
+    从索引时写入的 content 文本中提取一行 LLM 描述。
+    content 形态约定（见 indexer._chunks_to_embedding_docs）：
+      1) "<path> :: <name>"
+      2) "<description>"（可选）
+      3) "Calls: ..."（可选）
+      4) ```... 代码块（可选）
+    """
+    text = str(doc or "")
+    if not text.strip():
+        return ""
+    lines = text.splitlines()
+    if not lines:
+        return ""
+    expected_head = f"{normalize_index_path(path)} :: {str(name or '').strip()}"
+    if lines and lines[0].strip() != expected_head:
+        # 文本格式异常（或被手工改写）时不做激进解析，避免误提取。
+        return ""
+    for ln in lines[1:]:
+        s = (ln or "").strip()
+        if not s:
+            continue
+        if s.startswith("Calls:") or s.startswith("```"):
+            return ""
+        return s
+    return ""
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -594,6 +628,47 @@ class VectorStore:
         except Exception as e:  # noqa: S110
             logger.warning("count_project_documents failed for %s: %s", pid, e)
             return 0
+
+    def get_project_llm_descriptions(self, project_id: str) -> dict[str, str]:
+        """
+        读取项目已有向量中的 LLM 描述，返回 {stable_vector_id: description}。
+        用于增量索引时给未改动文件回填 description，避免 Wiki 出现“未生成描述”。
+        """
+        pid = str(project_id or "").strip()
+        if not pid:
+            return {}
+        out: dict[str, str] = {}
+        try:
+            rows = self.collection.get(
+                where={"project_id": pid},
+                include=["documents", "metadatas"],
+                limit=100_000,
+            )
+        except TypeError:
+            rows = self.collection.get(where={"project_id": pid}, include=["documents", "metadatas"])
+        except Exception as e:  # noqa: S110
+            logger.warning("get_project_llm_descriptions failed for %s: %s", pid, e)
+            return {}
+
+        ids = rows.get("ids") or []
+        docs = rows.get("documents") or []
+        metas = rows.get("metadatas") or []
+        for vid, doc, meta in zip(ids, docs, metas):
+            m = meta or {}
+            path = normalize_index_path(str(m.get("path") or ""))
+            name = str(m.get("name") or "").strip()
+            if not path:
+                continue
+            desc = _extract_llm_description_from_document(str(doc or ""), path=path, name=name).strip()
+            if not desc:
+                continue
+            vid_s = str(vid or "")
+            if vid_s.startswith("gv2_"):
+                key = vid_s
+            else:
+                key = stable_vector_id(pid, m)
+            out[key] = desc
+        return out
 
     def upsert_project(
         self,

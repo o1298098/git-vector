@@ -16,6 +16,7 @@ from app.vector_store import (
     get_project_index_meta,
     get_vector_store,
     normalize_index_path,
+    stable_vector_id,
 )
 
 logger = logging.getLogger(__name__)
@@ -352,8 +353,71 @@ def run_index_pipeline(
         if not function_chunks:
             _report("done", percent=100, status="skipped", reason="no_chunks")
             return
-        _report("describe_chunks", percent=55, chunk_count=len(function_chunks))
-        function_chunks = describe_functions_batch(function_chunks)
+        chunk_paths = {normalize_index_path(str(c.get("path") or "")) for c in function_chunks}
+        paths_refresh = {p for p in paths_delta if p in chunk_paths} if (use_incremental and paths_delta) else set()
+
+        if use_incremental and paths_delta:
+            if paths_refresh:
+                idxs: list[int] = []
+                sub_chunks: list[dict] = []
+                for i, c in enumerate(function_chunks):
+                    p = normalize_index_path(str(c.get("path") or ""))
+                    if p in paths_refresh:
+                        idxs.append(i)
+                        sub_chunks.append(c)
+                _report("describe_chunks", percent=55, chunk_count=len(sub_chunks), mode="incremental")
+                logger.info(
+                    "Incremental LLM describe for %s: files_changed=%s, chunks_described=%s",
+                    project_id,
+                    len(paths_refresh),
+                    len(sub_chunks),
+                )
+                if sub_chunks:
+                    described_sub = describe_functions_batch(sub_chunks)
+                    for pos, dc in zip(idxs, described_sub):
+                        function_chunks[pos] = dc
+            else:
+                logger.info(
+                    "Incremental LLM describe skipped for %s: no changed code chunks matched delta paths=%s",
+                    project_id,
+                    len(paths_delta),
+                )
+
+            # Wiki 依赖 chunk.description；未改动文件从历史向量回填，避免被占位文案覆盖。
+            restored_desc = 0
+            try:
+                old_desc_map = get_vector_store().get_project_llm_descriptions(project_id)
+            except Exception as e:  # noqa: S110
+                logger.warning("Load historical LLM descriptions failed for %s: %s", project_id, e)
+                old_desc_map = {}
+            if old_desc_map:
+                for c in function_chunks:
+                    p = normalize_index_path(str(c.get("path") or ""))
+                    if p in paths_refresh:
+                        continue
+                    if str(c.get("description") or "").strip():
+                        continue
+                    meta_k = {
+                        "path": p,
+                        "name": str(c.get("name") or ""),
+                        "kind": str(c.get("kind") or ""),
+                        "start_line": c.get("start_line"),
+                        "end_line": c.get("end_line"),
+                    }
+                    old_desc = (old_desc_map.get(stable_vector_id(project_id, meta_k)) or "").strip()
+                    if not old_desc:
+                        continue
+                    c["description"] = old_desc
+                    restored_desc += 1
+            if restored_desc:
+                logger.info(
+                    "Incremental LLM backfill for %s: restored_descriptions=%s",
+                    project_id,
+                    restored_desc,
+                )
+        else:
+            _report("describe_chunks", percent=55, chunk_count=len(function_chunks))
+            function_chunks = describe_functions_batch(function_chunks)
 
         skip_wiki = os.environ.get("SKIP_WIKI", "").strip().lower() in ("1", "true", "yes")
         if effective_wiki_enabled() and not skip_wiki:
@@ -389,8 +453,6 @@ def run_index_pipeline(
         _report("upsert_vector_store", percent=80, doc_count=len(docs))
         store = get_vector_store()
         if use_incremental and last_commit and paths_delta:
-            chunk_paths = {normalize_index_path(str(c.get("path") or "")) for c in function_chunks}
-            paths_refresh = {p for p in paths_delta if p in chunk_paths}
             store.delete_vectors_for_paths(project_id, paths_delta)
             sub_docs = [
                 d
