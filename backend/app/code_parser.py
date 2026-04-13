@@ -96,6 +96,7 @@ def _collect_call_names(
     仅做轻量级静态分析：提取调用目标中最后一个 identifier（如 obj.foo -> foo）。
     """
     calls: list[str] = []
+    seen: set[str] = set()
 
     def walk(n: Node) -> None:
         if n.type in call_node_types:
@@ -115,7 +116,8 @@ def _collect_call_names(
                         last_ident = _node_text(source, cur).strip() or last_ident
                     for i in range(cur.child_count - 1, -1, -1):
                         stack.append(cur.child(i))
-                if last_ident:
+                if last_ident and last_ident not in seen:
+                    seen.add(last_ident)
                     calls.append(last_ident)
         for i in range(n.child_count):
             walk(n.child(i))

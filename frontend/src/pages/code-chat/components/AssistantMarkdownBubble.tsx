@@ -1,5 +1,8 @@
 import { Sources } from "@ant-design/x";
 import XMarkdown from "@ant-design/x-markdown";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Button } from "antd";
+import { X } from "lucide-react";
 import type { StoredHit as Hit } from "@/lib/codeChatStorage";
 import { useI18n } from "@/i18n/I18nContext";
 import { formatMetaLine } from "./formatMetaLine";
@@ -13,10 +16,64 @@ type Props = {
   isStreaming?: boolean;
 };
 
+function asString(v: unknown): string {
+  return typeof v === "string" ? v.trim() : "";
+}
+
+function withBasePath(path: string): string {
+  const baseUrl = typeof import.meta.env.BASE_URL === "string" ? import.meta.env.BASE_URL : "/";
+  const base = baseUrl.replace(/\/+$/, "");
+  if (!base || base === "/") return path;
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  return `${base}${normalizedPath}`;
+}
+
+function buildHitUrl(hit: Hit, retrievalQuery?: string): string | undefined {
+  const meta = hit.metadata ?? {};
+  const projectId = asString(meta.project_id);
+  const path = asString(meta.path) || asString(meta.file);
+  const symbol = asString(meta.name);
+  const q = path || symbol || asString(retrievalQuery);
+  if (!projectId && !q) return undefined;
+  const params = new URLSearchParams();
+  if (projectId) params.set("project_id", projectId);
+  if (q) params.set("q", q);
+  return `${withBasePath("/vectors")}?${params.toString()}`;
+}
+
 /** 助手 Markdown：流式时 XMarkdown 尾部光标；结束后展示检索用语与引用 */
 export function AssistantMarkdownBubble({ full, sources, retrievalQuery, resolvedDark, isStreaming }: Props) {
   const { t } = useI18n();
   const streaming = Boolean(isStreaming);
+  const [previewIndex, setPreviewIndex] = useState<number | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const previewHit = previewIndex == null ? null : (sources?.[previewIndex] ?? null);
+  const previewMeta = useMemo(() => {
+    if (!previewHit?.metadata || typeof previewHit.metadata !== "object") return {};
+    return previewHit.metadata;
+  }, [previewHit]);
+  const previewTitle = useMemo(() => {
+    if (!previewHit) return "";
+    const line = formatMetaLine(previewMeta, t("search.lines"));
+    return line ?? t("search.hitRank", { i: String((previewIndex ?? 0) + 1) });
+  }, [previewHit, previewMeta, t, previewIndex]);
+  const previewUrl = useMemo(() => {
+    if (!previewHit) return undefined;
+    return buildHitUrl(previewHit, retrievalQuery);
+  }, [previewHit, retrievalQuery]);
+
+  useEffect(() => {
+    if (previewHit == null) return;
+    function onPointerDown(ev: MouseEvent) {
+      const panel = panelRef.current;
+      if (!panel) return;
+      const target = ev.target as Node | null;
+      if (target && panel.contains(target)) return;
+      setPreviewIndex(null);
+    }
+    document.addEventListener("mousedown", onPointerDown, true);
+    return () => document.removeEventListener("mousedown", onPointerDown, true);
+  }, [previewHit]);
 
   return (
     <div className={resolvedDark ? "x-markdown-dark" : "x-markdown-light"}>
@@ -51,8 +108,47 @@ export function AssistantMarkdownBubble({ full, sources, retrievalQuery, resolve
               description: desc.length > 240 ? `${desc.slice(0, 240)}…` : desc,
             };
           })}
+          onClick={(item) => {
+            const idx = typeof item.key === "number" ? item.key : Number(item.key);
+            if (Number.isFinite(idx) && idx >= 0) setPreviewIndex(idx);
+          }}
           defaultExpanded={false}
         />
+      ) : null}
+      {previewHit ? (
+        <div
+          ref={panelRef}
+          className="fixed right-6 top-20 z-50 w-[520px] max-h-[86vh] overflow-hidden rounded-xl border bg-background shadow-xl"
+        >
+          <div className="flex items-center justify-between border-b px-3 py-2">
+            <span className="text-sm font-semibold">{t("chat.sourcePreviewTitle")}</span>
+            <div className="flex items-center gap-2">
+              {previewUrl ? (
+                <Button type="link" href={previewUrl} target="_blank" rel="noreferrer" className="px-0">
+                  {t("chat.sourcePreviewOpen")}
+                </Button>
+              ) : null}
+              <button
+                type="button"
+                onClick={() => setPreviewIndex(null)}
+                className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+                aria-label={t("chat.editCancel")}
+              >
+                <X className="size-4" />
+              </button>
+            </div>
+          </div>
+          <div className="p-3">
+            <div className="space-y-3">
+              <div className="rounded-md border bg-muted/30 px-3 py-2 text-sm font-medium">{previewTitle}</div>
+              <div className="h-[500px] overflow-auto rounded-xl border bg-background p-3">
+                <div className={`gv-code-chat-bubbles ${resolvedDark ? "x-markdown-dark" : "x-markdown-light"}`}>
+                  <XMarkdown content={previewHit.content || ""} components={{ pre: MarkdownPre }} />
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
       ) : null}
     </div>
   );

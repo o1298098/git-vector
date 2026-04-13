@@ -170,7 +170,8 @@ def _chunks_to_embedding_docs(project_id: str, chunks: list[dict]) -> list[dict]
         name = c["name"]
         code = c.get("code", "")
         desc = c.get("description", "")
-        calls = c.get("calls") or []
+        raw_calls = c.get("calls") or []
+        calls = list(dict.fromkeys(str(x) for x in raw_calls if str(x).strip()))
         # 用于检索的文本：路径、名称、描述、代码（便于判断功能是否实现）
         content = f"{path} :: {name}"
         if desc:
