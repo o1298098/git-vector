@@ -248,6 +248,8 @@ Key fields:
 | `OPENAI_BASE_URL` | Compatible base URL (default `https://api.openai.com/v1`) |
 | `OPENAI_MODEL` | Model/deployment name |
 | `DATA_DIR` | Data directory (default `./data`; commonly `/data` in containers) |
+| `REPOS_CACHE_MAX_GB` | Soft cap on total size (GiB) of `DATA_DIR/repos` mirrors; evicts **other** projectsâ€™ dirs LRU-style before clone/pull; `0` disables |
+| `REPOS_CACHE_MAX_COUNT` | Max number of cached repo dirs under `DATA_DIR/repos` (including the current job); evicts **other** projects LRU-style; `0` disables |
 | `OLLAMA_BASE_URL` | Ollama base URL (default `http://localhost:11434` in code; Docker examples often use `http://host.docker.internal:11434`) |
 | `EMBED_MODEL` | Ollama **embeddings** model name (must exist in Ollama). **If you change the model, clear `DATA_DIR/chroma` and re-index** (dimension changes). |
 | `SKIP_VECTOR_STORE` | If `1`, runs clone/parse/(optional LLM) but skips Chroma upsert (useful for local validation). |
@@ -277,7 +279,7 @@ If no LLM is configured, indexing and retrieval still work; results simply wonâ€
 
 By default under `DATA_DIR`:
 
-- **Repo mirrors**: `DATA_DIR/repos/<project_id>/...`
+- **Repo mirrors**: `DATA_DIR/repos/<project_id>/...` (optional `REPOS_CACHE_MAX_GB` / `REPOS_CACHE_MAX_COUNT` to auto-remove least-recently-used **other** project mirrors to save disk; never deletes the repo for the job currently indexing)
 - **Vector store**: `DATA_DIR/chroma/`
 - **Jobs DB**: `DATA_DIR/index_jobs.sqlite3`
 - **Project vector index metadata**: `DATA_DIR/project_index.sqlite3` (`doc_count`, display name, plus incremental fields `last_indexed_commit` / `last_embed_model`)

@@ -64,6 +64,9 @@ class Settings(BaseSettings):
     cors_origins: str = ""
     # 索引时按 Git 变更增量更新向量（需已有一次成功索引并写入 last_indexed_commit；旧版 :: 序号 id 会自动全量重建）
     incremental_index: bool = False
+    # 本地 Git 镜像缓存（DATA_DIR/repos）：多项目时按 LRU 删其它项目目录以控磁盘；0 表示不启用
+    repos_cache_max_gb: float = 0
+    repos_cache_max_count: int = 0
 
     @field_validator("content_language", mode="before")
     @classmethod
@@ -86,6 +89,28 @@ class Settings(BaseSettings):
             return v
         s = str(v or "").strip().lower()
         return s in ("1", "true", "yes", "on")
+
+    @field_validator("repos_cache_max_gb", mode="before")
+    @classmethod
+    def _normalize_repos_cache_max_gb(cls, v: object) -> float:
+        if v is None or v == "":
+            return 0.0
+        try:
+            x = float(v)
+        except (TypeError, ValueError):
+            return 0.0
+        return x if x > 0 else 0.0
+
+    @field_validator("repos_cache_max_count", mode="before")
+    @classmethod
+    def _normalize_repos_cache_max_count(cls, v: object) -> int:
+        if v is None or v == "":
+            return 0
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return 0
+        return n if n > 0 else 0
 
     @property
     def data_path(self) -> Path:

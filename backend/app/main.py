@@ -67,6 +67,9 @@ app.include_router(jobs_router, prefix="/api", tags=["jobs"])
 from app.settings_api import router as settings_router
 
 app.include_router(settings_router, prefix="/api", tags=["settings"])
+from app.storage_api import router as storage_router
+
+app.include_router(storage_router, prefix="/api", tags=["storage"])
 from app.llm_usage_api import router as llm_usage_router
 
 app.include_router(llm_usage_router, prefix="/api", tags=["llm-usage"])

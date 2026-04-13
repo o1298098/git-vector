@@ -41,9 +41,100 @@ SKIP_PATTERNS = {
 }
 
 
+def _repo_cache_dir_name(project_id: str) -> str:
+    """与 repos 目录名一致（非字母数字替换为 _）。"""
+    return "".join(c if c.isalnum() or c in "-_" else "_" for c in project_id)
+
+
 def _repo_dir(project_id: str) -> Path:
-    safe_id = "".join(c if c.isalnum() or c in "-_" else "_" for c in project_id)
-    return settings.repos_path / safe_id
+    return settings.repos_path / _repo_cache_dir_name(project_id)
+
+
+def _dir_byte_size(path: Path) -> int:
+    """递归估算目录占用字节数（仅文件；失败忽略）。"""
+    total = 0
+    try:
+        for root, _dirs, files in os.walk(path):
+            for name in files:
+                fp = Path(root) / name
+                try:
+                    total += int(fp.stat().st_size)
+                except OSError:
+                    continue
+    except OSError:
+        return total
+    return total
+
+
+def _maybe_prune_repo_cache(*, keep_project_id: str) -> None:
+    """
+    在 DATA_DIR/repos 下按「目录 mtime 最旧优先」删除其它项目镜像，直到满足：
+    - repos_cache_max_gb：总占用不超过该值（仅统计 repos 子目录）
+    - repos_cache_max_count：子目录个数不超过该值（含当前项目）
+    当前任务对应目录永不删除。若仅当前项目已超过 max_gb，则无法继续释放，会打告警日志。
+    """
+    max_gb = float(settings.repos_cache_max_gb or 0)
+    max_cnt = int(settings.repos_cache_max_count or 0)
+    if max_gb <= 0 and max_cnt <= 0:
+        return
+
+    root = settings.repos_path
+    keep_name = _repo_cache_dir_name(keep_project_id)
+    max_bytes = int(max_gb * (1024**3)) if max_gb > 0 else 0
+
+    def list_repo_dirs() -> list[Path]:
+        try:
+            return sorted((p for p in root.iterdir() if p.is_dir()), key=lambda p: p.name)
+        except OSError:
+            return []
+
+    def total_bytes() -> int:
+        return sum(_dir_byte_size(p) for p in list_repo_dirs())
+
+    def count_dirs() -> int:
+        return len(list_repo_dirs())
+
+    # 候选：除当前项目外的子目录，按 mtime 升序（越久未动越先删）
+    candidates: list[tuple[Path, float, int]] = []
+    for p in list_repo_dirs():
+        if p.name == keep_name:
+            continue
+        try:
+            mtime = float(p.stat().st_mtime)
+        except OSError:
+            mtime = 0.0
+        candidates.append((p, mtime, _dir_byte_size(p)))
+    candidates.sort(key=lambda x: x[1])
+
+    while True:
+        tot = total_bytes()
+        cnt = count_dirs()
+        over_bytes = max_bytes > 0 and tot > max_bytes
+        over_cnt = max_cnt > 0 and cnt > max_cnt
+        if not over_bytes and not over_cnt:
+            break
+        if not candidates:
+            if over_bytes:
+                logger.warning(
+                    "Repo cache over limit (%.2f GiB) but only keep-dir remains for project %s; "
+                    "raise REPOS_CACHE_MAX_GB or remove DATA_DIR/repos manually.",
+                    tot / (1024**3),
+                    keep_project_id,
+                )
+            break
+        victim, _mt, sz = candidates.pop(0)
+        try:
+            shutil.rmtree(victim, ignore_errors=True)
+            logger.info(
+                "Pruned repo cache: removed %s (~%s MiB) for disk limits (total was ~%.2f GiB, dirs=%s)",
+                victim.name,
+                max(1, sz // (1024 * 1024)),
+                tot / (1024**3),
+                cnt,
+            )
+        except Exception as e:  # noqa: S110
+            logger.warning("Repo cache prune failed for %s: %s", victim, e)
+            break
 
 
 def _should_skip(name: str) -> bool:
@@ -57,6 +148,7 @@ def _should_skip(name: str) -> bool:
 
 def clone_or_pull(repo_url: str, project_id: str) -> Path:
     dest = _repo_dir(project_id)
+    _maybe_prune_repo_cache(keep_project_id=project_id)
     # repo_url 可能是干净 URL，这里按需注入 token
     try:
         from app.job_queue import build_repo_url_for_clone

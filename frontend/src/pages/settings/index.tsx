@@ -9,8 +9,46 @@ import { useI18n } from "@/i18n/I18nContext";
 import { SettingsActionsBar } from "./components/SettingsActionsBar";
 import { SettingsSideNav } from "./components/SettingsSideNav";
 import { SourceBadge } from "./components/SourceBadge";
-import { EMPTY_FORM, SETTINGS_SECTIONS, type FormState, type SettingsResponse } from "./types";
+import {
+  EMPTY_FORM,
+  SETTINGS_SECTIONS,
+  type AdminStorageResponse,
+  type FormState,
+  type SettingsResponse,
+} from "./types";
 import { buildPatch, respToForm } from "./utils";
+
+function formatBytes(n: number): string {
+  const x = Number(n) || 0;
+  if (x <= 0) return "0 B";
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let v = x;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i += 1;
+  }
+  const decimals = i === 0 ? 0 : v < 10 ? 2 : 1;
+  return `${v.toFixed(decimals)} ${units[i]}`;
+}
+
+function sharePercent(sizeBytes: number, totalBytes: number): number {
+  const s = Number(sizeBytes) || 0;
+  const t = Number(totalBytes) || 0;
+  if (t <= 0 || s <= 0) return 0;
+  return Math.min(100, Math.round((s / t) * 1000) / 10);
+}
+
+const STORAGE_LABEL_KEYS: Record<string, string> = {
+  repos: "settings.storageCat.repos",
+  chroma: "settings.storageCat.chroma",
+  wiki_sites: "settings.storageCat.wiki_sites",
+  wiki_work: "settings.storageCat.wiki_work",
+  index_jobs: "settings.storageCat.index_jobs",
+  project_index: "settings.storageCat.project_index",
+  llm_usage: "settings.storageCat.llm_usage",
+  ui_overrides: "settings.storageCat.ui_overrides",
+};
 
 export function Settings() {
   const { t } = useI18n();
@@ -24,6 +62,9 @@ export function Settings() {
   const [error, setError] = useState<string | null>(null);
   const [ok, setOk] = useState<string | null>(null);
   const [activeSection, setActiveSection] = useState<string>(SETTINGS_SECTIONS[0]?.id ?? "settings-gitlab");
+  const [storage, setStorage] = useState<AdminStorageResponse | null>(null);
+  const [storageErr, setStorageErr] = useState<string | null>(null);
+  const [storageLoading, setStorageLoading] = useState(false);
 
   const load = useCallback(async () => {
     setError(null);
@@ -51,6 +92,24 @@ export function Settings() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  const loadStorage = useCallback(async () => {
+    setStorageErr(null);
+    setStorageLoading(true);
+    try {
+      const data = await apiJson<AdminStorageResponse>("/api/admin/storage");
+      setStorage(data);
+    } catch (err: unknown) {
+      setStorage(null);
+      setStorageErr(err instanceof Error ? err.message : t("settings.storageLoadFail"));
+    } finally {
+      setStorageLoading(false);
+    }
+  }, [t]);
+
+  useEffect(() => {
+    void loadStorage();
+  }, [loadStorage]);
 
   useEffect(() => {
     if (loading) return;
@@ -219,7 +278,8 @@ export function Settings() {
               onSelectSection={scrollToSection}
             />
 
-            <form id="settings-form" onSubmit={onSave} className="min-w-0 flex-1 space-y-8">
+            <div className="min-w-0 flex-1 space-y-8">
+            <form id="settings-form" onSubmit={onSave} className="space-y-8">
               {error ? (
                 <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">{error}</div>
               ) : null}
@@ -375,6 +435,184 @@ export function Settings() {
                 </Card>
               </section>
             </form>
+
+              <section id="settings-storage" className="scroll-mt-24 space-y-0">
+                <Card className="border shadow-sm">
+                  <CardHeader className="border-b bg-muted/30 py-4">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div className="space-y-1">
+                        <CardTitle className="text-lg">{t("settings.storageTitle")}</CardTitle>
+                      </div>
+                      <Button type="button" variant="outline" size="sm" disabled={storageLoading} onClick={() => void loadStorage()}>
+                        {t("settings.storageRefresh")}
+                      </Button>
+                    </div>
+                  </CardHeader>
+                  <CardContent className="space-y-5 p-4 pt-6 sm:p-6">
+                    {storageErr ? (
+                      <p className="text-sm text-destructive">{storageErr}</p>
+                    ) : null}
+                    {storageLoading && !storage ? (
+                      <p className="text-sm text-muted-foreground">{t("settings.loading")}</p>
+                    ) : null}
+                    {storage ? (
+                      <div className="space-y-5">
+                        <div className="space-y-2">
+                          <p className="text-sm font-medium">{t("settings.storageVolumeTitle")}</p>
+                          <p className="text-xs text-muted-foreground">
+                            {t("settings.storageVolumeUsed", {
+                              used: formatBytes(storage.volume.used_bytes),
+                              total: formatBytes(storage.volume.total_bytes),
+                              free: formatBytes(storage.volume.free_bytes),
+                            })}
+                          </p>
+                          <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
+                            <div
+                              className="h-full rounded-full bg-primary/80"
+                              style={{
+                                width: `${Math.min(100, Math.round((storage.volume.used_bytes / Math.max(1, storage.volume.total_bytes)) * 1000) / 10)}%`,
+                              }}
+                            />
+                          </div>
+                        </div>
+                        <div className="space-y-1">
+                          <p className="text-sm font-medium">{t("settings.storageDataDir")}</p>
+                          <p className="break-all font-mono text-xs text-muted-foreground">{storage.data_dir}</p>
+                        </div>
+                        <div className="space-y-3">
+                          <p className="text-sm font-medium">{t("settings.storageFocusTitle")}</p>
+                          {(() => {
+                            const items = [
+                              {
+                                key: "vector",
+                                label: t("settings.storageFocus.vector"),
+                                size: storage.summary?.vector_store_bytes ?? 0,
+                                tone: "bg-emerald-500/80 dark:bg-emerald-400/70",
+                              },
+                              {
+                                key: "repo",
+                                label: t("settings.storageFocus.repo"),
+                                size: storage.summary?.repo_mirrors_bytes ?? 0,
+                                tone: "bg-blue-500/80 dark:bg-blue-400/70",
+                              },
+                              {
+                                key: "wiki",
+                                label: t("settings.storageFocus.wiki"),
+                                size: storage.summary?.wiki_sites_bytes ?? 0,
+                                tone: "bg-violet-500/80 dark:bg-violet-400/70",
+                              },
+                            ];
+                            const total = items.reduce((sum, it) => sum + Math.max(0, Number(it.size) || 0), 0);
+                            return (
+                              <div className="space-y-3 rounded-md border border-border/70 bg-background/80 p-3">
+                                <div className="h-2.5 w-full overflow-hidden rounded-full bg-muted">
+                                  {items.map((item) => {
+                                    const width = total > 0 ? (Math.max(0, Number(item.size) || 0) / total) * 100 : 0;
+                                    return (
+                                      <div
+                                        key={item.key}
+                                        className={`h-full ${item.tone} inline-block align-top`}
+                                        style={{ width: `${Math.max(0, Math.min(100, width))}%` }}
+                                        title={`${item.label}: ${formatBytes(item.size)}`}
+                                      />
+                                    );
+                                  })}
+                                </div>
+                                <div className="grid gap-x-4 gap-y-2 sm:grid-cols-2 lg:grid-cols-3">
+                                  {items.map((item) => {
+                                    const pct = total > 0 ? Math.round(((Math.max(0, Number(item.size) || 0) / total) * 1000)) / 10 : 0;
+                                    return (
+                                      <div key={item.key} className="flex items-center gap-2 text-xs">
+                                        <span className={`inline-block h-2.5 w-2.5 rounded-full ${item.tone}`} />
+                                        <span className="text-foreground">{item.label}</span>
+                                        <span className="tabular-nums text-muted-foreground">{t("settings.storagePct", { pct: String(pct) })}</span>
+                                        <span className="ml-auto tabular-nums text-muted-foreground">{formatBytes(item.size)}</span>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            );
+                          })()}
+                        </div>
+                        <div className="space-y-3">
+                          <div className="space-y-1">
+                            <p className="text-sm font-medium">{t("settings.storageBreakdownTitle")}</p>
+                            <p className="text-xs text-muted-foreground">{t("settings.storageBreakdownHint")}</p>
+                          </div>
+                          <div className="space-y-4 rounded-md border border-border/80 bg-muted/10 p-3 sm:p-4">
+                            {storage.breakdown.map((row) => {
+                              const pct = sharePercent(row.size_bytes, storage.data_dir_total_bytes);
+                              const label = t(STORAGE_LABEL_KEYS[row.key] ?? `settings.storageCat.${row.key}`);
+                              return (
+                                <div key={row.key} className="space-y-1.5">
+                                  <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+                                    <div className="min-w-0 flex-1 text-sm font-medium leading-snug text-foreground">
+                                      <span>{label}</span>
+                                      {!row.exists ? (
+                                        <span className="ml-2 text-xs font-normal text-muted-foreground">({t("settings.storageNo")})</span>
+                                      ) : null}
+                                    </div>
+                                    <div className="shrink-0 text-right text-sm tabular-nums text-muted-foreground">
+                                      <span className="text-foreground">{formatBytes(row.size_bytes)}</span>
+                                      <span className="ml-2 text-xs">{t("settings.storagePct", { pct: String(pct) })}</span>
+                                    </div>
+                                  </div>
+                                  <div
+                                    className="h-2.5 w-full overflow-hidden rounded-full bg-muted"
+                                    title={row.path}
+                                  >
+                                    <div
+                                      className="h-full rounded-full bg-primary/75 transition-[width] duration-300"
+                                      style={{ width: `${pct}%` }}
+                                    />
+                                  </div>
+                                  <p className="truncate font-mono text-[11px] text-muted-foreground" title={row.path}>
+                                    {row.path}
+                                  </p>
+                                </div>
+                              );
+                            })}
+                            {(() => {
+                              const pct = sharePercent(storage.other_bytes, storage.data_dir_total_bytes);
+                              return (
+                                <div className="space-y-1.5 border-t border-border/60 pt-4">
+                                  <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+                                    <div className="min-w-0 flex-1 text-sm font-medium leading-snug text-foreground">
+                                      {t("settings.storageOther")}
+                                    </div>
+                                    <div className="shrink-0 text-right text-sm tabular-nums text-muted-foreground">
+                                      <span className="text-foreground">{formatBytes(storage.other_bytes)}</span>
+                                      <span className="ml-2 text-xs">{t("settings.storagePct", { pct: String(pct) })}</span>
+                                    </div>
+                                  </div>
+                                  <div className="h-2.5 w-full overflow-hidden rounded-full bg-muted" title={storage.data_dir}>
+                                    <div
+                                      className="h-full rounded-full bg-orange-500/55 dark:bg-orange-400/45"
+                                      style={{ width: `${pct}%` }}
+                                    />
+                                  </div>
+                                </div>
+                              );
+                            })()}
+                          </div>
+                          <p className="text-xs text-muted-foreground">
+                            {t("settings.storageDataTotal")}: <span className="font-medium text-foreground">{formatBytes(storage.data_dir_total_bytes)}</span>
+                          </p>
+                          <p className="text-xs text-muted-foreground">
+                            {t("settings.storageRepoPolicy", {
+                              dirs: String(storage.repo_cache.cached_repo_dirs),
+                              maxGb: storage.repo_cache.max_gb > 0 ? String(storage.repo_cache.max_gb) : "0",
+                              maxCount: storage.repo_cache.max_count > 0 ? String(storage.repo_cache.max_count) : "0",
+                            })}
+                          </p>
+                        </div>
+                      </div>
+                    ) : null}
+                  </CardContent>
+                </Card>
+              </section>
+            </div>
           </div>
 
           <SettingsActionsBar

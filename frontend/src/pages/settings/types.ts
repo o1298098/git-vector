@@ -12,7 +12,18 @@ export const SETTINGS_SECTIONS: { id: string; labelKey: string }[] = [
   { id: "settings-embedding", labelKey: "settings.navEmbedding" },
   { id: "settings-llm", labelKey: "settings.navLlm" },
   { id: "settings-output", labelKey: "settings.navOutput" },
+  { id: "settings-storage", labelKey: "settings.navStorage" },
 ];
+
+export type AdminStorageResponse = {
+  data_dir: string;
+  volume: { total_bytes: number; free_bytes: number; used_bytes: number };
+  breakdown: Array<{ key: string; path: string; size_bytes: number; exists: boolean }>;
+  other_bytes: number;
+  data_dir_total_bytes: number;
+  repo_cache: { max_gb: number; max_count: number; cached_repo_dirs: number };
+  summary: { vector_store_bytes: number; repo_mirrors_bytes: number; wiki_sites_bytes: number };
+};
 
 export type FormState = {
   embed_model: string;
