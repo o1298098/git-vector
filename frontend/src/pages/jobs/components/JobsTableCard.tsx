@@ -42,24 +42,25 @@ export function JobsTableCard({
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
-        <Table className="table-fixed min-w-[52rem]">
-          <colgroup>
-            <col className="w-[14rem]" />
-            <col className="min-w-[11rem]" />
-            <col className="w-36" />
-            <col className="w-16" />
-            <col className="w-44" />
-          </colgroup>
-          <TableHeader>
-            <TableRow>
-              <TableHead className="whitespace-nowrap">{t("jobs.colJobId")}</TableHead>
-              <TableHead className="whitespace-nowrap">{t("jobs.colProject")}</TableHead>
-              <TableHead className="whitespace-nowrap">{t("jobs.colStatus")}</TableHead>
-              <TableHead className="whitespace-nowrap text-right">{t("jobs.colProgress")}</TableHead>
-              <TableHead className="whitespace-nowrap">{t("jobs.colStep")}</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
+        <div className="w-full overflow-x-auto">
+          <Table className="w-full min-w-[58rem] table-fixed">
+            <colgroup>
+              <col style={{ width: "20rem" }} />
+              <col />
+              <col style={{ width: "9.5rem" }} />
+              <col style={{ width: "4.25rem" }} />
+              <col style={{ width: "13rem" }} />
+            </colgroup>
+            <TableHeader>
+              <TableRow>
+                <TableHead className="align-bottom whitespace-nowrap">{t("jobs.colJobId")}</TableHead>
+                <TableHead className="align-bottom whitespace-nowrap">{t("jobs.colProject")}</TableHead>
+                <TableHead className="align-bottom whitespace-nowrap">{t("jobs.colStatus")}</TableHead>
+                <TableHead className="align-bottom whitespace-nowrap text-right">{t("jobs.colProgress")}</TableHead>
+                <TableHead className="align-bottom whitespace-nowrap">{t("jobs.colStep")}</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
             {jobs.length === 0 ? (
               <TableRow>
                 <TableCell colSpan={5} className="text-muted-foreground">
@@ -69,11 +70,11 @@ export function JobsTableCard({
             ) : (
               jobs.map((job) => (
                 <TableRow key={job.job_id}>
-                  <TableCell className="w-[14rem] max-w-[14rem] truncate font-mono text-xs" title={job.job_id}>
-                    {job.job_id}
+                  <TableCell className="align-top font-mono text-[11px] leading-snug text-foreground break-all [width:20rem]">
+                    <span title={job.job_id}>{job.job_id}</span>
                   </TableCell>
-                  <TableCell className="min-w-0">
-                    <div className="truncate font-medium" title={job.project_id}>
+                  <TableCell className="min-w-0 align-top">
+                    <div className="truncate text-sm font-medium" title={job.project_id}>
                       {job.project_id}
                     </div>
                     {job.project_name ? (
@@ -82,10 +83,10 @@ export function JobsTableCard({
                       </div>
                     ) : null}
                   </TableCell>
-                  <TableCell className="w-36 max-w-36 whitespace-nowrap">
+                  <TableCell className="align-top whitespace-nowrap [width:9.5rem]">
                     <span
                       className={cn(
-                        "rounded-full px-2 py-0.5 text-xs",
+                        "inline-flex rounded-full px-2 py-0.5 text-xs",
                         job.status === "succeeded" && "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400",
                         job.status === "failed" && "bg-destructive/15 text-destructive",
                         job.status === "cancelled" && "bg-orange-500/15 text-orange-700 dark:text-orange-400",
@@ -96,19 +97,25 @@ export function JobsTableCard({
                     >
                       {job.status}
                     </span>
-                    {job.is_current ? <span className="ml-1 text-xs text-primary">{t("jobs.current")}</span> : null}
+                    {job.is_current ? (
+                      <span className="mt-0.5 block text-xs text-primary md:mt-0 md:ml-1 md:inline">{t("jobs.current")}</span>
+                    ) : null}
                   </TableCell>
-                  <TableCell className="w-16 max-w-16 text-right tabular-nums">{job.progress}%</TableCell>
-                  <TableCell className="w-44 max-w-44">
-                    <div className="truncate text-xs text-muted-foreground" title={job.message || job.step}>
+                  <TableCell className="align-top text-right tabular-nums text-sm [width:4.25rem]">{job.progress}%</TableCell>
+                  <TableCell className="min-w-0 align-top [width:13rem]">
+                    <div
+                      className="line-clamp-2 break-words text-xs text-muted-foreground"
+                      title={[job.step, job.message].filter(Boolean).join(" — ")}
+                    >
                       {job.step}
                     </div>
                   </TableCell>
                 </TableRow>
               ))
             )}
-          </TableBody>
-        </Table>
+            </TableBody>
+          </Table>
+        </div>
 
         <div className="flex flex-col gap-3 border-t pt-4 sm:flex-row sm:items-center sm:justify-between">
           <p className="text-sm text-muted-foreground">

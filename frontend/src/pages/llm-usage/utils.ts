@@ -17,7 +17,7 @@ export function shortDayLabel(day: string): string {
 }
 
 export function compactNum(value: number | undefined): string {
-  return new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 }).format(Number(value || 0));
+  return new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 }).format(Number(value || 0));
 }
 
 function smoothPath(points: Point[]): string {
