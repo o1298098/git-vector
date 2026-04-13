@@ -52,21 +52,23 @@ export function SearchResultsPanel({ loading, hasSearched, results, error }: Sea
               const metadata = result.metadata && typeof result.metadata === "object" ? result.metadata : {};
               const metaLine = formatMetaLine(metadata, t("search.lines"));
               return (
-                <li key={index}>
-                  <Card className="overflow-hidden transition-shadow hover:shadow-md">
-                    <CardHeader className="space-y-2 border-b bg-muted/20 py-3">
+                <li key={index} className="min-w-0">
+                  <Card className="min-w-0 overflow-hidden transition-shadow hover:shadow-md">
+                    <CardHeader className="min-w-0 space-y-2 border-b bg-muted/20 py-3">
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <span className="text-sm font-medium text-muted-foreground">
                           {t("search.hitRank", { i: String(index + 1) })}
                         </span>
-                        <span className="text-xs text-muted-foreground">
+                        <span className="shrink-0 text-xs text-muted-foreground">
                           {t("search.relevance")}{" "}
                           <span className="font-mono font-medium text-foreground">{formatRelevance(result)}</span>
                         </span>
                       </div>
-                      {metaLine ? <p className="text-xs font-mono text-primary/90">{metaLine}</p> : null}
+                      {metaLine ? (
+                        <p className="break-words text-xs font-mono text-primary/90 [overflow-wrap:anywhere]">{metaLine}</p>
+                      ) : null}
                     </CardHeader>
-                    <CardContent className="space-y-3 pt-4 text-sm">
+                    <CardContent className="min-w-0 space-y-3 pt-4 text-sm">
                       <SearchResultContent content={result.content} />
                       {Object.keys(metadata).length > 0 && !metaLine ? (
                         <pre className="max-h-40 overflow-auto rounded-md bg-muted/50 p-3 text-xs">

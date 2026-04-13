@@ -6,7 +6,7 @@ function CodeBlock({ code, lang }: { code: string; lang: string }) {
   return (
     <div className="gv-embed-codeblock my-2 overflow-hidden rounded-md border border-border bg-[#fafafa] shadow-sm dark:border-border dark:bg-muted">
       {lang ? (
-        <div className="border-b border-border bg-muted/50 px-3 py-1.5 font-mono text-[11px] text-muted-foreground">
+        <div className="break-words border-b border-border bg-muted/50 px-3 py-1.5 font-mono text-[11px] text-muted-foreground [overflow-wrap:anywhere]">
           {lang}
         </div>
       ) : null}
@@ -20,7 +20,11 @@ function CodeBlock({ code, lang }: { code: string; lang: string }) {
 export function SearchResultContent({ content }: { content: string }): ReactNode {
   const matches = [...content.matchAll(/```([\w+#.-]{0,32})?\s*\r?\n([\s\S]*?)```/g)];
   if (matches.length === 0) {
-    return <div className="whitespace-pre-wrap leading-relaxed text-foreground">{content}</div>;
+    return (
+      <div className="min-w-0 whitespace-pre-wrap break-words leading-relaxed text-foreground [overflow-wrap:anywhere]">
+        {content}
+      </div>
+    );
   }
 
   const parts: ReactNode[] = [];
@@ -31,7 +35,10 @@ export function SearchResultContent({ content }: { content: string }): ReactNode
     const idx = m.index ?? 0;
     if (idx > last) {
       parts.push(
-        <div key={`t-${key++}`} className="whitespace-pre-wrap leading-relaxed text-foreground">
+        <div
+          key={`t-${key++}`}
+          className="min-w-0 whitespace-pre-wrap break-words leading-relaxed text-foreground [overflow-wrap:anywhere]"
+        >
           {content.slice(last, idx)}
         </div>,
       );
@@ -42,11 +49,14 @@ export function SearchResultContent({ content }: { content: string }): ReactNode
 
   if (last < content.length) {
     parts.push(
-      <div key={`t-${key++}`} className="whitespace-pre-wrap leading-relaxed text-foreground">
+      <div
+        key={`t-${key++}`}
+        className="min-w-0 whitespace-pre-wrap break-words leading-relaxed text-foreground [overflow-wrap:anywhere]"
+      >
         {content.slice(last)}
       </div>,
     );
   }
 
-  return <div className="space-y-2">{parts}</div>;
+  return <div className="min-w-0 space-y-2 break-words [overflow-wrap:anywhere]">{parts}</div>;
 }

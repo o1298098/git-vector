@@ -42,14 +42,21 @@ export function JobsTableCard({
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
-        <Table className="table-fixed">
+        <Table className="table-fixed min-w-[52rem]">
+          <colgroup>
+            <col className="w-[14rem]" />
+            <col className="min-w-[11rem]" />
+            <col className="w-36" />
+            <col className="w-16" />
+            <col className="w-44" />
+          </colgroup>
           <TableHeader>
             <TableRow>
-              <TableHead className="w-[14rem]">{t("jobs.colJobId")}</TableHead>
-              <TableHead className="min-w-0">{t("jobs.colProject")}</TableHead>
-              <TableHead className="w-36">{t("jobs.colStatus")}</TableHead>
-              <TableHead className="w-16 text-right">{t("jobs.colProgress")}</TableHead>
-              <TableHead className="w-44">{t("jobs.colStep")}</TableHead>
+              <TableHead className="whitespace-nowrap">{t("jobs.colJobId")}</TableHead>
+              <TableHead className="whitespace-nowrap">{t("jobs.colProject")}</TableHead>
+              <TableHead className="whitespace-nowrap">{t("jobs.colStatus")}</TableHead>
+              <TableHead className="whitespace-nowrap text-right">{t("jobs.colProgress")}</TableHead>
+              <TableHead className="whitespace-nowrap">{t("jobs.colStep")}</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
