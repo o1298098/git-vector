@@ -212,13 +212,14 @@ def list_project_vectors(
     project_id: str,
     limit: int = Query(20, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    q: Optional[str] = Query(None, description="按路径/符号名/内容关键词过滤（不区分大小写）"),
     _user: Annotated[Optional[str], Depends(require_ui_session)] = None,
 ):
     from app.vector_store import get_vector_store
 
     store = get_vector_store()
     try:
-        data = store.list_project_vectors(project_id=project_id, limit=limit, offset=offset)
+        data = store.list_project_vectors(project_id=project_id, limit=limit, offset=offset, q=q)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     return data

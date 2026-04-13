@@ -565,35 +565,73 @@ class VectorStore:
         *,
         limit: int = 20,
         offset: int = 0,
+        q: str | None = None,
     ) -> dict[str, Any]:
         pid = str(project_id).strip()
         if not pid:
             raise ValueError("project_id 不能为空")
         lim = max(1, min(200, int(limit)))
         off = max(0, int(offset))
+        needle = (q or "").strip().lower()
 
-        total_raw = self.collection.get(where={"project_id": pid}, include=[])
-        total = len(total_raw.get("ids") or [])
+        if not needle:
+            total_raw = self.collection.get(where={"project_id": pid}, include=[])
+            total = len(total_raw.get("ids") or [])
+            rows = self.collection.get(
+                where={"project_id": pid},
+                include=["documents", "metadatas"],
+                limit=lim,
+                offset=off,
+            )
+            ids = rows.get("ids") or []
+            docs = rows.get("documents") or []
+            metas = rows.get("metadatas") or []
+            items: list[dict[str, Any]] = []
+            for vid, doc, meta in zip(ids, docs, metas):
+                items.append(
+                    {
+                        "id": str(vid),
+                        "content": str(doc or ""),
+                        "metadata": meta or {},
+                    }
+                )
+            return {"total": total, "limit": lim, "offset": off, "items": items}
 
-        rows = self.collection.get(
+        # 关键词搜索：在项目内做子串匹配（id/path/name/content/metadata），再分页
+        all_rows = self.collection.get(
             where={"project_id": pid},
             include=["documents", "metadatas"],
-            limit=lim,
-            offset=off,
         )
-        ids = rows.get("ids") or []
-        docs = rows.get("documents") or []
-        metas = rows.get("metadatas") or []
-        items: list[dict[str, Any]] = []
+        ids = all_rows.get("ids") or []
+        docs = all_rows.get("documents") or []
+        metas = all_rows.get("metadatas") or []
+
+        matched: list[dict[str, Any]] = []
         for vid, doc, meta in zip(ids, docs, metas):
-            items.append(
-                {
-                    "id": str(vid),
-                    "content": str(doc or ""),
-                    "metadata": meta or {},
-                }
-            )
-        return {"total": total, "limit": lim, "offset": off, "items": items}
+            m = meta or {}
+            path = str(m.get("path") or m.get("file") or "")
+            name = str(m.get("name") or "")
+            hay = " ".join(
+                [
+                    str(vid or ""),
+                    path,
+                    name,
+                    str(doc or ""),
+                    json.dumps(m, ensure_ascii=False, default=str),
+                ]
+            ).lower()
+            if needle in hay:
+                matched.append(
+                    {
+                        "id": str(vid),
+                        "content": str(doc or ""),
+                        "metadata": m,
+                    }
+                )
+
+        total = len(matched)
+        page = matched[off : off + lim]
+        return {"total": total, "limit": lim, "offset": off, "items": page}
 
     def update_project_vector(
         self,

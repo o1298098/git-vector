@@ -1,11 +1,20 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { apiJson } from "@/lib/api";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useI18n } from "@/i18n/I18nContext";
 
 type UsageRow = {
   provider?: string;
   feature?: string;
+  calls?: number;
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+};
+
+type DailyUsageRow = {
+  day: string;
   calls?: number;
   prompt_tokens?: number;
   completion_tokens?: number;
@@ -24,12 +33,19 @@ type UsageSummary = {
   };
   by_provider: UsageRow[];
   by_feature: UsageRow[];
+  by_day: DailyUsageRow[];
 };
 
 const DAY_OPTIONS = [7, 30, 90] as const;
 
 function n(v: number | undefined): string {
   return Number(v || 0).toLocaleString();
+}
+
+function shortDayLabel(day: string): string {
+  const d = new Date(`${day}T00:00:00`);
+  if (Number.isNaN(d.getTime())) return day;
+  return `${d.getMonth() + 1}/${d.getDate()}`;
 }
 
 export function LlmUsage() {
@@ -72,6 +88,41 @@ export function LlmUsage() {
   }, [data]);
   const providerRows = useMemo(() => data?.by_provider ?? [], [data?.by_provider]);
   const featureRows = useMemo(() => (data?.by_feature ?? []).slice(0, 10), [data?.by_feature]);
+  const trendRows = useMemo(() => data?.by_day ?? [], [data?.by_day]);
+  const trendMax = useMemo(() => {
+    let maxV = 0;
+    for (const r of trendRows) {
+      const p = Number(r.prompt_tokens || 0);
+      const c = Number(r.completion_tokens || 0);
+      maxV = Math.max(maxV, p, c);
+    }
+    return maxV <= 0 ? 1 : maxV;
+  }, [trendRows]);
+
+  const trendPoints = useMemo(() => {
+    if (trendRows.length === 0) return { prompt: "", completion: "" };
+    const W = 1000;
+    const H = 240;
+    const L = 48;
+    const R = 12;
+    const T = 12;
+    const B = 32;
+    const innerW = W - L - R;
+    const innerH = H - T - B;
+    const len = Math.max(1, trendRows.length - 1);
+    const promptPts: string[] = [];
+    const completionPts: string[] = [];
+    trendRows.forEach((r, i) => {
+      const x = L + (innerW * i) / len;
+      const p = Number(r.prompt_tokens || 0);
+      const c = Number(r.completion_tokens || 0);
+      const py = T + innerH - (innerH * p) / trendMax;
+      const cy = T + innerH - (innerH * c) / trendMax;
+      promptPts.push(`${x},${py}`);
+      completionPts.push(`${x},${cy}`);
+    });
+    return { prompt: promptPts.join(" "), completion: completionPts.join(" ") };
+  }, [trendRows, trendMax]);
 
   return (
     <div className="mx-auto max-w-6xl space-y-5">
@@ -103,11 +154,23 @@ export function LlmUsage() {
         </div>
       ) : null}
 
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
         <Card>
           <CardHeader className="pb-1">
             <CardDescription>{t("usage.totalTokens")}</CardDescription>
             <CardTitle className="text-2xl">{n(totals.total_tokens)}</CardTitle>
+          </CardHeader>
+        </Card>
+        <Card>
+          <CardHeader className="pb-1">
+            <CardDescription>{t("usage.inputTokens")}</CardDescription>
+            <CardTitle className="text-2xl">{n(totals.prompt_tokens)}</CardTitle>
+          </CardHeader>
+        </Card>
+        <Card>
+          <CardHeader className="pb-1">
+            <CardDescription>{t("usage.outputTokens")}</CardDescription>
+            <CardTitle className="text-2xl">{n(totals.completion_tokens)}</CardTitle>
           </CardHeader>
         </Card>
         <Card>
@@ -118,19 +181,65 @@ export function LlmUsage() {
         </Card>
         <Card>
           <CardHeader className="pb-1">
-            <CardDescription>{t("usage.successCalls")}</CardDescription>
-            <CardTitle className="text-2xl">{n(totals.success_calls)}</CardTitle>
-          </CardHeader>
-        </Card>
-        <Card>
-          <CardHeader className="pb-1">
-            <CardDescription>{t("usage.failedCalls")}</CardDescription>
-            <CardTitle className="text-2xl">{n(totals.failed_calls)}</CardTitle>
+            <CardDescription>{t("usage.successFailCalls")}</CardDescription>
+            <CardTitle className="text-2xl">
+              {n(totals.success_calls)} / {n(totals.failed_calls)}
+            </CardTitle>
           </CardHeader>
         </Card>
       </div>
 
       <div className="grid gap-6 lg:grid-cols-2">
+        <Card className="lg:col-span-2">
+          <CardHeader>
+            <CardTitle>{t("usage.trendTitle")}</CardTitle>
+            <CardDescription>{t("usage.trendDesc")}</CardDescription>
+          </CardHeader>
+          <CardContent>
+            {trendRows.length === 0 ? (
+              <p className="text-sm text-muted-foreground">{t("usage.empty")}</p>
+            ) : (
+              <div className="space-y-3">
+                <div className="flex items-center gap-4 text-xs text-muted-foreground">
+                  <span className="inline-flex items-center gap-1">
+                    <span className="inline-block h-2.5 w-2.5 rounded-full bg-blue-600" />
+                    {t("usage.inputTokens")}
+                  </span>
+                  <span className="inline-flex items-center gap-1">
+                    <span className="inline-block h-2.5 w-2.5 rounded-full bg-emerald-600" />
+                    {t("usage.outputTokens")}
+                  </span>
+                </div>
+                <svg viewBox="0 0 1000 240" className="h-56 w-full">
+                  <line x1="48" y1="208" x2="988" y2="208" stroke="currentColor" opacity="0.2" />
+                  <line x1="48" y1="12" x2="48" y2="208" stroke="currentColor" opacity="0.2" />
+                  <polyline
+                    fill="none"
+                    stroke="rgb(37 99 235)"
+                    strokeWidth="2.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    points={trendPoints.prompt}
+                  />
+                  <polyline
+                    fill="none"
+                    stroke="rgb(5 150 105)"
+                    strokeWidth="2.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    points={trendPoints.completion}
+                  />
+                </svg>
+                <div className="flex items-center justify-between text-xs text-muted-foreground">
+                  <span>{shortDayLabel(trendRows[0]?.day || "")}</span>
+                  <span>{shortDayLabel(trendRows[Math.floor((trendRows.length - 1) / 2)]?.day || "")}</span>
+                  <span>{shortDayLabel(trendRows[trendRows.length - 1]?.day || "")}</span>
+                </div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
         <Card>
           <CardHeader>
             <CardTitle>{t("usage.byProvider")}</CardTitle>
@@ -140,19 +249,36 @@ export function LlmUsage() {
             {!data || providerRows.length === 0 ? (
               <p className="text-sm text-muted-foreground">{t("usage.empty")}</p>
             ) : (
-              <div className="overflow-hidden rounded-md border">
-                <div className="grid grid-cols-[1fr_auto_auto] gap-2 bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
-                  <span>{t("usage.colName")}</span>
-                  <span>{t("usage.colCalls")}</span>
-                  <span>{t("usage.colTokens")}</span>
-                </div>
-                {providerRows.map((r) => (
-                  <div key={r.provider || "unknown"} className="grid grid-cols-[1fr_auto_auto] gap-2 border-t px-3 py-2 text-sm">
-                    <span className="truncate">{r.provider || "unknown"}</span>
-                    <span className="font-mono">{n(r.calls)}</span>
-                    <span className="font-mono">{n(r.total_tokens)}</span>
-                  </div>
-                ))}
+              <div className="rounded-md border">
+                <Table className="w-full table-fixed">
+                  <colgroup>
+                    <col className="w-[40%]" />
+                    <col className="w-[12%]" />
+                    <col className="w-[16%]" />
+                    <col className="w-[16%]" />
+                    <col className="w-[16%]" />
+                  </colgroup>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>{t("usage.colName")}</TableHead>
+                      <TableHead className="text-right">{t("usage.colCalls")}</TableHead>
+                      <TableHead className="text-right">{t("usage.colInputTokens")}</TableHead>
+                      <TableHead className="text-right">{t("usage.colOutputTokens")}</TableHead>
+                      <TableHead className="text-right">{t("usage.colTokens")}</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {providerRows.map((r) => (
+                      <TableRow key={r.provider || "unknown"}>
+                        <TableCell className="truncate">{r.provider || "unknown"}</TableCell>
+                        <TableCell className="text-right font-mono tabular-nums">{n(r.calls)}</TableCell>
+                        <TableCell className="text-right font-mono tabular-nums">{n(r.prompt_tokens)}</TableCell>
+                        <TableCell className="text-right font-mono tabular-nums">{n(r.completion_tokens)}</TableCell>
+                        <TableCell className="text-right font-mono tabular-nums">{n(r.total_tokens)}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
               </div>
             )}
           </CardContent>
@@ -167,21 +293,38 @@ export function LlmUsage() {
             {!data || featureRows.length === 0 ? (
               <p className="text-sm text-muted-foreground">{t("usage.empty")}</p>
             ) : (
-              <div className="overflow-hidden rounded-md border">
-                <div className="grid grid-cols-[1fr_auto_auto] gap-2 bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
-                  <span>{t("usage.colName")}</span>
-                  <span>{t("usage.colCalls")}</span>
-                  <span>{t("usage.colTokens")}</span>
-                </div>
-                {featureRows.map((r) => (
-                  <div key={r.feature || "general"} className="grid grid-cols-[1fr_auto_auto] gap-2 border-t px-3 py-2 text-sm">
-                    <span className="truncate" title={r.feature || "general"}>
-                      {r.feature || "general"}
-                    </span>
-                    <span className="font-mono">{n(r.calls)}</span>
-                    <span className="font-mono">{n(r.total_tokens)}</span>
-                  </div>
-                ))}
+              <div className="rounded-md border">
+                <Table className="w-full table-fixed">
+                  <colgroup>
+                    <col className="w-[40%]" />
+                    <col className="w-[12%]" />
+                    <col className="w-[16%]" />
+                    <col className="w-[16%]" />
+                    <col className="w-[16%]" />
+                  </colgroup>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>{t("usage.colName")}</TableHead>
+                      <TableHead className="text-right">{t("usage.colCalls")}</TableHead>
+                      <TableHead className="text-right">{t("usage.colInputTokens")}</TableHead>
+                      <TableHead className="text-right">{t("usage.colOutputTokens")}</TableHead>
+                      <TableHead className="text-right">{t("usage.colTokens")}</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {featureRows.map((r) => (
+                      <TableRow key={r.feature || "general"}>
+                        <TableCell className="truncate" title={r.feature || "general"}>
+                          {r.feature || "general"}
+                        </TableCell>
+                        <TableCell className="text-right font-mono tabular-nums">{n(r.calls)}</TableCell>
+                        <TableCell className="text-right font-mono tabular-nums">{n(r.prompt_tokens)}</TableCell>
+                        <TableCell className="text-right font-mono tabular-nums">{n(r.completion_tokens)}</TableCell>
+                        <TableCell className="text-right font-mono tabular-nums">{n(r.total_tokens)}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
               </div>
             )}
           </CardContent>

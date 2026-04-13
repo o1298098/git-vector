@@ -33,6 +33,8 @@ type Props = {
   loading?: boolean;
   /** 为 true 时用 Portal 挂到 document.body，避免被 Popover/modal 等 overflow 裁切 */
   portaled?: boolean;
+  /** 紧凑模式：选中态只显示一行项目 ID，便于工具栏对齐 */
+  compact?: boolean;
 };
 
 const LISTBOX_Z = 3000;
@@ -84,6 +86,7 @@ export function SearchableProjectSelect({
   disabled,
   loading,
   portaled = false,
+  compact = false,
 }: Props) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
@@ -283,7 +286,7 @@ export function SearchableProjectSelect({
         aria-controls={listboxId}
         disabled={busy}
         className={cn(
-          "h-auto min-h-9 w-full justify-between gap-2 py-2 font-normal",
+          compact ? "h-9 w-full justify-between gap-2 px-3 py-1 font-normal" : "h-auto min-h-9 w-full justify-between gap-2 py-2 font-normal",
           !value && "text-muted-foreground",
         )}
         onClick={() => !busy && setOpen((o) => !o)}
@@ -294,6 +297,10 @@ export function SearchableProjectSelect({
           <span className="truncate text-left">{t("projectSelect.all")}</span>
         ) : selectedDisplay.kind === "raw" ? (
           <span className="truncate text-left">{selectedDisplay.id}</span>
+        ) : compact ? (
+          <span className="truncate text-left" title={selectedDisplay.name ? `${selectedDisplay.id} · ${selectedDisplay.name}` : selectedDisplay.id}>
+            {selectedDisplay.id}
+          </span>
         ) : (
           <span className="flex min-w-0 flex-col items-start gap-0.5 text-left">
             <span className="w-full truncate">{selectedDisplay.id}</span>

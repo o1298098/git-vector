@@ -4,6 +4,7 @@ import { useSearchParams } from "react-router-dom";
 import { apiJson } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { SearchableProjectSelect } from "@/components/SearchableProjectSelect";
@@ -14,6 +15,7 @@ type VectorRow = { id: string; content: string; metadata: Record<string, unknown
 type VectorListResp = { total: number; limit: number; offset: number; items: VectorRow[] };
 
 const PAGE_SIZE = 20;
+const SEARCH_DEBOUNCE_MS = 300;
 
 function prettyMeta(meta: Record<string, unknown>): string {
   try {
@@ -45,6 +47,8 @@ export function Vectors() {
   const [page, setPage] = useState(0);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [searchInput, setSearchInput] = useState("");
+  const [debouncedQ, setDebouncedQ] = useState("");
 
   const [selectedId, setSelectedId] = useState("");
   const selected = useMemo(() => rows.find((r) => r.id === selectedId) ?? null, [rows, selectedId]);
@@ -63,7 +67,11 @@ export function Vectors() {
         if (cancelled) return;
         const list = data.projects ?? [];
         setProjects(list);
-        if (!projectId && list.length > 0) setProjectId(list[0].project_id);
+        if (!projectId && list.length > 0) {
+          const first = list[0].project_id;
+          setProjectId(first);
+          setSearchParams({ project_id: first }, { replace: true });
+        }
       } catch {
         if (!cancelled) setProjects([]);
       } finally {
@@ -77,18 +85,16 @@ export function Vectors() {
 
   useEffect(() => {
     const qid = (searchParams.get("project_id") || "").trim();
-    if (qid && qid !== projectId) setProjectId(qid);
+    if (qid && qid !== projectId) {
+      setProjectId(qid);
+      setPage(0);
+    }
   }, [searchParams, projectId]);
 
   useEffect(() => {
-    const cur = (searchParams.get("project_id") || "").trim();
-    const next = projectId.trim();
-    if (cur === next) return;
-    const sp = new URLSearchParams(searchParams);
-    if (next) sp.set("project_id", next);
-    else sp.delete("project_id");
-    setSearchParams(sp, { replace: true });
-  }, [projectId, searchParams, setSearchParams]);
+    const timer = window.setTimeout(() => setDebouncedQ(searchInput.trim()), SEARCH_DEBOUNCE_MS);
+    return () => window.clearTimeout(timer);
+  }, [searchInput]);
 
   const load = useCallback(async () => {
     if (!projectId) {
@@ -105,6 +111,7 @@ export function Vectors() {
         limit: String(PAGE_SIZE),
         offset: String(page * PAGE_SIZE),
       });
+      if (debouncedQ) params.set("q", debouncedQ);
       const data = await apiJson<VectorListResp>(`/api/projects/${encodeURIComponent(projectId)}/vectors?${params}`);
       setRows(data.items ?? []);
       setTotal(typeof data.total === "number" ? data.total : 0);
@@ -118,7 +125,7 @@ export function Vectors() {
     } finally {
       setLoading(false);
     }
-  }, [page, projectId, t]);
+  }, [page, projectId, debouncedQ, t]);
 
   useEffect(() => {
     void load();
@@ -126,7 +133,7 @@ export function Vectors() {
 
   useEffect(() => {
     setPage(0);
-  }, [projectId]);
+  }, [debouncedQ]);
 
   useEffect(() => {
     if (!selected) return;
@@ -169,40 +176,54 @@ export function Vectors() {
   }
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">{t("vectors.title")}</h1>
-        <p className="text-muted-foreground">{t("vectors.subtitle")}</p>
-      </div>
+    <div className="mx-auto max-w-[1600px] space-y-4">
+      {err ? (
+        <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+          {err}
+        </div>
+      ) : null}
+      {ok ? (
+        <div className="rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-sm text-foreground">{ok}</div>
+      ) : null}
 
-      <Card>
-        <CardHeader className="space-y-2">
-          <CardTitle>{t("vectors.projectScope")}</CardTitle>
-          <CardDescription>{t("vectors.projectScopeDesc")}</CardDescription>
-        </CardHeader>
-        <CardContent className="max-w-xl">
-          <SearchableProjectSelect
-            id="vectors-project"
-            value={projectId}
-            onChange={setProjectId}
-            projects={projects}
-            loading={projectsLoading}
-            disabled={saving}
-          />
-        </CardContent>
-      </Card>
-
-      {err ? <p className="text-sm text-destructive">{err}</p> : null}
-      {ok ? <p className="text-sm text-primary">{ok}</p> : null}
-
-      <div className="grid gap-6 xl:grid-cols-12">
-        <Card className="xl:col-span-5">
-          <CardHeader>
-            <CardTitle>{t("vectors.listTitle")}</CardTitle>
-            <CardDescription>{t("vectors.listDesc", { total: String(total) })}</CardDescription>
+      <div className="grid gap-4 xl:grid-cols-12">
+        <Card className="flex h-[min(84vh,860px)] flex-col xl:col-span-5">
+          <CardHeader className="space-y-2 pb-3">
+            <div className="flex items-center justify-between gap-3">
+              <CardTitle className="text-base">{t("vectors.title")}</CardTitle>
+              <CardDescription className="text-xs">{t("vectors.listDesc", { total: String(total) })}</CardDescription>
+            </div>
+            <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+              <SearchableProjectSelect
+                id="vectors-project"
+                value={projectId}
+                onChange={(pid) => {
+                  const next = (pid || "").trim();
+                  setProjectId(next);
+                  setPage(0);
+                  setSearchParams((prev) => {
+                    const sp = new URLSearchParams(prev);
+                    if (next) sp.set("project_id", next);
+                    else sp.delete("project_id");
+                    return sp;
+                  }, { replace: true });
+                }}
+                projects={projects}
+                loading={projectsLoading}
+                disabled={saving}
+                compact
+              />
+              <Input
+                id="vectors-search"
+                value={searchInput}
+                onChange={(e) => setSearchInput(e.target.value)}
+                placeholder={t("vectors.searchPlaceholder")}
+                disabled={saving || !projectId}
+              />
+            </div>
           </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="max-h-[540px] overflow-auto rounded-md border">
+          <CardContent className="flex min-h-0 flex-1 flex-col gap-4">
+            <div className="min-h-0 flex-1 overflow-auto rounded-md border bg-background">
               {loading ? (
                 <p className="p-4 text-sm text-muted-foreground">{t("vectors.loading")}</p>
               ) : rows.length === 0 ? (
@@ -224,7 +245,7 @@ export function Vectors() {
                 </ul>
               )}
             </div>
-            <div className="flex items-center justify-between">
+            <div className="flex shrink-0 items-center justify-between">
               <span className="text-sm text-muted-foreground">
                 {t("vectors.pageNav", { cur: String(page + 1), all: String(totalPages) })}
               </span>
@@ -254,31 +275,31 @@ export function Vectors() {
           </CardContent>
         </Card>
 
-        <Card className="xl:col-span-7">
-          <CardHeader>
-            <CardTitle>{t("vectors.editorTitle")}</CardTitle>
-            <CardDescription>
+        <Card className="flex h-[min(84vh,860px)] flex-col xl:col-span-7">
+          <CardHeader className="space-y-2">
+            <CardTitle className="text-lg">{t("vectors.editorTitle")}</CardTitle>
+            <CardDescription className="font-mono text-xs">
               {selected ? selected.id : t("vectors.editorEmpty")}
             </CardDescription>
           </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="space-y-2">
+          <CardContent className="grid min-h-0 flex-1 grid-rows-[1fr_1fr_auto] gap-4">
+            <div className="flex min-h-0 flex-col space-y-2">
               <Label htmlFor="vector-content">{t("vectors.contentLabel")}</Label>
               <Textarea
                 id="vector-content"
                 value={editContent}
                 onChange={(e) => setEditContent(e.target.value)}
-                className="min-h-[180px] font-mono text-xs"
+                className="h-full min-h-0 font-mono text-xs"
                 disabled={!selected || saving}
               />
             </div>
-            <div className="space-y-2">
+            <div className="flex min-h-0 flex-col space-y-2">
               <Label htmlFor="vector-meta">{t("vectors.metaLabel")}</Label>
               <Textarea
                 id="vector-meta"
                 value={editMeta}
                 onChange={(e) => setEditMeta(e.target.value)}
-                className="min-h-[220px] font-mono text-xs"
+                className="h-full min-h-0 font-mono text-xs"
                 disabled={!selected || saving}
               />
               <p className="text-xs text-muted-foreground">{t("vectors.metaHint")}</p>
