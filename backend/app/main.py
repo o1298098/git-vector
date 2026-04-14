@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -7,7 +9,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from app.api_errors import install_error_handlers
 from app.config import settings
+from app.observability import install_observability
 from app.webhook import router as webhook_router
 
 # 基础日志配置：INFO 级别以上都会输出，带时间和模块名，方便观察运行过程
@@ -42,6 +46,8 @@ app = FastAPI(
     description="Git 托管 Webhook 或手动触发 → 索引 → 向量库 → 检索 / 对话",
     lifespan=lifespan,
 )
+install_observability(app)
+install_error_handlers(app)
 
 _cors = [o.strip() for o in (settings.cors_origins or "").split(",") if o.strip()]
 if _cors:

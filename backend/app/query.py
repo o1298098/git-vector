@@ -8,7 +8,7 @@ from typing import Annotated, Any, Optional
 from urllib.parse import quote, urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.auth_ui import require_ui_session
 from app.config import settings
@@ -19,7 +19,7 @@ router = APIRouter()
 class QueryBody(BaseModel):
     query: str
     project_id: Optional[str] = None
-    top_k: int = 10
+    top_k: int = Field(10, ge=1, le=50)
 
 
 class VectorItem(BaseModel):

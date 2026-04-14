@@ -1,5 +1,32 @@
 const TOKEN_KEY = "gv_admin_ui_token";
 
+type ApiErrorPayload = {
+  code?: string;
+  message?: string;
+  hint?: string;
+  retryable?: boolean;
+  request_id?: string;
+  detail?: unknown;
+};
+
+export class ApiError extends Error {
+  code: string;
+  hint: string;
+  retryable: boolean;
+  requestId: string;
+  status: number;
+
+  constructor(message: string, options: { status: number; code?: string; hint?: string; retryable?: boolean; requestId?: string }) {
+    super(message);
+    this.name = "ApiError";
+    this.status = options.status;
+    this.code = options.code || "HTTP_ERROR";
+    this.hint = options.hint || "";
+    this.retryable = Boolean(options.retryable);
+    this.requestId = options.requestId || "";
+  }
+}
+
 export function getToken(): string | null {
   return localStorage.getItem(TOKEN_KEY);
 }
@@ -22,14 +49,23 @@ export async function apiFetch(path: string, init: RequestInit = {}): Promise<Re
 export async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await apiFetch(path, init);
   if (!res.ok) {
-    let detail = res.statusText;
+    let payload: ApiErrorPayload | null = null;
+    let detail = res.statusText || `HTTP ${res.status}`;
     try {
-      const j = await res.json();
-      if (j?.detail) detail = typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail);
+      payload = (await res.json()) as ApiErrorPayload;
+      if (payload?.message) detail = payload.message;
+      else if (payload?.detail) detail = typeof payload.detail === "string" ? payload.detail : JSON.stringify(payload.detail);
     } catch {
       /* ignore */
     }
-    throw new Error(detail || `HTTP ${res.status}`);
+    const suffix = payload?.request_id ? ` (request_id=${payload.request_id})` : "";
+    throw new ApiError(`${detail}${suffix}`, {
+      status: res.status,
+      code: payload?.code,
+      hint: payload?.hint,
+      retryable: payload?.retryable,
+      requestId: payload?.request_id,
+    });
   }
   return res.json() as Promise<T>;
 }

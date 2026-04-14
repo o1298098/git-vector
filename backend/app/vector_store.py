@@ -28,6 +28,7 @@ except Exception:  # noqa: S110
 import chromadb
 from chromadb.config import Settings as ChromaSettings
 
+from app.api_errors import raise_app_error
 from app.config import settings
 from app.effective_settings import effective_embed_model
 
@@ -730,9 +731,9 @@ class VectorStore:
         project_name: str = "",
         last_indexed_commit: str = "",
         last_embed_model: str = "",
-    ) -> None:
+    ) -> dict[str, Any]:
         if not chunks:
-            return
+            return {"attempted": 0, "embedded": 0, "status": "skipped"}
         documents = [c.get("content", "") for c in chunks]
         raw_metas = [{**c.get("metadata", {}), "project_id": project_id} for c in chunks]
         metadatas = [self._sanitize_metadata(m) for m in raw_metas]
@@ -746,7 +747,7 @@ class VectorStore:
                 project_id,
                 e,
             )
-            return
+            raise RuntimeError("EMBEDDING_UNAVAILABLE: embedding failed for all chunks")
 
         # 只保留成功生成向量的那些条目
         idx_to_emb: dict[int, list[float]] = {idx: emb for idx, emb in emb_with_idx}
@@ -774,7 +775,7 @@ class VectorStore:
                 "No successful embeddings for project %s, skip upsert to vector store.",
                 project_id,
             )
-            return
+            raise RuntimeError("EMBEDDING_UNAVAILABLE: no successful embeddings for full upsert")
 
         kept_ids, kept_docs, kept_metas, kept_embs = _dedupe_upsert_rows(
             kept_ids,
@@ -789,7 +790,7 @@ class VectorStore:
                 "All successful embeddings were deduplicated away for project %s (full), skip upsert.",
                 project_id,
             )
-            return
+            raise RuntimeError("EMBEDDING_UNAVAILABLE: dedup removed all vectors for full upsert")
 
         # 全量：先删该项目全部向量，再写入（稳定 id 与旧 :: 序号 id 不混用）
         try:
@@ -819,6 +820,11 @@ class VectorStore:
             last_indexed_commit=last_indexed_commit,
             last_embed_model=last_embed_model,
         )
+        return {
+            "attempted": len(chunks),
+            "embedded": len(kept_ids),
+            "status": "ok" if len(kept_ids) == len(chunks) else "partial",
+        }
 
     def upsert_project_incremental(
         self,
@@ -828,10 +834,10 @@ class VectorStore:
         project_name: str = "",
         last_indexed_commit: str = "",
         last_embed_model: str = "",
-    ) -> None:
+    ) -> dict[str, Any]:
         """仅 upsert 给定条目，不删全项目；调用方应先按路径删除待刷新路径上的旧向量。"""
         if not chunks:
-            return
+            return {"attempted": 0, "embedded": 0, "status": "skipped"}
         documents = [c.get("content", "") for c in chunks]
         raw_metas = [{**c.get("metadata", {}), "project_id": project_id} for c in chunks]
         metadatas = [self._sanitize_metadata(m) for m in raw_metas]
@@ -844,7 +850,7 @@ class VectorStore:
                 project_id,
                 e,
             )
-            return
+            raise RuntimeError("EMBEDDING_UNAVAILABLE: embedding failed for all chunks (incremental)")
 
         idx_to_emb: dict[int, list[float]] = {idx: emb for idx, emb in emb_with_idx}
         kept_ids: list[str] = []
@@ -868,7 +874,7 @@ class VectorStore:
 
         if not kept_ids:
             logger.error("No successful embeddings for project %s (incremental), skip upsert.", project_id)
-            return
+            raise RuntimeError("EMBEDDING_UNAVAILABLE: no successful embeddings for incremental upsert")
 
         kept_ids, kept_docs, kept_metas, kept_embs = _dedupe_upsert_rows(
             kept_ids,
@@ -883,7 +889,7 @@ class VectorStore:
                 "All successful embeddings were deduplicated away for project %s (incremental), skip upsert.",
                 project_id,
             )
-            return
+            raise RuntimeError("EMBEDDING_UNAVAILABLE: dedup removed all vectors for incremental upsert")
 
         self.collection.upsert(
             ids=kept_ids,
@@ -906,6 +912,11 @@ class VectorStore:
             last_indexed_commit=last_indexed_commit,
             last_embed_model=last_embed_model,
         )
+        return {
+            "attempted": len(chunks),
+            "embedded": len(kept_ids),
+            "status": "ok" if len(kept_ids) == len(chunks) else "partial",
+        }
 
     def query(
         self,
@@ -913,15 +924,27 @@ class VectorStore:
         project_id: str | None = None,
         top_k: int = 10,
     ) -> list[dict[str, Any]]:
-        # 查询时加 query 前缀；若向量生成失败（如 Ollama 500），直接返回空结果，避免接口 500
+        # 查询时加 query 前缀；embedding 故障必须显式返回错误，避免“无结果”假象。
         try:
             emb_with_idx = _embed([text], prefix="query: ")
         except Exception as e:  # noqa: S110
             logger.error("Embedding failed for query %r: %s", text[:200], e)
-            return []
+            raise_app_error(
+                status_code=503,
+                code="EMBEDDING_UNAVAILABLE",
+                message="向量检索暂时不可用",
+                hint="请稍后重试，或检查 Embedding 服务状态与模型配置。",
+                retryable=True,
+            )
         if not emb_with_idx:
             logger.error("Embedding returned empty list for query %r", text[:200])
-            return []
+            raise_app_error(
+                status_code=503,
+                code="EMBEDDING_UNAVAILABLE",
+                message="向量检索暂时不可用",
+                hint="Embedding 服务未返回有效向量，请稍后重试。",
+                retryable=True,
+            )
         # 只有一条 query 文本，这里取第一条成功的向量
         emb = [emb_with_idx[0][1]]
         where = {"project_id": project_id} if project_id else None

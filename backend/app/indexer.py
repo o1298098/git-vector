@@ -552,13 +552,22 @@ def run_index_pipeline(
                 if normalize_index_path(str((d.get("metadata") or {}).get("path") or "")) in paths_refresh
             ]
             if sub_docs:
-                store.upsert_project_incremental(
+                upsert_result = store.upsert_project_incremental(
                     project_id,
                     sub_docs,
                     project_name=project_name,
                     last_indexed_commit=head,
                     last_embed_model=embed_model,
                 )
+                if upsert_result.get("status") == "partial":
+                    _report(
+                        "upsert_vector_store",
+                        percent=92,
+                        mode="incremental",
+                        status="partial",
+                        embedded=upsert_result.get("embedded"),
+                        attempted=upsert_result.get("attempted"),
+                    )
             else:
                 dc = store.count_project_documents(project_id)
                 _upsert_project_index_in_db(
@@ -575,13 +584,22 @@ def run_index_pipeline(
                 len(sub_docs),
             )
         else:
-            store.upsert_project(
+            upsert_result = store.upsert_project(
                 project_id,
                 docs,
                 project_name=project_name,
                 last_indexed_commit=head,
                 last_embed_model=embed_model,
             )
+            if upsert_result.get("status") == "partial":
+                _report(
+                    "upsert_vector_store",
+                    percent=92,
+                    mode="full",
+                    status="partial",
+                    embedded=upsert_result.get("embedded"),
+                    attempted=upsert_result.get("attempted"),
+                )
             logger.info("Indexed project %s with %s chunks (full)", project_id, len(docs))
         final_meta = get_project_index_meta(project_id) or {}
         final_dc = int(final_meta.get("doc_count") or 0)
