@@ -209,7 +209,7 @@ def _code_chat_rag(
         if (lang or "zh").lower().startswith("en"):
             user_payload = (
                 (f"{history_block}\n\n---\n" if history_block else "")
-                f"User question:\n{msg}\n\n"
+                + f"User question:\n{msg}\n\n"
                 f"Search query used for vector retrieval (may be LLM-rewritten):\n{retrieval_query}\n\n"
                 "Note: vector search returned no snippets from indexed documentation. "
                 "Reply briefly: possible reasons (project not indexed, wording mismatch, wrong project filter) "
@@ -218,7 +218,7 @@ def _code_chat_rag(
         else:
             user_payload = (
                 (f"{history_block}\n\n---\n" if history_block else "")
-                f"用户问题：\n{msg}\n\n"
+                + f"用户问题：\n{msg}\n\n"
                 f"用于向量检索的查询语（可能经模型改写）：\n{retrieval_query}\n\n"
                 "说明：本次在已索引的代码说明中未检索到相关片段。请简要说明可能原因（如尚未索引、描述不匹配、"
                 "限定项目不对等）并给出可行建议；不要捏造具体文件路径或函数名。"
