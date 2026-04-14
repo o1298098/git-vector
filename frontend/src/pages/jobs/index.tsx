@@ -12,6 +12,8 @@ export function Jobs() {
   const [error, setError] = useState<string | null>(null);
   const [cancellingId, setCancellingId] = useState<string | null>(null);
   const [cancelError, setCancelError] = useState<string | null>(null);
+  const [retryingId, setRetryingId] = useState<string | null>(null);
+  const [retryError, setRetryError] = useState<string | null>(null);
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize) || 1);
 
@@ -79,11 +81,37 @@ export function Jobs() {
     }
   }
 
+  async function retryJob(jobId: string) {
+    setRetryError(null);
+    setRetryingId(jobId);
+    try {
+      const res = await apiFetch(`/api/index-jobs/${encodeURIComponent(jobId)}/retry`, { method: "POST" });
+      if (!res.ok) {
+        let message = `HTTP ${res.status}`;
+        try {
+          const json = (await res.json()) as { detail?: unknown };
+          if (json?.detail != null) {
+            message = typeof json.detail === "string" ? json.detail : JSON.stringify(json.detail);
+          }
+        } catch {
+          /* ignore */
+        }
+        setRetryError(message);
+        return;
+      }
+      setPage(0);
+      await load();
+    } finally {
+      setRetryingId(null);
+    }
+  }
+
   return (
     <div className="space-y-6">
       <JobsPageHeader onRefresh={() => void load()} />
       {error ? <p className="text-sm text-destructive">{error}</p> : null}
       {cancelError ? <p className="text-sm text-destructive">{cancelError}</p> : null}
+      {retryError ? <p className="text-sm text-destructive">{retryError}</p> : null}
       <JobsTableCard
         jobs={jobs}
         total={total}
@@ -94,7 +122,9 @@ export function Jobs() {
         onPrevPage={() => setPage((currentPage) => Math.max(0, currentPage - 1))}
         onNextPage={() => setPage((currentPage) => currentPage + 1)}
         cancellingJobId={cancellingId}
+        retryingJobId={retryingId}
         onCancelJob={(id) => void cancelJob(id)}
+        onRetryJob={(id) => void retryJob(id)}
       />
     </div>
   );

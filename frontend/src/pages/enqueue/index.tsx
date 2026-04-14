@@ -13,6 +13,11 @@ export function Enqueue() {
   const [projectName, setProjectName] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [precheckLoading, setPrecheckLoading] = useState(false);
+  const [precheckResult, setPrecheckResult] = useState<{
+    ok: boolean;
+    checks: Array<{ key: string; label: string; ok: boolean; detail: string }>;
+  } | null>(null);
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -46,6 +51,42 @@ export function Enqueue() {
     }
   }
 
+  async function precheck() {
+    setError(null);
+    setPrecheckLoading(true);
+    try {
+      const res = await apiFetch("/api/index-jobs/precheck", {
+        method: "POST",
+        body: JSON.stringify({
+          repo_url: repoUrl.trim(),
+          project_id: projectId.trim() || undefined,
+        }),
+      });
+      const text = await res.text();
+      if (!res.ok) {
+        let message = text || `HTTP ${res.status}`;
+        try {
+          const json = JSON.parse(text) as { detail?: unknown };
+          if (json?.detail) message = typeof json.detail === "string" ? json.detail : JSON.stringify(json.detail);
+        } catch {
+          /* ignore parse errors */
+        }
+        throw new Error(message);
+      }
+      const data = JSON.parse(text) as {
+        ok: boolean;
+        checks: Array<{ key: string; label: string; ok: boolean; detail: string }>;
+      };
+      setPrecheckResult(data);
+      if (!data.ok) setError(t("enqueue.precheckFail"));
+    } catch (err: unknown) {
+      setPrecheckResult(null);
+      setError(err instanceof Error ? err.message : t("enqueue.precheckFail"));
+    } finally {
+      setPrecheckLoading(false);
+    }
+  }
+
   return (
     <div className="mx-auto max-w-lg space-y-6">
       <EnqueuePageHeader title={t("enqueue.title")} subtitle={t("enqueue.subtitle")} />
@@ -54,11 +95,14 @@ export function Enqueue() {
         projectId={projectId}
         projectName={projectName}
         loading={loading}
+        precheckLoading={precheckLoading}
+        precheckResult={precheckResult}
         error={error}
         onRepoUrlChange={setRepoUrl}
         onProjectIdChange={setProjectId}
         onProjectNameChange={setProjectName}
         onSubmit={submit}
+        onPrecheck={() => void precheck()}
         text={{
           cardTitle: t("enqueue.cardTitle"),
           cardDesc: t("enqueue.cardDesc"),
@@ -70,6 +114,10 @@ export function Enqueue() {
           projectNamePlaceholder: t("enqueue.pnamePh"),
           submit: t("enqueue.submit"),
           submitting: t("enqueue.submitting"),
+          precheck: t("enqueue.precheck"),
+          prechecking: t("enqueue.prechecking"),
+          precheckOk: t("enqueue.precheckOk"),
+          precheckFail: t("enqueue.precheckFail"),
         }}
       />
     </div>

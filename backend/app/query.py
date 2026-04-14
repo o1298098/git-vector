@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Annotated, Any, Optional
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -43,7 +43,7 @@ def query(body: QueryBody):
     from app.vector_store import get_vector_store
     store = get_vector_store()
     results = store.query(text=body.query, project_id=body.project_id, top_k=body.top_k)
-    return {"results": results}
+    return {"results": _enrich_search_results(results)}
 
 
 def _repo_url_for_browser(raw: str, project_id: str) -> str | None:
@@ -73,6 +73,75 @@ def _repo_url_for_browser(raw: str, project_id: str) -> str | None:
     if base and pid and "/" in pid and "://" not in pid:
         return f"{base}/{pid}"
     return None
+
+
+def _anchor_for_lines(host: str, start_line: int | None, end_line: int | None) -> str:
+    if not start_line or start_line <= 0:
+        return ""
+    if end_line and end_line > 0 and end_line != start_line:
+        if "gitlab" in host:
+            return f"#L{start_line}-{end_line}"
+        return f"#L{start_line}-L{end_line}"
+    return f"#L{start_line}"
+
+
+def _source_url_for_hit(
+    raw_repo_url: str,
+    project_id: str,
+    path: str,
+    start_line: int | None,
+    end_line: int | None,
+) -> str | None:
+    base = _repo_url_for_browser(raw_repo_url, project_id)
+    if not base or not path:
+        return None
+    p = quote(path.strip().lstrip("/"), safe="/._-+")
+    host = (urlparse(base).hostname or "").lower()
+    anchor = _anchor_for_lines(host, start_line, end_line)
+    if "gitlab" in host:
+        return f"{base}/-/blob/main/{p}{anchor}"
+    return f"{base}/blob/main/{p}{anchor}"
+
+
+def _int_or_none(v: Any) -> int | None:
+    try:
+        n = int(v)
+        return n if n > 0 else None
+    except Exception:
+        return None
+
+
+def _citation_for_hit(project_id: str, path: str, start_line: int | None, end_line: int | None) -> str:
+    if not project_id and not path:
+        return ""
+    rng = ""
+    if start_line:
+        rng = f":{start_line}"
+        if end_line and end_line != start_line:
+            rng += f"-{end_line}"
+    return f"{project_id}:{path}{rng}".strip(":")
+
+
+def _enrich_search_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    from app.job_queue import get_job_store
+
+    repo_urls = get_job_store().latest_repo_url_by_project_id()
+    enriched: list[dict[str, Any]] = []
+    for item in results:
+        row = dict(item or {})
+        meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        project_id = str(meta.get("project_id") or "").strip()
+        path = str(meta.get("path") or meta.get("file") or "").strip()
+        start_line = _int_or_none(meta.get("start_line"))
+        end_line = _int_or_none(meta.get("end_line"))
+        source_url = _source_url_for_hit(repo_urls.get(project_id, ""), project_id, path, start_line, end_line)
+        citation = _citation_for_hit(project_id, path, start_line, end_line)
+        if source_url:
+            row["source_url"] = source_url
+        if citation:
+            row["citation"] = citation
+        enriched.append(row)
+    return enriched
 
 
 def _enrich_projects_from_jobs(projects: list[dict]) -> None:
@@ -262,7 +331,7 @@ def search(
     from app.vector_store import get_vector_store
     store = get_vector_store()
     results = store.query(text=q, project_id=project_id, top_k=top_k)
-    return {"results": results}
+    return {"results": _enrich_search_results(results)}
 
 
 @router.get("/project/index-status")

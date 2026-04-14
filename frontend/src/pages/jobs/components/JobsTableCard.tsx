@@ -1,3 +1,4 @@
+import { useMemo, useState } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { useI18n } from "@/i18n/I18nContext";
 import { Button } from "@/components/ui/button";
@@ -16,7 +17,9 @@ type JobsTableCardProps = {
   onPrevPage: () => void;
   onNextPage: () => void;
   cancellingJobId: string | null;
+  retryingJobId: string | null;
   onCancelJob: (jobId: string) => void;
+  onRetryJob: (jobId: string) => void;
 };
 
 function parseTime(value?: string | null): number | null {
@@ -56,9 +59,13 @@ export function JobsTableCard({
   onPrevPage,
   onNextPage,
   cancellingJobId,
+  retryingJobId,
   onCancelJob,
+  onRetryJob,
 }: JobsTableCardProps) {
   const { t } = useI18n();
+  const [detailJobId, setDetailJobId] = useState<string | null>(null);
+  const detailJob = useMemo(() => jobs.find((j) => j.job_id === detailJobId) ?? null, [jobs, detailJobId]);
 
   return (
     <Card>
@@ -72,7 +79,7 @@ export function JobsTableCard({
               <col style={{ width: "5rem" }} />
               <col style={{ width: "7.5rem" }} />
               <col style={{ width: "6.5rem" }} />
-              <col style={{ width: "5.5rem" }} />
+              <col style={{ width: "9rem" }} />
             </colgroup>
             <TableHeader>
               <TableRow className="hover:bg-transparent">
@@ -156,21 +163,50 @@ export function JobsTableCard({
                   <TableCell className="align-top px-2 py-1.5 text-right tabular-nums text-[11px] text-muted-foreground [width:6.5rem]">
                     {getJobDuration(job)}
                   </TableCell>
-                  <TableCell className="align-top px-2 py-1.5 text-right [width:5.5rem]">
-                    {job.status === "queued" || job.status === "running" ? (
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        className="h-7 px-2 text-xs text-destructive hover:text-destructive"
-                        disabled={cancellingJobId === job.job_id}
-                        onClick={() => onCancelJob(job.job_id)}
-                      >
-                        {cancellingJobId === job.job_id ? t("jobs.cancelling") : t("jobs.cancel")}
-                      </Button>
-                    ) : (
-                      <span className="text-[11px] text-muted-foreground">—</span>
-                    )}
+                  <TableCell className="align-top px-2 py-1.5 text-right [width:9rem]">
+                    <div className="flex flex-wrap justify-end gap-1">
+                      {job.status === "queued" || job.status === "running" ? (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="h-7 px-2 text-xs text-destructive hover:text-destructive"
+                          disabled={cancellingJobId === job.job_id}
+                          onClick={() => onCancelJob(job.job_id)}
+                        >
+                          {cancellingJobId === job.job_id ? t("jobs.cancelling") : t("jobs.cancel")}
+                        </Button>
+                      ) : null}
+                      {(job.status === "failed" || job.status === "cancelled") && (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="h-7 px-2 text-xs"
+                          disabled={retryingJobId === job.job_id}
+                          onClick={() => onRetryJob(job.job_id)}
+                        >
+                          {retryingJobId === job.job_id ? t("jobs.retrying") : t("jobs.retry")}
+                        </Button>
+                      )}
+                      {job.status === "failed" ? (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="h-7 px-2 text-xs"
+                          onClick={() => setDetailJobId(job.job_id)}
+                        >
+                          {t("jobs.detail")}
+                        </Button>
+                      ) : null}
+                      {job.status !== "queued" &&
+                      job.status !== "running" &&
+                      job.status !== "failed" &&
+                      job.status !== "cancelled" ? (
+                        <span className="text-[11px] text-muted-foreground">—</span>
+                      ) : null}
+                    </div>
                   </TableCell>
                 </TableRow>
               ))
@@ -218,6 +254,35 @@ export function JobsTableCard({
             </div>
           </div>
         </div>
+
+        {detailJob ? (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 py-6">
+            <div className="w-full max-w-3xl rounded-lg border bg-background shadow-xl">
+              <div className="flex items-center justify-between border-b px-4 py-3">
+                <h3 className="text-sm font-semibold">
+                  {t("jobs.detail")} · {detailJob.job_id}
+                </h3>
+                <Button type="button" variant="outline" size="sm" onClick={() => setDetailJobId(null)}>
+                  {t("jobs.closeDetail")}
+                </Button>
+              </div>
+              <div className="space-y-3 p-4 text-sm">
+                {detailJob.failure_reason ? (
+                  <p className="whitespace-pre-wrap break-words rounded border border-destructive/40 bg-destructive/5 p-3 text-destructive">
+                    {detailJob.failure_reason}
+                  </p>
+                ) : (
+                  <p className="text-muted-foreground">—</p>
+                )}
+                {detailJob.log_excerpt ? (
+                  <pre className="max-h-[50vh] overflow-auto rounded border bg-muted/30 p-3 font-mono text-xs text-muted-foreground">
+                    {detailJob.log_excerpt}
+                  </pre>
+                ) : null}
+              </div>
+            </div>
+          </div>
+        ) : null}
       </CardContent>
     </Card>
   );

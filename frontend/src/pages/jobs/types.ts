@@ -9,6 +9,8 @@ export type Job = {
   created_at?: string | null;
   started_at?: string | null;
   finished_at?: string | null;
+  failure_reason?: string | null;
+  log_excerpt?: string | null;
   is_current: boolean;
 };
 

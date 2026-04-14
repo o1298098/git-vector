@@ -1,4 +1,6 @@
+import { useState } from "react";
 import { useI18n } from "@/i18n/I18nContext";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { SearchResultContent } from "@/components/SearchResultContent";
 import { type Hit } from "../types";
@@ -13,6 +15,17 @@ type SearchResultsPanelProps = {
 
 export function SearchResultsPanel({ loading, hasSearched, results, error }: SearchResultsPanelProps) {
   const { t } = useI18n();
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+
+  async function copyCitation(text: string, key: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedKey(key);
+      setTimeout(() => setCopiedKey((current) => (current === key ? null : current)), 1200);
+    } catch {
+      setCopiedKey(null);
+    }
+  }
 
   return (
     <section className="min-w-0 flex-1 space-y-4" aria-live="polite" aria-label={t("search.resultsTitle")}>
@@ -51,6 +64,7 @@ export function SearchResultsPanel({ loading, hasSearched, results, error }: Sea
             {results.map((result, index) => {
               const metadata = result.metadata && typeof result.metadata === "object" ? result.metadata : {};
               const metaLine = formatMetaLine(metadata, t("search.lines"));
+              const copyKey = `${index}-${result.citation ?? ""}`;
               return (
                 <li key={index} className="min-w-0">
                   <Card className="min-w-0 overflow-hidden transition-shadow hover:shadow-md">
@@ -69,6 +83,27 @@ export function SearchResultsPanel({ loading, hasSearched, results, error }: Sea
                       ) : null}
                     </CardHeader>
                     <CardContent className="min-w-0 space-y-3 pt-4 text-sm">
+                      <div className="flex flex-wrap items-center gap-2">
+                        {result.source_url ? (
+                          <Button asChild type="button" size="sm" variant="outline" className="h-7 px-2 text-xs">
+                            <a href={result.source_url} target="_blank" rel="noreferrer">
+                              {t("search.openSource")}
+                            </a>
+                          </Button>
+                        ) : null}
+                        {result.citation ? (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            className="h-7 px-2 text-xs"
+                            onClick={() => void copyCitation(result.citation ?? "", copyKey)}
+                            title={result.citation}
+                          >
+                            {copiedKey === copyKey ? t("search.copyCitationDone") : t("search.copyCitation")}
+                          </Button>
+                        ) : null}
+                      </div>
                       <SearchResultContent content={result.content} />
                       {Object.keys(metadata).length > 0 && !metaLine ? (
                         <pre className="max-h-40 overflow-auto rounded-md bg-muted/50 p-3 text-xs">

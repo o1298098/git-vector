@@ -6,6 +6,7 @@ import re
 import sqlite3
 import threading
 import time
+import traceback
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -123,10 +124,13 @@ class IndexJob:
     created_at: str
     started_at: str
     finished_at: str
+    failure_reason: str = ""
+    log_excerpt: str = ""
 
 
 class JobStore:
     """SQLite 持久化任务状态（单进程/单容器）。"""
+    _MAX_LOG_CHARS = 6000
 
     def __init__(self, db_path: Path):
         self.db_path = db_path
@@ -155,7 +159,9 @@ class JobStore:
                     message TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     started_at TEXT NOT NULL,
-                    finished_at TEXT NOT NULL
+                    finished_at TEXT NOT NULL,
+                    failure_reason TEXT NOT NULL DEFAULT '',
+                    log_excerpt TEXT NOT NULL DEFAULT ''
                 )
                 """
             )
@@ -165,6 +171,14 @@ class JobStore:
             if "project_name" not in cols:
                 self._conn.execute(
                     "ALTER TABLE index_jobs ADD COLUMN project_name TEXT NOT NULL DEFAULT ''"
+                )
+            if "failure_reason" not in cols:
+                self._conn.execute(
+                    "ALTER TABLE index_jobs ADD COLUMN failure_reason TEXT NOT NULL DEFAULT ''"
+                )
+            if "log_excerpt" not in cols:
+                self._conn.execute(
+                    "ALTER TABLE index_jobs ADD COLUMN log_excerpt TEXT NOT NULL DEFAULT ''"
                 )
             self._conn.commit()
 
@@ -185,13 +199,15 @@ class JobStore:
             created_at=now,
             started_at="",
             finished_at="",
+            failure_reason="",
+            log_excerpt="",
         )
         with self._lock:
             self._conn.execute(
                 """
                 INSERT INTO index_jobs
-                (job_id, project_id, repo_url, project_name, status, progress, step, message, created_at, started_at, finished_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (job_id, project_id, repo_url, project_name, status, progress, step, message, created_at, started_at, finished_at, failure_reason, log_excerpt)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job.job_id,
@@ -205,6 +221,8 @@ class JobStore:
                     job.created_at,
                     job.started_at,
                     job.finished_at,
+                    job.failure_reason,
+                    job.log_excerpt,
                 ),
             )
             self._conn.commit()
@@ -220,6 +238,8 @@ class JobStore:
         message: Optional[str] = None,
         started_at: Optional[str] = None,
         finished_at: Optional[str] = None,
+        failure_reason: Optional[str] = None,
+        log_excerpt: Optional[str] = None,
     ) -> None:
         fields: list[str] = []
         values: list[Any] = []
@@ -241,12 +261,44 @@ class JobStore:
         if finished_at is not None:
             fields.append("finished_at=?")
             values.append(finished_at)
+        if failure_reason is not None:
+            fields.append("failure_reason=?")
+            values.append(sanitize_text(failure_reason))
+        if log_excerpt is not None:
+            fields.append("log_excerpt=?")
+            values.append(sanitize_text(self._trim_log_excerpt(log_excerpt)))
         if not fields:
             return
         values.append(job_id)
         sql = f"UPDATE index_jobs SET {', '.join(fields)} WHERE job_id=?"
         with self._lock:
             self._conn.execute(sql, tuple(values))
+            self._conn.commit()
+
+    def _trim_log_excerpt(self, text: str) -> str:
+        s = str(text or "")
+        if len(s) <= self._MAX_LOG_CHARS:
+            return s
+        return s[-self._MAX_LOG_CHARS :]
+
+    def append_job_log(self, job_id: str, line: str) -> None:
+        entry = sanitize_text((line or "").strip())
+        if not entry:
+            return
+        now = datetime.now(timezone.utc).strftime("%H:%M:%S")
+        new_line = f"[{now}] {entry}"
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT log_excerpt FROM index_jobs WHERE job_id=?",
+                (job_id,),
+            ).fetchone()
+            old = str((row["log_excerpt"] if row else "") or "")
+            merged = (old + "\n" + new_line).strip() if old else new_line
+            merged = self._trim_log_excerpt(merged)
+            self._conn.execute(
+                "UPDATE index_jobs SET log_excerpt=? WHERE job_id=?",
+                (merged, job_id),
+            )
             self._conn.commit()
 
     def cancel_job_if_queued(self, job_id: str) -> bool:
@@ -463,6 +515,8 @@ def _apply_index_progress(store: JobStore, job_id: str, payload: dict[str, Any])
                 msg = index_parse_progress_msg(lang, done, tot)
 
     store.update_job(job_id, progress=pct_i, step=stage or "running", message=msg)
+    if stage:
+        store.append_job_log(job_id, f"{stage}: {msg}")
 
 
 def _run_index_job_subprocess(job_id: str) -> None:
@@ -501,16 +555,23 @@ def _run_index_job_subprocess(job_id: str) -> None:
             step="done",
             message="完成",
             finished_at=finished,
+            failure_reason="",
         )
+        store.append_job_log(job_id, "done: 任务完成")
     except Exception as e:  # noqa: S110
         finished = _utc_now_iso()
+        err = sanitize_text(str(e))
+        tb = sanitize_text(traceback.format_exc())
         store.update_job(
             job_id,
             status="failed",
             step="failed",
-            message=f"失败: {e}",
+            message=f"失败: {err}",
             finished_at=finished,
+            failure_reason=err,
         )
+        if tb:
+            store.append_job_log(job_id, tb)
         logger.exception("Index subprocess failed (job_id=%s, project_id=%s): %s", job_id, job.project_id, e)
 
 
@@ -689,17 +750,24 @@ class IndexJobQueue:
                         step="failed",
                         message=f"子进程异常退出 (code={ec})",
                         finished_at=_utc_now_iso(),
+                        failure_reason=f"子进程异常退出 code={ec}",
                     )
+                    self.store.append_job_log(job_id, f"worker: subprocess exited abnormally with code={ec}")
                     logger.error("Index subprocess exited abnormally job_id=%s exitcode=%s", job_id, ec)
             except Exception as e:
                 finished = _utc_now_iso()
+                err = sanitize_text(str(e))
+                tb = sanitize_text(traceback.format_exc())
                 self.store.update_job(
                     job_id,
                     status="failed",
                     step="failed",
-                    message=f"失败: {e}",
+                    message=f"失败: {err}",
                     finished_at=finished,
+                    failure_reason=err,
                 )
+                if tb:
+                    self.store.append_job_log(job_id, tb)
                 logger.exception("Failed to start or run index subprocess (job_id=%s): %s", job_id, e)
             finally:
                 self._current_process = None

@@ -3,6 +3,8 @@ export type Hit = {
   distance?: number | null;
   content: string;
   metadata?: Record<string, unknown>;
+  source_url?: string;
+  citation?: string;
 };
 
 export type ProjectOption = {
