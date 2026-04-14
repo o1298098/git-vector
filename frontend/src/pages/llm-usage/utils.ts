@@ -6,8 +6,8 @@ import {
   type Point,
 } from "./types";
 
-export function numberText(value: number | undefined): string {
-  return Number(value || 0).toLocaleString();
+export function numberText(value: number | undefined, locale: string = "en-US"): string {
+  return Number(value || 0).toLocaleString(locale);
 }
 
 export function shortDayLabel(day: string): string {
@@ -23,7 +23,12 @@ export function shortHourLabel(hour: string): string {
 }
 
 export function compactNum(value: number | undefined): string {
-  return new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 }).format(Number(value || 0));
+  // 统一使用英语紧凑单位，避免中文 locale 显示为“万/亿”。
+  return new Intl.NumberFormat("en-US", {
+    notation: "compact",
+    compactDisplay: "short",
+    maximumFractionDigits: 1,
+  }).format(Number(value || 0));
 }
 
 function smoothPath(points: Point[]): string {

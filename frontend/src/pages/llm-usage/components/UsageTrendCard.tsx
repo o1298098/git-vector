@@ -32,12 +32,17 @@ type UsageTrendCardProps = {
 };
 
 export function UsageTrendCard({ trendRows, trendMode, trendChart }: UsageTrendCardProps) {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const singlePoint = trendRows.length === 1;
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+  const [focusIndex, setFocusIndex] = useState<number | null>(null);
   const formatLabel = (value: string) => (trendMode === "hour" ? shortHourLabel(value) : shortDayLabel(value));
   const chartMax = Math.max(1, trendChart.yTicks[trendChart.yTicks.length - 1]?.value ?? 1);
-  const activeIndex = hoverIndex == null ? null : Math.max(0, Math.min(trendRows.length - 1, hoverIndex));
+  const pointerIndex = hoverIndex == null ? null : Math.max(0, Math.min(trendRows.length - 1, hoverIndex));
+  const activeIndex =
+    focusIndex == null
+      ? pointerIndex
+      : Math.max(0, Math.min(trendRows.length - 1, focusIndex));
   const activeRow = activeIndex == null ? null : trendRows[activeIndex];
   const activeX =
     activeIndex == null
@@ -55,14 +60,16 @@ export function UsageTrendCard({ trendRows, trendMode, trendChart }: UsageTrendC
   function formatTooltipTime(value: string): string {
     const date = value.includes("T") ? new Date(value) : new Date(`${value}T00:00:00`);
     if (Number.isNaN(date.getTime())) return value;
-    const y = date.getFullYear();
-    const m = String(date.getMonth() + 1).padStart(2, "0");
-    const d = String(date.getDate()).padStart(2, "0");
     if (trendMode === "hour") {
-      const h = String(date.getHours()).padStart(2, "0");
-      return `${y}-${m}-${d} ${h}:00`;
+      return date.toLocaleString(locale === "zh" ? "zh-CN" : "en-US", {
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
     }
-    return `${y}-${m}-${d}`;
+    return date.toLocaleDateString(locale === "zh" ? "zh-CN" : "en-US");
   }
 
   return (
@@ -135,6 +142,22 @@ export function UsageTrendCard({ trendRows, trendMode, trendChart }: UsageTrendC
                   const ratio = (clamped - trendChart.left) / Math.max(1, trendChart.right - trendChart.left);
                   const index = Math.round(ratio * (trendRows.length - 1));
                   setHoverIndex(index);
+                }}
+                tabIndex={0}
+                role="img"
+                aria-label={t("usage.trendTitle")}
+                onFocus={() => {
+                  if (trendRows.length > 0) setFocusIndex(trendRows.length - 1);
+                }}
+                onBlur={() => setFocusIndex(null)}
+                onKeyDown={(event) => {
+                  if (trendRows.length === 0) return;
+                  if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+                  event.preventDefault();
+                  const current = focusIndex == null ? trendRows.length - 1 : focusIndex;
+                  const delta = event.key === "ArrowLeft" ? -1 : 1;
+                  const next = Math.max(0, Math.min(trendRows.length - 1, current + delta));
+                  setFocusIndex(next);
                 }}
               >
                 <defs>

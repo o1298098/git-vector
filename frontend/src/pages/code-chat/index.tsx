@@ -45,6 +45,8 @@ export function CodeChat() {
     setEditingUserId: chat.setEditingUserId,
     handleUserEditConfirm: chat.handleUserEditConfirm,
     handleRetryAssistant: chat.handleRetryAssistant,
+    feedbackByTurn: chat.feedbackByTurn,
+    submitFeedback: chat.submitFeedback,
   });
 
   const handleHistoryNewChat = () => {
@@ -147,6 +149,7 @@ export function CodeChat() {
                     chat.setInput("");
                     void chat.doSend(msg);
                   }}
+                  onCancel={chat.stopGenerating}
                   submitType="enter"
                   loading={chat.loading}
                   placeholder={inputPlaceholder}

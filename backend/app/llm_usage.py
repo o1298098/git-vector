@@ -37,13 +37,44 @@ def _init(c: sqlite3.Connection) -> None:
             prompt_tokens INTEGER NOT NULL DEFAULT 0,
             completion_tokens INTEGER NOT NULL DEFAULT 0,
             total_tokens INTEGER NOT NULL DEFAULT 0,
-            success INTEGER NOT NULL DEFAULT 1
+            success INTEGER NOT NULL DEFAULT 1,
+            latency_ms INTEGER NOT NULL DEFAULT 0,
+            ttfb_ms INTEGER NOT NULL DEFAULT 0,
+            estimated_cost_usd REAL NOT NULL DEFAULT 0,
+            project_id TEXT NOT NULL DEFAULT ''
         )
         """
     )
     c.execute("CREATE INDEX IF NOT EXISTS idx_llm_usage_ts ON llm_usage(ts)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_llm_usage_provider ON llm_usage(provider)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_llm_usage_feature ON llm_usage(feature)")
+    cols = {row["name"] for row in c.execute("PRAGMA table_info(llm_usage)").fetchall()}
+    if "latency_ms" not in cols:
+        c.execute("ALTER TABLE llm_usage ADD COLUMN latency_ms INTEGER NOT NULL DEFAULT 0")
+    if "ttfb_ms" not in cols:
+        c.execute("ALTER TABLE llm_usage ADD COLUMN ttfb_ms INTEGER NOT NULL DEFAULT 0")
+    if "estimated_cost_usd" not in cols:
+        c.execute("ALTER TABLE llm_usage ADD COLUMN estimated_cost_usd REAL NOT NULL DEFAULT 0")
+    if "project_id" not in cols:
+        c.execute("ALTER TABLE llm_usage ADD COLUMN project_id TEXT NOT NULL DEFAULT ''")
+   
+    c.execute("CREATE INDEX IF NOT EXISTS idx_llm_usage_project_id ON llm_usage(project_id)")
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS llm_feedback (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT NOT NULL,
+            feature TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            model TEXT NOT NULL,
+            project_id TEXT NOT NULL DEFAULT '',
+            rating INTEGER NOT NULL,
+            reason TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    c.execute("CREATE INDEX IF NOT EXISTS idx_llm_feedback_ts ON llm_feedback(ts)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_llm_feedback_feature ON llm_feedback(feature)")
     c.commit()
 
 
@@ -66,10 +97,18 @@ def record_llm_usage(
     prompt_text: str = "",
     completion_text: str = "",
     success: bool = True,
+    latency_ms: int | None = None,
+    ttfb_ms: int | None = None,
+    estimated_cost_usd: float | None = None,
+    project_id: str = "",
 ) -> None:
     p = max(0, int(prompt_tokens if prompt_tokens is not None else estimate_tokens(prompt_text)))
     c = max(0, int(completion_tokens if completion_tokens is not None else estimate_tokens(completion_text)))
     t = max(0, int(total_tokens if total_tokens is not None else (p + c)))
+    latency = max(0, int(latency_ms or 0))
+    ttfb = max(0, int(ttfb_ms or 0))
+    est_cost = max(0.0, float(estimated_cost_usd or 0.0))
+    pid = (project_id or "").strip()
     with _lock:
         conn = _conn()
         try:
@@ -77,8 +116,11 @@ def record_llm_usage(
             conn.execute(
                 """
                 INSERT INTO llm_usage
-                (ts, provider, model, feature, prompt_tokens, completion_tokens, total_tokens, success)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (
+                  ts, provider, model, feature, prompt_tokens, completion_tokens, total_tokens, success,
+                  latency_ms, ttfb_ms, estimated_cost_usd, project_id
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     _utc_now_iso(),
@@ -89,6 +131,44 @@ def record_llm_usage(
                     c,
                     t,
                     1 if success else 0,
+                    latency,
+                    ttfb,
+                    est_cost,
+                    pid,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def record_llm_feedback(
+    *,
+    feature: str,
+    provider: str,
+    model: str,
+    project_id: str,
+    rating: int,
+    reason: str = "",
+) -> None:
+    score = 1 if int(rating) >= 1 else -1
+    with _lock:
+        conn = _conn()
+        try:
+            _init(conn)
+            conn.execute(
+                """
+                INSERT INTO llm_feedback (ts, feature, provider, model, project_id, rating, reason)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    _utc_now_iso(),
+                    (feature or "general").strip() or "general",
+                    (provider or "unknown").strip() or "unknown",
+                    (model or "unknown").strip() or "unknown",
+                    (project_id or "").strip(),
+                    score,
+                    (reason or "").strip()[:500],
                 ),
             )
             conn.commit()
@@ -117,7 +197,10 @@ def read_llm_usage_summary(*, days: int = 30, tz_offset_minutes: int = 0) -> dic
                   SUM(CASE WHEN success=0 THEN 1 ELSE 0 END) AS failed_calls,
                   SUM(prompt_tokens) AS prompt_tokens,
                   SUM(completion_tokens) AS completion_tokens,
-                  SUM(total_tokens) AS total_tokens
+                  SUM(total_tokens) AS total_tokens,
+                  AVG(latency_ms) AS avg_latency_ms,
+                  AVG(ttfb_ms) AS avg_ttfb_ms,
+                  SUM(estimated_cost_usd) AS estimated_cost_usd
                 FROM llm_usage
                 WHERE ts >= ?
                 """,
@@ -129,7 +212,9 @@ def read_llm_usage_summary(*, days: int = 30, tz_offset_minutes: int = 0) -> dic
                        COUNT(*) AS calls,
                        SUM(prompt_tokens) AS prompt_tokens,
                        SUM(completion_tokens) AS completion_tokens,
-                       SUM(total_tokens) AS total_tokens
+                       SUM(total_tokens) AS total_tokens,
+                       AVG(latency_ms) AS avg_latency_ms,
+                       SUM(estimated_cost_usd) AS estimated_cost_usd
                 FROM llm_usage
                 WHERE ts >= ?
                 GROUP BY provider
@@ -143,7 +228,9 @@ def read_llm_usage_summary(*, days: int = 30, tz_offset_minutes: int = 0) -> dic
                        COUNT(*) AS calls,
                        SUM(prompt_tokens) AS prompt_tokens,
                        SUM(completion_tokens) AS completion_tokens,
-                       SUM(total_tokens) AS total_tokens
+                       SUM(total_tokens) AS total_tokens,
+                       AVG(latency_ms) AS avg_latency_ms,
+                       SUM(estimated_cost_usd) AS estimated_cost_usd
                 FROM llm_usage
                 WHERE ts >= ?
                 GROUP BY feature
@@ -157,13 +244,26 @@ def read_llm_usage_summary(*, days: int = 30, tz_offset_minutes: int = 0) -> dic
                 SELECT ts,
                        prompt_tokens,
                        completion_tokens,
-                       total_tokens
+                       total_tokens,
+                       latency_ms,
+                       ttfb_ms,
+                       estimated_cost_usd
                 FROM llm_usage
                 WHERE ts >= ?
                 ORDER BY ts ASC
                 """,
                 (since,),
             ).fetchall()
+            feedback_row = conn.execute(
+                """
+                SELECT
+                  SUM(CASE WHEN rating > 0 THEN 1 ELSE 0 END) AS positive_count,
+                  SUM(CASE WHEN rating < 0 THEN 1 ELSE 0 END) AS negative_count
+                FROM llm_feedback
+                WHERE ts >= ?
+                """,
+                (since,),
+            ).fetchone()
         finally:
             conn.close()
 
@@ -179,6 +279,11 @@ def read_llm_usage_summary(*, days: int = 30, tz_offset_minutes: int = 0) -> dic
         "prompt_tokens": _n(total_row["prompt_tokens"]) if total_row else 0,
         "completion_tokens": _n(total_row["completion_tokens"]) if total_row else 0,
         "total_tokens": _n(total_row["total_tokens"]) if total_row else 0,
+        "avg_latency_ms": round(float(total_row["avg_latency_ms"] or 0), 2) if total_row else 0.0,
+        "avg_ttfb_ms": round(float(total_row["avg_ttfb_ms"] or 0), 2) if total_row else 0.0,
+        "estimated_cost_usd": round(float(total_row["estimated_cost_usd"] or 0), 6) if total_row else 0.0,
+        "feedback_positive": _n(feedback_row["positive_count"]) if feedback_row else 0,
+        "feedback_negative": _n(feedback_row["negative_count"]) if feedback_row else 0,
     }
     day_map: dict[str, dict[str, int]] = {}
     hour_map: dict[str, dict[str, int]] = {}

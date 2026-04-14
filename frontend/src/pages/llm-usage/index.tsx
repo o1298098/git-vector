@@ -85,6 +85,11 @@ export function LlmUsage() {
         prompt_tokens: 0,
         completion_tokens: 0,
         total_tokens: 0,
+        avg_latency_ms: 0,
+        avg_ttfb_ms: 0,
+        estimated_cost_usd: 0,
+        feedback_positive: 0,
+        feedback_negative: 0,
       },
     [data],
   );
@@ -158,7 +163,7 @@ export function LlmUsage() {
           <div
             role="status"
             aria-live="polite"
-            aria-label="Refreshing usage data"
+            aria-label={t("usage.refreshing")}
             className="pointer-events-none absolute inset-0 rounded-md bg-background/35 backdrop-blur-[1px]"
           />
         ) : null}

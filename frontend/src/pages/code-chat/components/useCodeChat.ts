@@ -22,6 +22,7 @@ type ChatHistoryTurnPayload = {
   role: "user" | "assistant";
   content: string;
 };
+type SubmitFeedbackStatus = "accepted" | "duplicate" | "failed";
 
 export function useCodeChat() {
   const { t } = useI18n();
@@ -32,6 +33,9 @@ export function useCodeChat() {
   const [editingUserId, setEditingUserId] = useState<string | null>(null);
   const [projects, setProjects] = useState<CodeChatProjectOption[]>([]);
   const [projectsLoading, setProjectsLoading] = useState(true);
+  const [feedbackByTurn, setFeedbackByTurn] = useState<Record<string, 1 | -1>>({});
+  const feedbackByTurnRef = useRef<Record<string, 1 | -1>>({});
+  const feedbackSubmittingRef = useRef<Set<string>>(new Set());
 
   const buildHistoryPayload = useCallback((rawTurns: ChatTurn[]): ChatHistoryTurnPayload[] => {
     const source = rawTurns.slice(-MAX_HISTORY_TURNS);
@@ -106,6 +110,7 @@ export function useCodeChat() {
     done: false,
     assistantId: "",
   });
+  const streamAbortRef = useRef<AbortController | null>(null);
 
   const clearStreamTyping = useCallback(() => {
     const t = streamTypeRef.current.timer;
@@ -278,6 +283,9 @@ export function useCodeChat() {
     async (userMessage: string, assistantId: string, historyTurns: ChatTurn[]) => {
       const trimmed = userMessage.trim();
       if (!trimmed) return;
+      streamAbortRef.current?.abort();
+      const controller = new AbortController();
+      streamAbortRef.current = controller;
       setLoading(true);
       const body = JSON.stringify({
         message: trimmed,
@@ -290,6 +298,7 @@ export function useCodeChat() {
         const res = await apiFetch("/api/code-chat/stream", {
           method: "POST",
           body,
+          signal: controller.signal,
         });
         if (!res.ok) {
           let detail = res.statusText;
@@ -425,6 +434,14 @@ export function useCodeChat() {
           markStreamDone(aid);
         }
       } catch (e: unknown) {
+        if (controller.signal.aborted) {
+          snapStreamToTarget(aid, {
+            streaming: false,
+            contentOverride:
+              streamTypeRef.current.target.trim().length > 0 ? streamTypeRef.current.target : t("chat.streamStopped"),
+          });
+          return;
+        }
         clearStreamTyping();
         setTurns((prev) => [
           ...prev,
@@ -435,6 +452,9 @@ export function useCodeChat() {
           },
         ]);
       } finally {
+        if (streamAbortRef.current === controller) {
+          streamAbortRef.current = null;
+        }
         setLoading(false);
       }
     },
@@ -451,6 +471,10 @@ export function useCodeChat() {
       clearStreamTyping,
     ],
   );
+
+  const stopGenerating = useCallback(() => {
+    streamAbortRef.current?.abort();
+  }, []);
 
   const doSend = useCallback(
     async (text: string) => {
@@ -504,6 +528,50 @@ export function useCodeChat() {
     [loading, streamAssistant, setTurns],
   );
 
+  const submitFeedback = useCallback(
+    async (assistantTurnId: string, rating: 1 | -1): Promise<SubmitFeedbackStatus> => {
+      if (
+        feedbackByTurnRef.current[assistantTurnId] != null ||
+        feedbackSubmittingRef.current.has(assistantTurnId)
+      ) {
+        return "duplicate";
+      }
+      feedbackSubmittingRef.current.add(assistantTurnId);
+      feedbackByTurnRef.current[assistantTurnId] = rating;
+      setFeedbackByTurn((prev) => ({ ...prev, [assistantTurnId]: rating }));
+      try {
+        const res = await apiFetch("/api/code-chat/feedback", {
+          method: "POST",
+          body: JSON.stringify({
+            rating,
+            project_id: projectId.trim() || null,
+          }),
+        });
+        if (!res.ok) {
+          delete feedbackByTurnRef.current[assistantTurnId];
+          setFeedbackByTurn((prev) => {
+            const next = { ...prev };
+            delete next[assistantTurnId];
+            return next;
+          });
+          return "failed";
+        }
+        return "accepted";
+      } catch {
+        delete feedbackByTurnRef.current[assistantTurnId];
+        setFeedbackByTurn((prev) => {
+          const next = { ...prev };
+          delete next[assistantTurnId];
+          return next;
+        });
+        return "failed";
+      } finally {
+        feedbackSubmittingRef.current.delete(assistantTurnId);
+      }
+    },
+    [projectId],
+  );
+
   return {
     input,
     setInput,
@@ -517,6 +585,7 @@ export function useCodeChat() {
     projectsLoading,
     sortedSessions,
     activeId,
+    feedbackByTurn,
     setProjectId,
     setTopK,
     setTurns,
@@ -524,6 +593,8 @@ export function useCodeChat() {
     selectSession,
     deleteSession,
     doSend,
+    stopGenerating,
+    submitFeedback,
     handleUserEditConfirm,
     handleRetryAssistant,
   };

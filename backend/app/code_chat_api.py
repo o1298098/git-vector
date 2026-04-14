@@ -8,11 +8,12 @@ import json
 import logging
 from typing import Annotated, Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.auth_ui import require_ui_session
+from app.api_errors import raise_app_error
 from app.effective_settings import effective_content_language
 from app.llm_client import LLMClient, get_llm_client
 
@@ -38,6 +39,12 @@ class CodeChatBody(BaseModel):
     project_id: Optional[str] = None
     top_k: int = Field(12, ge=1, le=30)
     history: list[CodeChatHistoryTurn] = Field(default_factory=list, max_length=MAX_HISTORY_TURNS)
+
+
+class CodeChatFeedbackBody(BaseModel):
+    rating: int = Field(..., ge=-1, le=1)
+    reason: str = Field(default="", max_length=500)
+    project_id: Optional[str] = None
 
 
 def _retrieval_rewrite_system(lang: str) -> str:
@@ -234,18 +241,28 @@ def code_chat(
 ):
     client = get_llm_client()
     if client is None:
-        raise HTTPException(
+        raise_app_error(
             status_code=503,
-            detail="未配置可用的 LLM（请在设置中配置 Dify、Azure OpenAI 或 OpenAI 兼容接口）",
+            code="LLM_UNAVAILABLE",
+            message="未配置可用的 LLM",
+            hint="请在设置中配置 Dify、Azure OpenAI 或 OpenAI 兼容接口。",
+            retryable=False,
         )
 
-    _msg, _pid, retrieval_query, results, system, user_payload = _code_chat_rag(body, client)
+    _msg, pid, retrieval_query, results, system, user_payload = _code_chat_rag(body, client)
 
     try:
-        reply = client.chat(system, user_payload, feature="code_chat_answer")
+        reply = client.chat(system, user_payload, feature="code_chat_answer", project_id=pid or "")
     except Exception as e:
         logger.exception("code-chat LLM failed: %s", e)
-        raise HTTPException(status_code=502, detail=f"模型调用失败：{e}") from e
+        raise_app_error(
+            status_code=502,
+            code="UPSTREAM_LLM_FAILED",
+            message="模型调用失败",
+            hint="请稍后重试，若持续失败请检查上游 LLM 服务状态。",
+            retryable=True,
+            extra={"detail": str(e)[:500]},
+        )
 
     return {
         "reply": (reply or "").strip(),
@@ -265,12 +282,15 @@ def code_chat_stream(
 ):
     client = get_llm_client()
     if client is None:
-        raise HTTPException(
+        raise_app_error(
             status_code=503,
-            detail="未配置可用的 LLM（请在设置中配置 Dify、Azure OpenAI 或 OpenAI 兼容接口）",
+            code="LLM_UNAVAILABLE",
+            message="未配置可用的 LLM",
+            hint="请在设置中配置 Dify、Azure OpenAI 或 OpenAI 兼容接口。",
+            retryable=False,
         )
 
-    _msg, _pid, retrieval_query, results, system, user_payload = _code_chat_rag(body, client)
+    _msg, pid, retrieval_query, results, system, user_payload = _code_chat_rag(body, client)
 
     def event_gen():
         yield _sse_line(
@@ -281,7 +301,12 @@ def code_chat_stream(
             }
         )
         try:
-            for piece in client.chat_stream(system, user_payload, feature="code_chat_answer_stream"):
+            for piece in client.chat_stream(
+                system,
+                user_payload,
+                feature="code_chat_answer_stream",
+                project_id=pid or "",
+            ):
                 if piece:
                     yield _sse_line({"event": "delta", "text": piece})
             yield _sse_line({"event": "done"})
@@ -298,3 +323,21 @@ def code_chat_stream(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.post("/code-chat/feedback")
+def code_chat_feedback(
+    body: CodeChatFeedbackBody,
+    _user: Annotated[Optional[str], Depends(require_ui_session)],
+):
+    from app.llm_usage import record_llm_feedback
+
+    record_llm_feedback(
+        feature="code_chat_answer",
+        provider="unknown",
+        model="unknown",
+        project_id=(body.project_id or "").strip(),
+        rating=body.rating,
+        reason=body.reason,
+    )
+    return {"ok": True}

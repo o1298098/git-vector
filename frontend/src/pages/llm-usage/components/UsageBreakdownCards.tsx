@@ -11,7 +11,8 @@ type UsageBreakdownCardsProps = {
 };
 
 function UsageTable({ rows, nameKey }: { rows: UsageRow[]; nameKey: "provider" | "feature" }) {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
+  const numberLocale = locale === "zh" ? "zh-CN" : "en-US";
   return (
     <div className={`rounded-md border ${SOFT_INNER_BORDER_CLASS}`}>
       <Table className="w-full table-fixed">
@@ -39,14 +40,14 @@ function UsageTable({ rows, nameKey }: { rows: UsageRow[]; nameKey: "provider" |
                 <TableCell className="truncate" title={label}>
                   {label}
                 </TableCell>
-                <TableCell className="text-right font-mono tabular-nums">{numberText(row.calls)}</TableCell>
-                <TableCell className="text-right font-mono tabular-nums" title={numberText(row.prompt_tokens)}>
+                <TableCell className="text-right font-mono tabular-nums">{numberText(row.calls, numberLocale)}</TableCell>
+                <TableCell className="text-right font-mono tabular-nums" title={numberText(row.prompt_tokens, numberLocale)}>
                   {compactNum(row.prompt_tokens)}
                 </TableCell>
-                <TableCell className="text-right font-mono tabular-nums" title={numberText(row.completion_tokens)}>
+                <TableCell className="text-right font-mono tabular-nums" title={numberText(row.completion_tokens, numberLocale)}>
                   {compactNum(row.completion_tokens)}
                 </TableCell>
-                <TableCell className="text-right font-mono tabular-nums" title={numberText(row.total_tokens)}>
+                <TableCell className="text-right font-mono tabular-nums" title={numberText(row.total_tokens, numberLocale)}>
                   {compactNum(row.total_tokens)}
                 </TableCell>
               </TableRow>

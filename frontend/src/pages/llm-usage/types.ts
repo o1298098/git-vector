@@ -5,6 +5,8 @@ export type UsageRow = {
   prompt_tokens?: number;
   completion_tokens?: number;
   total_tokens?: number;
+  avg_latency_ms?: number;
+  estimated_cost_usd?: number;
 };
 
 export type DailyUsageRow = {
@@ -32,6 +34,11 @@ export type UsageSummary = {
     prompt_tokens: number;
     completion_tokens: number;
     total_tokens: number;
+    avg_latency_ms: number;
+    avg_ttfb_ms: number;
+    estimated_cost_usd: number;
+    feedback_positive: number;
+    feedback_negative: number;
   };
   by_provider: UsageRow[];
   by_feature: UsageRow[];

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from typing import Any
@@ -27,12 +28,29 @@ logger = logging.getLogger(__name__)
 
 class LLMClient(ABC):
     @abstractmethod
-    def chat(self, system: str, user: str, *, feature: str = "general") -> str:
+    def chat(self, system: str, user: str, *, feature: str = "general", project_id: str = "") -> str:
         pass
 
-    def chat_stream(self, system: str, user: str, *, feature: str = "general") -> Iterator[str]:
+    def chat_stream(self, system: str, user: str, *, feature: str = "general", project_id: str = "") -> Iterator[str]:
         """逐段产出模型文本；默认退化为单次 blocking 回复。"""
-        yield self.chat(system, user, feature=feature)
+        yield self.chat(system, user, feature=feature, project_id=project_id)
+
+
+def _estimate_cost_usd(model: str, prompt_tokens: int, completion_tokens: int, total_tokens: int) -> float:
+    # 仅用于趋势参考，不作为精确账单；未知模型默认 0。
+    rates_per_1k: dict[str, tuple[float, float]] = {
+        "gpt-4o-mini": (0.00015, 0.0006),
+        "gpt-4.1-mini": (0.0004, 0.0016),
+        "dify-chat": (0.0, 0.0),
+    }
+    key = (model or "").strip().lower()
+    in_rate, out_rate = rates_per_1k.get(key, (0.0, 0.0))
+    p = max(0, int(prompt_tokens or 0))
+    c = max(0, int(completion_tokens or 0))
+    if p == 0 and c == 0:
+        # 兜底估算：没有 usage 字段时按总 token 全按输入计费。
+        p = max(0, int(total_tokens or 0))
+    return round((p / 1000.0) * in_rate + (c / 1000.0) * out_rate, 6)
 
 
 class DifyChatClient(LLMClient):
@@ -43,7 +61,7 @@ class DifyChatClient(LLMClient):
         self.base_url = base_url.rstrip("/")
         self.chat_url = f"{self.base_url}/chat-messages"
 
-    def chat(self, system: str, user: str, *, feature: str = "general") -> str:
+    def chat(self, system: str, user: str, *, feature: str = "general", project_id: str = "") -> str:
         # 与 Dify 官方示例一致：blocking 模式取完整 answer。对话型应用无独立 system 字段时，
         # 将 system 与 user 拼入 query，避免指令与 RAG 说明被丢弃。
         st = (system or "").strip()
@@ -54,6 +72,7 @@ class DifyChatClient(LLMClient):
             len(query),
             query[:400],
         )
+        started = time.perf_counter()
         try:
             with httpx.Client(timeout=120) as client:
                 r = client.post(
@@ -77,16 +96,29 @@ class DifyChatClient(LLMClient):
                 data = r.json()
                 answer = (data.get("answer") or "").strip()
                 usage = ((data.get("metadata") or {}).get("usage") or {}) if isinstance(data, dict) else {}
+                prompt_tokens = usage.get("prompt_tokens") if isinstance(usage, dict) else None
+                completion_tokens = usage.get("completion_tokens") if isinstance(usage, dict) else None
+                total_tokens = usage.get("total_tokens") if isinstance(usage, dict) else None
+                latency_ms = int((time.perf_counter() - started) * 1000)
                 record_llm_usage(
                     provider="dify",
                     model="dify-chat",
                     feature=feature,
-                    prompt_tokens=usage.get("prompt_tokens") if isinstance(usage, dict) else None,
-                    completion_tokens=usage.get("completion_tokens") if isinstance(usage, dict) else None,
-                    total_tokens=usage.get("total_tokens") if isinstance(usage, dict) else None,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    total_tokens=total_tokens,
                     prompt_text=query,
                     completion_text=answer,
                     success=True,
+                    latency_ms=latency_ms,
+                    ttfb_ms=latency_ms,
+                    estimated_cost_usd=_estimate_cost_usd(
+                        "dify-chat",
+                        int(prompt_tokens or 0),
+                        int(completion_tokens or 0),
+                        int(total_tokens or 0),
+                    ),
+                    project_id=project_id,
                 )
                 return answer
         except Exception:
@@ -97,10 +129,12 @@ class DifyChatClient(LLMClient):
                 prompt_text=query,
                 completion_text="",
                 success=False,
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                project_id=project_id,
             )
             raise
 
-    def chat_stream(self, system: str, user: str, *, feature: str = "general") -> Iterator[str]:
+    def chat_stream(self, system: str, user: str, *, feature: str = "general", project_id: str = "") -> Iterator[str]:
         st = (system or "").strip()
         query = f"{st}\n\n---\n\n{user}" if st else user
         logger.info(
@@ -110,6 +144,8 @@ class DifyChatClient(LLMClient):
         )
         acc_answer = ""
         usage_info: dict[str, Any] | None = None
+        first_piece_ms = 0
+        started = time.perf_counter()
         try:
             with httpx.Client(timeout=120) as client:
                 with client.stream(
@@ -154,6 +190,8 @@ class DifyChatClient(LLMClient):
                                 new_part = cur
                                 acc_answer = acc_answer + cur
                             if new_part:
+                                if first_piece_ms <= 0:
+                                    first_piece_ms = int((time.perf_counter() - started) * 1000)
                                 yield new_part
                         if ev == "message_end":
                             meta = data.get("metadata") or {}
@@ -162,16 +200,29 @@ class DifyChatClient(LLMClient):
                                 if isinstance(u, dict):
                                     usage_info = u
                             break
+            prompt_tokens = (usage_info or {}).get("prompt_tokens") if usage_info else None
+            completion_tokens = (usage_info or {}).get("completion_tokens") if usage_info else None
+            total_tokens = (usage_info or {}).get("total_tokens") if usage_info else None
+            latency_ms = int((time.perf_counter() - started) * 1000)
             record_llm_usage(
                 provider="dify",
                 model="dify-chat",
                 feature=feature,
-                prompt_tokens=(usage_info or {}).get("prompt_tokens") if usage_info else None,
-                completion_tokens=(usage_info or {}).get("completion_tokens") if usage_info else None,
-                total_tokens=(usage_info or {}).get("total_tokens") if usage_info else None,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
                 prompt_text=query,
                 completion_text=acc_answer,
                 success=True,
+                latency_ms=latency_ms,
+                ttfb_ms=first_piece_ms or latency_ms,
+                estimated_cost_usd=_estimate_cost_usd(
+                    "dify-chat",
+                    int(prompt_tokens or 0),
+                    int(completion_tokens or 0),
+                    int(total_tokens or 0),
+                ),
+                project_id=project_id,
             )
         except Exception:
             record_llm_usage(
@@ -181,6 +232,9 @@ class DifyChatClient(LLMClient):
                 prompt_text=query,
                 completion_text=acc_answer,
                 success=False,
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                ttfb_ms=first_piece_ms,
+                project_id=project_id,
             )
             raise
 
@@ -204,8 +258,9 @@ class OpenAICompatibleClient(LLMClient):
             return {"api-key": self.api_key, "Content-Type": "application/json"}
         return {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
 
-    def chat(self, system: str, user: str, *, feature: str = "general") -> str:
+    def chat(self, system: str, user: str, *, feature: str = "general", project_id: str = "") -> str:
         prompt_text = f"{system}\n\n{user}"
+        started = time.perf_counter()
         try:
             with httpx.Client(timeout=120) as client:
                 body: dict[str, Any] = {
@@ -248,21 +303,36 @@ class OpenAICompatibleClient(LLMClient):
                         prompt_text=prompt_text,
                         completion_text="",
                         success=True,
+                        latency_ms=int((time.perf_counter() - started) * 1000),
+                        project_id=project_id,
                     )
                     return ""
                 msg = choice.get("message") or {}
                 answer = (msg.get("content") or "").strip()
                 usage = data.get("usage") or {}
+                prompt_tokens = usage.get("prompt_tokens") if isinstance(usage, dict) else None
+                completion_tokens = usage.get("completion_tokens") if isinstance(usage, dict) else None
+                total_tokens = usage.get("total_tokens") if isinstance(usage, dict) else None
+                latency_ms = int((time.perf_counter() - started) * 1000)
                 record_llm_usage(
                     provider="openai_compatible",
                     model=self.model,
                     feature=feature,
-                    prompt_tokens=usage.get("prompt_tokens") if isinstance(usage, dict) else None,
-                    completion_tokens=usage.get("completion_tokens") if isinstance(usage, dict) else None,
-                    total_tokens=usage.get("total_tokens") if isinstance(usage, dict) else None,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    total_tokens=total_tokens,
                     prompt_text=prompt_text,
                     completion_text=answer,
                     success=True,
+                    latency_ms=latency_ms,
+                    ttfb_ms=latency_ms,
+                    estimated_cost_usd=_estimate_cost_usd(
+                        self.model,
+                        int(prompt_tokens or 0),
+                        int(completion_tokens or 0),
+                        int(total_tokens or 0),
+                    ),
+                    project_id=project_id,
                 )
                 return answer
         except Exception:
@@ -273,13 +343,17 @@ class OpenAICompatibleClient(LLMClient):
                 prompt_text=prompt_text,
                 completion_text="",
                 success=False,
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                project_id=project_id,
             )
             raise
 
-    def chat_stream(self, system: str, user: str, *, feature: str = "general") -> Iterator[str]:
+    def chat_stream(self, system: str, user: str, *, feature: str = "general", project_id: str = "") -> Iterator[str]:
         prompt_text = f"{system}\n\n{user}"
         acc_answer = ""
         usage: dict[str, Any] | None = None
+        started = time.perf_counter()
+        first_piece_ms = 0
         try:
             with httpx.Client(timeout=120) as client:
                 body: dict[str, Any] = {
@@ -328,18 +402,33 @@ class OpenAICompatibleClient(LLMClient):
                         delta = (choice.get("delta") or {}).get("content")
                         if delta:
                             piece = str(delta)
+                            if first_piece_ms <= 0:
+                                first_piece_ms = int((time.perf_counter() - started) * 1000)
                             acc_answer += piece
                             yield piece
+            prompt_tokens = (usage or {}).get("prompt_tokens") if usage else None
+            completion_tokens = (usage or {}).get("completion_tokens") if usage else None
+            total_tokens = (usage or {}).get("total_tokens") if usage else None
+            latency_ms = int((time.perf_counter() - started) * 1000)
             record_llm_usage(
                 provider="openai_compatible",
                 model=self.model,
                 feature=feature,
-                prompt_tokens=(usage or {}).get("prompt_tokens") if usage else None,
-                completion_tokens=(usage or {}).get("completion_tokens") if usage else None,
-                total_tokens=(usage or {}).get("total_tokens") if usage else None,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
                 prompt_text=prompt_text,
                 completion_text=acc_answer,
                 success=True,
+                latency_ms=latency_ms,
+                ttfb_ms=first_piece_ms or latency_ms,
+                estimated_cost_usd=_estimate_cost_usd(
+                    self.model,
+                    int(prompt_tokens or 0),
+                    int(completion_tokens or 0),
+                    int(total_tokens or 0),
+                ),
+                project_id=project_id,
             )
         except Exception:
             record_llm_usage(
@@ -349,6 +438,9 @@ class OpenAICompatibleClient(LLMClient):
                 prompt_text=prompt_text,
                 completion_text=acc_answer,
                 success=False,
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                ttfb_ms=first_piece_ms,
+                project_id=project_id,
             )
             raise
 
@@ -364,7 +456,7 @@ class AzureOpenAISDKClient(LLMClient):
         )
         self.deployment = deployment
 
-    def chat(self, system: str, user: str, *, feature: str = "general") -> str:
+    def chat(self, system: str, user: str, *, feature: str = "general", project_id: str = "") -> str:
         # gpt-5 等新模型用 max_completion_tokens，通过 extra_body 传入（SDK 可能未声明该参数）
         prompt_text = f"{system}\n\n{user}"
         try:
@@ -376,6 +468,7 @@ class AzureOpenAISDKClient(LLMClient):
             )
         except Exception:
             pass
+        started = time.perf_counter()
         try:
             resp = self._client.chat.completions.create(
                 model=self.deployment,
@@ -394,6 +487,8 @@ class AzureOpenAISDKClient(LLMClient):
                     prompt_text=prompt_text,
                     completion_text="",
                     success=True,
+                    latency_ms=int((time.perf_counter() - started) * 1000),
+                    project_id=project_id,
                 )
                 return ""
             answer = (choice.message.content or "").strip()
@@ -411,6 +506,15 @@ class AzureOpenAISDKClient(LLMClient):
                 prompt_text=prompt_text,
                 completion_text=answer,
                 success=True,
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                ttfb_ms=int((time.perf_counter() - started) * 1000),
+                estimated_cost_usd=_estimate_cost_usd(
+                    self.deployment,
+                    int(prompt_tokens or 0),
+                    int(completion_tokens or 0),
+                    int(total_tokens or 0),
+                ),
+                project_id=project_id,
             )
             return answer
         except Exception:
@@ -421,12 +525,16 @@ class AzureOpenAISDKClient(LLMClient):
                 prompt_text=prompt_text,
                 completion_text="",
                 success=False,
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                project_id=project_id,
             )
             raise
 
-    def chat_stream(self, system: str, user: str, *, feature: str = "general") -> Iterator[str]:
+    def chat_stream(self, system: str, user: str, *, feature: str = "general", project_id: str = "") -> Iterator[str]:
         prompt_text = f"{system}\n\n{user}"
         acc_answer = ""
+        started = time.perf_counter()
+        first_piece_ms = 0
         try:
             logger.info(
                 "AzureOpenAI stream: deployment=%s, user_len=%s",
@@ -454,6 +562,8 @@ class AzureOpenAISDKClient(LLMClient):
                 piece = c0.delta.content
                 if piece:
                     text = str(piece)
+                    if first_piece_ms <= 0:
+                        first_piece_ms = int((time.perf_counter() - started) * 1000)
                     acc_answer += text
                     yield text
             record_llm_usage(
@@ -463,6 +573,9 @@ class AzureOpenAISDKClient(LLMClient):
                 prompt_text=prompt_text,
                 completion_text=acc_answer,
                 success=True,
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                ttfb_ms=first_piece_ms,
+                project_id=project_id,
             )
         except Exception:
             record_llm_usage(
@@ -472,6 +585,9 @@ class AzureOpenAISDKClient(LLMClient):
                 prompt_text=prompt_text,
                 completion_text=acc_answer,
                 success=False,
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                ttfb_ms=first_piece_ms,
+                project_id=project_id,
             )
             raise
 

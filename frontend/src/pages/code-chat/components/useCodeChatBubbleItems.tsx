@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { Copy, Pencil, RefreshCw } from "lucide-react";
+import { Copy, Pencil, RefreshCw, ThumbsDown, ThumbsUp } from "lucide-react";
 import type { BubbleItemType } from "@ant-design/x";
 import { Button, message } from "antd";
 import type { StoredChatTurn as ChatTurn } from "@/lib/codeChatStorage";
@@ -14,6 +14,8 @@ type Params = {
   setEditingUserId: (id: string | null) => void;
   handleUserEditConfirm: (userTurnId: string, nextRaw: string) => void;
   handleRetryAssistant: (assistantTurnId: string) => void;
+  feedbackByTurn: Record<string, 1 | -1>;
+  submitFeedback: (assistantTurnId: string, rating: 1 | -1) => Promise<"accepted" | "duplicate" | "failed">;
 };
 
 export function useCodeChatBubbleItems({
@@ -24,6 +26,8 @@ export function useCodeChatBubbleItems({
   setEditingUserId,
   handleUserEditConfirm,
   handleRetryAssistant,
+  feedbackByTurn,
+  submitFeedback,
 }: Params): BubbleItemType[] {
   const { t } = useI18n();
 
@@ -85,6 +89,7 @@ export function useCodeChatBubbleItems({
         turn.id === lastCompletedAssistantId &&
         turn.content.trim().length > 0;
       const canCopyAssistant = !pendingReply && turn.content.trim().length > 0;
+      const feedback = feedbackByTurn[turn.id] ?? null;
       return {
         key: turn.id,
         role: "ai",
@@ -119,6 +124,40 @@ export function useCodeChatBubbleItems({
                   onClick={() => handleRetryAssistant(turn.id)}
                 />
               ) : null}
+              {!turn.streaming && turn.content.trim().length > 0 ? (
+                <>
+                  <Button
+                    type="text"
+                    size="small"
+                    className={`text-muted-foreground hover:text-foreground ${feedback === 1 ? "text-emerald-600" : ""}`}
+                    icon={<ThumbsUp className="size-3.5" aria-hidden />}
+                    aria-label={t("chat.feedbackHelpful")}
+                    onClick={() => {
+                      void submitFeedback(turn.id, 1).then((status) => {
+                        if (status === "accepted") message.success(t("chat.feedbackSubmitSuccess"));
+                        else if (status === "duplicate") message.info(t("chat.feedbackAlreadySubmitted"));
+                        else message.error(t("chat.feedbackSubmitFail"));
+                      });
+                    }}
+                    disabled={feedback != null}
+                  />
+                  <Button
+                    type="text"
+                    size="small"
+                    className={`text-muted-foreground hover:text-foreground ${feedback === -1 ? "text-destructive" : ""}`}
+                    icon={<ThumbsDown className="size-3.5" aria-hidden />}
+                    aria-label={t("chat.feedbackNotHelpful")}
+                    onClick={() => {
+                      void submitFeedback(turn.id, -1).then((status) => {
+                        if (status === "accepted") message.success(t("chat.feedbackSubmitSuccess"));
+                        else if (status === "duplicate") message.info(t("chat.feedbackAlreadySubmitted"));
+                        else message.error(t("chat.feedbackSubmitFail"));
+                      });
+                    }}
+                    disabled={feedback != null}
+                  />
+                </>
+              ) : null}
             </div>
           ) : null,
         content: pendingReply ? (
@@ -146,6 +185,8 @@ export function useCodeChatBubbleItems({
     t,
     handleUserEditConfirm,
     handleRetryAssistant,
+    feedbackByTurn,
+    submitFeedback,
     lastCompletedAssistantId,
     setEditingUserId,
   ]);
