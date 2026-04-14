@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
-import { apiFetch } from "@/lib/api";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { apiFetch, ApiError } from "@/lib/api";
 import { JobsPageHeader } from "./components/JobsPageHeader";
 import { JobsTableCard } from "./components/JobsTableCard";
 import { type Job } from "./types";
@@ -15,42 +15,83 @@ export function Jobs() {
   const [cancelError, setCancelError] = useState<string | null>(null);
   const [retryingId, setRetryingId] = useState<string | null>(null);
   const [retryError, setRetryError] = useState<string | null>(null);
+  const [autoRefresh, setAutoRefresh] = useState(true);
+  const [pageVisible, setPageVisible] = useState(
+    typeof document === "undefined" ? true : document.visibilityState === "visible",
+  );
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize) || 1);
+  const requestSeqRef = useRef(0);
+  const inflightControllerRef = useRef<AbortController | null>(null);
 
   const load = useCallback(async () => {
+    inflightControllerRef.current?.abort();
+    const controller = new AbortController();
+    inflightControllerRef.current = controller;
+    const currentSeq = requestSeqRef.current + 1;
+    requestSeqRef.current = currentSeq;
     setError(null);
     setLoading(true);
     try {
       const offset = page * pageSize;
-      const response = await apiFetch(`/api/index-jobs?limit=${pageSize}&offset=${offset}`);
+      const response = await apiFetch(`/api/index-jobs?limit=${pageSize}&offset=${offset}`, { signal: controller.signal });
       if (!response.ok) {
         let message = `HTTP ${response.status}`;
         try {
-          const json = await response.json();
-          if (json?.detail) message = typeof json.detail === "string" ? json.detail : JSON.stringify(json.detail);
+          const json = (await response.json()) as { message?: string; detail?: unknown };
+          if (json?.message) message = json.message;
+          else if (json?.detail) message = typeof json.detail === "string" ? json.detail : JSON.stringify(json.detail);
         } catch {
           /* ignore parse errors */
         }
+        if (controller.signal.aborted) return;
         setError(message);
         setJobs([]);
         setTotal(0);
         return;
       }
+      if (controller.signal.aborted) return;
+      if (currentSeq !== requestSeqRef.current) return;
       const data = (await response.json()) as { total?: number; jobs: Job[] };
       const totalCount = typeof data.total === "number" ? data.total : (data.jobs?.length ?? 0);
       setTotal(totalCount);
       setJobs(data.jobs ?? []);
+    } catch (err: unknown) {
+      if (controller.signal.aborted) return;
+      if (currentSeq !== requestSeqRef.current) return;
+      if (err instanceof ApiError) {
+        setError(err.message);
+      } else {
+        setError(err instanceof Error ? err.message : "Request failed");
+      }
     } finally {
+      if (controller.signal.aborted) return;
+      if (currentSeq !== requestSeqRef.current) return;
       setLoading(false);
     }
   }, [page, pageSize]);
 
   useEffect(() => {
+    function onVisibilityChange() {
+      setPageVisible(document.visibilityState === "visible");
+    }
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
+  }, []);
+
+  useEffect(() => {
     void load();
+    if (!autoRefresh || !pageVisible) return;
     const timer = setInterval(() => void load(), 5000);
     return () => clearInterval(timer);
-  }, [load]);
+  }, [autoRefresh, load, pageVisible]);
+
+  useEffect(
+    () => () => {
+      inflightControllerRef.current?.abort();
+    },
+    [],
+  );
 
   useEffect(() => {
     if (total === 0) return;
@@ -114,7 +155,12 @@ export function Jobs() {
 
   return (
     <div className="space-y-6">
-      <JobsPageHeader onRefresh={() => void load()} />
+      <JobsPageHeader
+        onRefresh={() => void load()}
+        autoRefresh={autoRefresh}
+        onAutoRefreshChange={setAutoRefresh}
+        refreshing={loading}
+      />
       {error ? <p className="text-sm text-destructive">{error}</p> : null}
       {cancelError ? <p className="text-sm text-destructive">{cancelError}</p> : null}
       {retryError ? <p className="text-sm text-destructive">{retryError}</p> : null}

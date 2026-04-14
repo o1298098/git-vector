@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { useI18n } from "@/i18n/I18nContext";
 import { Button } from "@/components/ui/button";
@@ -67,9 +67,45 @@ export function JobsTableCard({
 }: JobsTableCardProps) {
   const { t } = useI18n();
   const [detailJobId, setDetailJobId] = useState<string | null>(null);
+  const closeDetailBtnRef = useRef<HTMLButtonElement | null>(null);
+  const detailDialogRef = useRef<HTMLDivElement | null>(null);
   const detailJob = useMemo(() => jobs.find((j) => j.job_id === detailJobId) ?? null, [jobs, detailJobId]);
   const showInitialSkeleton = loading && jobs.length === 0;
   const showRefreshingOverlay = loading && jobs.length > 0;
+
+  useEffect(() => {
+    if (!detailJob) return;
+    const prevActive = document.activeElement as HTMLElement | null;
+    closeDetailBtnRef.current?.focus();
+    function onKeyDown(ev: KeyboardEvent) {
+      if (ev.key === "Escape") {
+        ev.preventDefault();
+        setDetailJobId(null);
+        return;
+      }
+      if (ev.key !== "Tab") return;
+      const dialog = detailDialogRef.current;
+      if (!dialog) return;
+      const focusables = dialog.querySelectorAll<HTMLElement>(
+        'button,[href],input,select,textarea,[tabindex]:not([tabindex="-1"])',
+      );
+      if (focusables.length === 0) return;
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      if (ev.shiftKey && document.activeElement === first) {
+        ev.preventDefault();
+        last.focus();
+      } else if (!ev.shiftKey && document.activeElement === last) {
+        ev.preventDefault();
+        first.focus();
+      }
+    }
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      prevActive?.focus();
+    };
+  }, [detailJob]);
 
   return (
     <Card>
@@ -250,7 +286,7 @@ export function JobsTableCard({
             <div
               role="status"
               aria-live="polite"
-              aria-label="Loading jobs"
+              aria-label={t("jobs.loadingAria")}
               className="pointer-events-none absolute inset-0 bg-background/40 backdrop-blur-[1px]"
             />
           ) : null}
@@ -297,13 +333,27 @@ export function JobsTableCard({
         </div>
 
         {detailJob ? (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 py-6">
-            <div className="w-full max-w-3xl rounded-lg border bg-background shadow-xl">
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 py-6"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="job-detail-title"
+            onMouseDown={(event) => {
+              if (event.target === event.currentTarget) setDetailJobId(null);
+            }}
+          >
+            <div ref={detailDialogRef} className="w-full max-w-3xl rounded-lg border bg-background shadow-xl">
               <div className="flex items-center justify-between border-b px-4 py-3">
-                <h3 className="text-sm font-semibold">
+                <h3 id="job-detail-title" className="text-sm font-semibold">
                   {t("jobs.detail")} · {detailJob.job_id}
                 </h3>
-                <Button type="button" variant="outline" size="sm" onClick={() => setDetailJobId(null)}>
+                <Button
+                  ref={closeDetailBtnRef}
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setDetailJobId(null)}
+                >
                   {t("jobs.closeDetail")}
                 </Button>
               </div>
