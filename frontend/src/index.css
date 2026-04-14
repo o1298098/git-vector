@@ -470,11 +470,8 @@
 
 @layer base {
   /*
-   * 搜索页加载骨架与结果态高度差异较大，可能触发页面纵向滚动条出现/消失，
-   * 从而导致顶栏横向“跳动”。这里固定保留纵向滚动槽位避免布局抖动。
-   *
-   * 继续避免使用 scrollbar-gutter: stable：与 Radix Dialog / react-remove-scroll 在弹层打开时
-   * 可能叠加 padding-right，造成额外横向溢出。
+   * 页面间内容高度不同会触发纵向滚动条出现/消失。
+   * 这里保持默认滚动行为，避免右侧额外留白。
    */
   html {
     overflow-x: hidden;

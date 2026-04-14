@@ -14,6 +14,7 @@ export function Dashboard() {
   const [pageSize, setPageSize] = useState<number>(PAGE_SIZES[0]);
   const [searchInput, setSearchInput] = useState("");
   const [debouncedQ, setDebouncedQ] = useState("");
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [reindexingId, setReindexingId] = useState<string | null>(null);
@@ -33,6 +34,7 @@ export function Dashboard() {
 
   const load = useCallback(async () => {
     setError(null);
+    setLoading(true);
     const params = new URLSearchParams({
       limit: String(pageSize),
       offset: String(page * pageSize),
@@ -47,6 +49,8 @@ export function Dashboard() {
       setError(err instanceof Error ? err.message : t("search.loadFail"));
       setProjects([]);
       setTotal(0);
+    } finally {
+      setLoading(false);
     }
   }, [page, pageSize, debouncedQ, t]);
 
@@ -109,6 +113,7 @@ export function Dashboard() {
         page={page}
         pageSize={pageSize}
         totalPages={totalPages}
+        loading={loading}
         searchInput={searchInput}
         debouncedQ={debouncedQ}
         deletingId={deletingId}

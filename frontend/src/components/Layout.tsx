@@ -64,7 +64,7 @@ export function Layout() {
   ];
 
   return (
-    <div className="flex min-h-screen flex-col">
+    <div className="flex min-h-screen w-screen flex-col overflow-x-hidden">
       <header className="sticky top-0 z-50 w-full border-b bg-background/95 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-background/80">
         <div className="mx-auto flex h-14 w-full max-w-none items-center gap-2 px-4 sm:gap-4 sm:px-6">
           <Button
