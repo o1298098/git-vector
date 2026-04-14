@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { apiJson } from "@/lib/api";
+import { Button } from "@/components/ui/button";
 import { useI18n } from "@/i18n/I18nContext";
 import { useTheme } from "@/theme/ThemeContext";
 import { VectorsEditorPanel } from "./components/VectorsEditorPanel";
@@ -29,6 +30,7 @@ export function Vectors() {
   const [editContent, setEditContent] = useState("");
   const [editMeta, setEditMeta] = useState("{}");
   const [contentMode, setContentMode] = useState<"edit" | "preview">("edit");
+  const [mobilePanel, setMobilePanel] = useState<"list" | "editor">("list");
   const [saving, setSaving] = useState(false);
   const [ok, setOk] = useState<string | null>(null);
 
@@ -149,11 +151,20 @@ export function Vectors() {
       minimap: { enabled: true },
       fontSize: 13,
       lineNumbers: "on" as const,
+      glyphMargin: false,
+      overviewRulerLanes: 0,
+      hideCursorInOverviewRuler: true,
       smoothScrolling: true,
       scrollBeyondLastLine: false,
       tabSize: 2,
       wordWrap: "on" as const,
       automaticLayout: true,
+      scrollbar: {
+        verticalScrollbarSize: 8,
+        horizontalScrollbarSize: 8,
+        useShadows: false,
+        alwaysConsumeMouseWheel: false,
+      },
       bracketPairColorization: { enabled: true },
       renderWhitespace: "selection" as const,
       renderValidationDecorations: "off" as const,
@@ -230,58 +241,80 @@ export function Vectors() {
       ) : null}
       {ok ? <div className="rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-sm text-foreground">{ok}</div> : null}
 
-      <div className="grid gap-4 xl:grid-cols-12">
-        <VectorsListPanel
-          total={total}
-          page={page}
-          totalPages={totalPages}
-          projectId={projectId}
-          projects={projects}
-          projectsLoading={projectsLoading}
-          searchInput={searchInput}
-          rows={rows}
-          selectedId={selectedId}
-          loading={loading}
-          saving={saving}
-          onProjectChange={(nextProjectId) => {
-            const next = (nextProjectId || "").trim();
-            setProjectId(next);
-            setPage(0);
-            setSearchParams(
-              (prev) => {
-                const params = new URLSearchParams(prev);
-                if (next) params.set("project_id", next);
-                else params.delete("project_id");
-                return params;
-              },
-              { replace: true },
-            );
-          }}
-          onSearchChange={setSearchInput}
-          onSelectRow={setSelectedId}
-          onPrevPage={() => setPage((currentPage) => Math.max(0, currentPage - 1))}
-          onNextPage={() => setPage((currentPage) => currentPage + 1)}
-        />
-        <VectorsEditorPanel
-          selectedId={selected ? selected.id : null}
-          hasChanges={hasChanges}
-          contentMode={contentMode}
-          editContent={editContent}
-          editMeta={editMeta}
-          saveDisabled={saveDisabled}
-          saving={saving}
-          resolvedDark={resolvedDark}
-          editorTheme={editorTheme}
-          contentEditorOptions={contentEditorOptions}
-          metaEditorOptions={metaEditorOptions}
-          metaValid={metaValidation.valid}
-          onContentModeChange={setContentMode}
-          onEditContentChange={setEditContent}
-          onEditMetaChange={setEditMeta}
-          onFormatMeta={formatMeta}
-          onReset={resetEditor}
-          onSave={() => void onSave()}
-        />
+      <div className="flex items-center gap-2 xl:hidden">
+        <Button type="button" size="sm" variant={mobilePanel === "list" ? "secondary" : "outline"} onClick={() => setMobilePanel("list")}>
+          {t("vectors.title")}
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant={mobilePanel === "editor" ? "secondary" : "outline"}
+          disabled={!selected}
+          onClick={() => setMobilePanel("editor")}
+        >
+          {t("vectors.editorTitle")}
+        </Button>
+      </div>
+
+      <div className="grid min-w-0 gap-4 xl:grid-cols-12">
+        <div className={`${mobilePanel === "list" ? "block" : "hidden"} min-w-0 xl:col-span-5 xl:block`}>
+          <VectorsListPanel
+            total={total}
+            page={page}
+            totalPages={totalPages}
+            projectId={projectId}
+            projects={projects}
+            projectsLoading={projectsLoading}
+            searchInput={searchInput}
+            rows={rows}
+            selectedId={selectedId}
+            loading={loading}
+            saving={saving}
+            onProjectChange={(nextProjectId) => {
+              const next = (nextProjectId || "").trim();
+              setProjectId(next);
+              setPage(0);
+              setSearchParams(
+                (prev) => {
+                  const params = new URLSearchParams(prev);
+                  if (next) params.set("project_id", next);
+                  else params.delete("project_id");
+                  return params;
+                },
+                { replace: true },
+              );
+            }}
+            onSearchChange={setSearchInput}
+            onSelectRow={(id) => {
+              setSelectedId(id);
+              setMobilePanel("editor");
+            }}
+            onPrevPage={() => setPage((currentPage) => Math.max(0, currentPage - 1))}
+            onNextPage={() => setPage((currentPage) => currentPage + 1)}
+          />
+        </div>
+        <div className={`${mobilePanel === "editor" ? "block" : "hidden"} min-w-0 xl:col-span-7 xl:block`}>
+          <VectorsEditorPanel
+            selectedId={selected ? selected.id : null}
+            hasChanges={hasChanges}
+            contentMode={contentMode}
+            editContent={editContent}
+            editMeta={editMeta}
+            saveDisabled={saveDisabled}
+            saving={saving}
+            resolvedDark={resolvedDark}
+            editorTheme={editorTheme}
+            contentEditorOptions={contentEditorOptions}
+            metaEditorOptions={metaEditorOptions}
+            metaValid={metaValidation.valid}
+            onContentModeChange={setContentMode}
+            onEditContentChange={setEditContent}
+            onEditMetaChange={setEditMeta}
+            onFormatMeta={formatMeta}
+            onReset={resetEditor}
+            onSave={() => void onSave()}
+          />
+        </div>
       </div>
     </div>
   );

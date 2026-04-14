@@ -47,7 +47,7 @@ export function VectorsListPanel({
   const { t } = useI18n();
 
   return (
-    <Card className="flex h-[min(84vh,860px)] flex-col xl:col-span-5">
+    <Card className="flex h-[min(84vh,860px)] flex-col">
       <CardHeader className="space-y-2 pb-3">
         <div className="flex items-center justify-between gap-3">
           <CardTitle className="text-base">{t("vectors.title")}</CardTitle>

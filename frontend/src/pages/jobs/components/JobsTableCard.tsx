@@ -19,6 +19,33 @@ type JobsTableCardProps = {
   onCancelJob: (jobId: string) => void;
 };
 
+function parseTime(value?: string | null): number | null {
+  if (!value) return null;
+  const n = Date.parse(value);
+  return Number.isNaN(n) ? null : n;
+}
+
+function formatDuration(ms: number): string {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
+  if (minutes > 0) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
+}
+
+function getJobDuration(job: Job): string {
+  const createdAt = parseTime(job.created_at);
+  const startedAt = parseTime(job.started_at);
+  const finishedAt = parseTime(job.finished_at);
+  const start = startedAt ?? createdAt;
+  if (start == null) return "—";
+  const end = finishedAt ?? Date.now();
+  if (end <= start) return "—";
+  return formatDuration(end - start);
+}
+
 export function JobsTableCard({
   jobs,
   total,
@@ -37,14 +64,15 @@ export function JobsTableCard({
     <Card>
       <CardContent className="space-y-3 p-4">
         <div className="w-full overflow-x-auto">
-          <Table className="w-full min-w-[64rem] table-fixed text-xs">
+          <Table className="w-full min-w-[72rem] table-fixed text-xs">
             <colgroup>
+              <col style={{ width: "19rem" }} />
               <col style={{ width: "20rem" }} />
-              <col />
-              <col style={{ width: "9.5rem" }} />
-              <col style={{ width: "4.25rem" }} />
-              <col style={{ width: "13rem" }} />
+              <col style={{ width: "8.5rem" }} />
+              <col style={{ width: "5rem" }} />
               <col style={{ width: "7.5rem" }} />
+              <col style={{ width: "6.5rem" }} />
+              <col style={{ width: "5.5rem" }} />
             </colgroup>
             <TableHeader>
               <TableRow className="hover:bg-transparent">
@@ -64,6 +92,9 @@ export function JobsTableCard({
                   {t("jobs.colStep")}
                 </TableHead>
                 <TableHead className="h-8 whitespace-nowrap px-2 py-1.5 align-bottom text-right text-[11px]">
+                  {t("jobs.colDuration")}
+                </TableHead>
+                <TableHead className="h-8 whitespace-nowrap px-2 py-1.5 align-bottom text-right text-[11px]">
                   {t("jobs.colActions")}
                 </TableHead>
               </TableRow>
@@ -71,17 +102,17 @@ export function JobsTableCard({
             <TableBody>
             {jobs.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={6} className="py-2 text-muted-foreground">
+                <TableCell colSpan={7} className="py-2 text-muted-foreground">
                   {t("jobs.empty")}
                 </TableCell>
               </TableRow>
             ) : (
               jobs.map((job) => (
                 <TableRow key={job.job_id} className="leading-tight">
-                  <TableCell className="align-top px-2 py-1.5 font-mono text-[10px] leading-snug text-foreground break-all [width:20rem]">
+                  <TableCell className="align-top px-2 py-1.5 font-mono text-[10px] leading-snug text-foreground break-all [width:19rem]">
                     <span title={job.job_id}>{job.job_id}</span>
                   </TableCell>
-                  <TableCell className="min-w-0 align-top px-2 py-1.5">
+                  <TableCell className="min-w-0 align-top px-2 py-1.5 [width:20rem]">
                     <div className="truncate text-xs font-medium" title={job.project_id}>
                       {job.project_id}
                     </div>
@@ -91,10 +122,10 @@ export function JobsTableCard({
                       </div>
                     ) : null}
                   </TableCell>
-                  <TableCell className="align-top px-2 py-1.5 whitespace-nowrap [width:9.5rem]">
+                  <TableCell className="align-top px-2 py-1.5 whitespace-nowrap [width:8.5rem]">
                     <span
                       className={cn(
-                        "inline-flex rounded-full px-1.5 py-px text-[10px] font-medium",
+                        "inline-flex rounded-full px-2 py-1 text-[10px] font-medium",
                         job.status === "succeeded" && "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400",
                         job.status === "failed" && "bg-destructive/15 text-destructive",
                         job.status === "cancelled" && "bg-orange-500/15 text-orange-700 dark:text-orange-400",
@@ -111,18 +142,21 @@ export function JobsTableCard({
                       </span>
                     ) : null}
                   </TableCell>
-                  <TableCell className="align-top px-2 py-1.5 text-right tabular-nums text-xs [width:4.25rem]">
+                  <TableCell className="align-top px-2 py-1.5 text-right tabular-nums text-xs [width:5rem]">
                     {job.progress}%
                   </TableCell>
-                  <TableCell className="min-w-0 align-top px-2 py-1.5 [width:13rem]">
+                  <TableCell className="min-w-0 align-top px-2 py-1.5 [width:7.5rem]">
                     <div
-                      className="line-clamp-2 break-words text-[11px] text-muted-foreground"
+                      className="truncate whitespace-nowrap text-[11px] text-muted-foreground"
                       title={[job.step, job.message].filter(Boolean).join(" — ")}
                     >
                       {job.step}
                     </div>
                   </TableCell>
-                  <TableCell className="align-top px-2 py-1.5 text-right [width:7.5rem]">
+                  <TableCell className="align-top px-2 py-1.5 text-right tabular-nums text-[11px] text-muted-foreground [width:6.5rem]">
+                    {getJobDuration(job)}
+                  </TableCell>
+                  <TableCell className="align-top px-2 py-1.5 text-right [width:5.5rem]">
                     {job.status === "queued" || job.status === "running" ? (
                       <Button
                         type="button"

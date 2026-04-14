@@ -515,3 +515,27 @@
   box-sizing: border-box;
   padding: 0.75rem 1rem 1rem;
 }
+
+.gv-vectors-plain-editor {
+  scrollbar-width: thin;
+  scrollbar-color: hsl(var(--border)) transparent;
+}
+
+.gv-vectors-plain-editor::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.gv-vectors-plain-editor::-webkit-scrollbar-thumb {
+  border-radius: 9999px;
+  background: hsl(var(--border));
+}
+
+.gv-vectors-plain-editor::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Monaco 在识别为 iOS 环境时会注入右下角“显示键盘”控件，这里统一隐藏。 */
+.monaco-editor .iPadShowKeyboard {
+  display: none !important;
+}

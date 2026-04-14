@@ -45,11 +45,11 @@ export function LoginInkFlowField({ dark }: LoginInkFlowFieldProps) {
     const baseDark = { r: 4, g: 8, b: 22 };
     const baseLight = { r: 248, g: 250, b: 252 };
 
-    /** 暗色主题：低饱和深色系（深青 / 深紫 / 深赭橙），screen 叠上去仍柔和不刺眼 */
+    /** 暗色主题：进一步压暗色值，避免球体在深色背景上过亮 */
     const inkDark: Rgb[] = [
-      { r: 52, g: 118, b: 132 },
-      { r: 88, g: 72, b: 128 },
-      { r: 132, g: 74, b: 52 },
+      { r: 34, g: 78, b: 92 },
+      { r: 60, g: 52, b: 94 },
+      { r: 92, g: 56, b: 40 },
     ];
     const inkLight: Rgb[] = [
       { r: 130, g: 198, b: 232 },
@@ -101,8 +101,8 @@ export function LoginInkFlowField({ dark }: LoginInkFlowFieldProps) {
         pts.forEach((p, i) => {
           const c = inks[i];
           const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r);
-          const core = dark ? 0.28 : 0.14;
-          const mid = dark ? 0.09 : 0.055;
+          const core = dark ? 0.19 : 0.14;
+          const mid = dark ? 0.06 : 0.055;
           g.addColorStop(0, `rgba(${c.r},${c.g},${c.b},${core})`);
           g.addColorStop(0.5, `rgba(${c.r},${c.g},${c.b},${mid})`);
           g.addColorStop(1, `rgba(${c.r},${c.g},${c.b},0)`);
@@ -127,7 +127,7 @@ export function LoginInkFlowField({ dark }: LoginInkFlowFieldProps) {
   return (
     <canvas
       ref={canvasRef}
-      className="absolute inset-0 h-full w-full opacity-100 blur-[18px] saturate-100 contrast-[1.02] dark:saturate-[0.88] dark:contrast-[0.98]"
+      className="absolute inset-0 h-full w-full opacity-100 blur-[18px] saturate-100 contrast-[1.02] dark:saturate-[0.72] dark:contrast-[0.94]"
       aria-hidden
     />
   );

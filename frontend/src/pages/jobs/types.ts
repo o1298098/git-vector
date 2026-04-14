@@ -6,6 +6,9 @@ export type Job = {
   progress: number;
   step: string;
   message: string;
+  created_at?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
   is_current: boolean;
 };
 

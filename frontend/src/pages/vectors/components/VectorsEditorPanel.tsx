@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { Save } from "lucide-react";
 import Editor from "@monaco-editor/react";
 import XMarkdown from "@ant-design/x-markdown";
@@ -49,11 +50,20 @@ export function VectorsEditorPanel({
   onSave,
 }: VectorsEditorPanelProps) {
   const { t } = useI18n();
+  const [useSimpleEditor, setUseSimpleEditor] = useState(false);
+
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 1023px)");
+    const update = () => setUseSimpleEditor(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
 
   return (
-    <Card className="flex h-[min(84vh,860px)] flex-col xl:col-span-7">
-      <CardHeader className="space-y-2">
-        <div className="flex items-center justify-between gap-2">
+    <Card className="flex h-[min(84vh,860px)] min-w-0 flex-col">
+      <CardHeader className="min-w-0 space-y-2">
+        <div className="flex min-w-0 items-center justify-between gap-2">
           <CardTitle className="text-lg">{t("vectors.editorTitle")}</CardTitle>
           {hasChanges ? (
             <span className="rounded-full bg-amber-500/10 px-2 py-0.5 text-xs text-amber-700 dark:text-amber-400">
@@ -61,12 +71,12 @@ export function VectorsEditorPanel({
             </span>
           ) : null}
         </div>
-        <CardDescription className="font-mono text-xs">{selectedId ?? t("vectors.editorEmpty")}</CardDescription>
+        <CardDescription className="min-w-0 break-all font-mono text-xs">{selectedId ?? t("vectors.editorEmpty")}</CardDescription>
         <CardDescription className="text-xs text-muted-foreground">{t("vectors.saveShortcut")}</CardDescription>
       </CardHeader>
-      <CardContent className="grid min-h-0 flex-1 grid-rows-[1fr_1fr_auto] gap-4">
-        <div className="flex min-h-0 flex-col space-y-2">
-          <div className="flex items-center justify-between gap-2">
+      <CardContent className="grid min-h-0 min-w-0 flex-1 grid-rows-[1fr_1fr_auto] gap-4">
+        <div className="flex min-h-0 min-w-0 flex-col space-y-2">
+          <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
             <Label htmlFor="vector-content">{t("vectors.contentLabel")}</Label>
             <div className="flex items-center gap-1">
               <Button
@@ -89,20 +99,31 @@ export function VectorsEditorPanel({
               </Button>
             </div>
           </div>
-          <div className="min-h-0 flex-1 overflow-hidden rounded-md border">
+          <div className="min-h-0 min-w-0 flex-1 overflow-hidden rounded-md border">
             {contentMode === "edit" ? (
-              <Editor
-                height="100%"
-                language="markdown"
-                theme={editorTheme}
-                value={editContent}
-                onChange={(value: string | undefined) => onEditContentChange(value ?? "")}
-                options={{
-                  ...contentEditorOptions,
-                  minimap: { enabled: false },
-                  readOnly: !selectedId || saving,
-                }}
-              />
+              useSimpleEditor ? (
+                <textarea
+                  id="vector-content"
+                  value={editContent}
+                  readOnly={!selectedId || saving}
+                  onChange={(event) => onEditContentChange(event.target.value)}
+                  className="gv-vectors-plain-editor h-full w-full resize-none bg-transparent p-3 font-mono text-xs leading-5 outline-none"
+                  spellCheck={false}
+                />
+              ) : (
+                <Editor
+                  height="100%"
+                  language="markdown"
+                  theme={editorTheme}
+                  value={editContent}
+                  onChange={(value: string | undefined) => onEditContentChange(value ?? "")}
+                  options={{
+                    ...contentEditorOptions,
+                    minimap: { enabled: false },
+                    readOnly: !selectedId || saving,
+                  }}
+                />
+              )
             ) : (
               <div className="h-full overflow-auto p-3">
                 {selectedId ? (
@@ -118,28 +139,39 @@ export function VectorsEditorPanel({
           {contentMode === "preview" ? <p className="text-xs text-muted-foreground">{t("vectors.previewHint")}</p> : null}
         </div>
 
-        <div className="flex min-h-0 flex-col space-y-2">
-          <div className="flex items-center justify-between gap-2">
+        <div className="flex min-h-0 min-w-0 flex-col space-y-2">
+          <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
             <Label htmlFor="vector-meta">{t("vectors.metaLabel")}</Label>
             <Button type="button" variant="ghost" size="sm" disabled={!selectedId || saving || !metaValid} onClick={onFormatMeta}>
               {t("vectors.formatMeta")}
             </Button>
           </div>
-          <div className="min-h-0 flex-1 overflow-hidden rounded-md border">
-            <Editor
-              height="100%"
-              language="json"
-              theme={editorTheme}
-              value={editMeta}
-              onChange={(value: string | undefined) => onEditMetaChange(value ?? "")}
-              options={{ ...metaEditorOptions, readOnly: !selectedId || saving }}
-            />
+          <div className="min-h-0 min-w-0 flex-1 overflow-hidden rounded-md border">
+            {useSimpleEditor ? (
+              <textarea
+                id="vector-meta"
+                value={editMeta}
+                readOnly={!selectedId || saving}
+                onChange={(event) => onEditMetaChange(event.target.value)}
+                className="gv-vectors-plain-editor h-full w-full resize-none bg-transparent p-3 font-mono text-xs leading-5 outline-none"
+                spellCheck={false}
+              />
+            ) : (
+              <Editor
+                height="100%"
+                language="json"
+                theme={editorTheme}
+                value={editMeta}
+                onChange={(value: string | undefined) => onEditMetaChange(value ?? "")}
+                options={{ ...metaEditorOptions, readOnly: !selectedId || saving }}
+              />
+            )}
           </div>
           <p className="text-xs text-muted-foreground">{t("vectors.metaHint")}</p>
           {!metaValid ? <p className="text-xs text-destructive">{t("vectors.metaInvalidInline")}</p> : null}
         </div>
 
-        <div className="flex justify-end gap-2">
+        <div className="flex flex-wrap justify-end gap-2">
           <Button type="button" variant="outline" disabled={!selectedId || saving || !hasChanges} onClick={onReset}>
             {t("vectors.reset")}
           </Button>
