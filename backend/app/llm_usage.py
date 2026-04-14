@@ -96,11 +96,15 @@ def record_llm_usage(
             conn.close()
 
 
-def read_llm_usage_summary(*, days: int = 30) -> dict[str, Any]:
+def read_llm_usage_summary(*, days: int = 30, tz_offset_minutes: int = 0) -> dict[str, Any]:
     d = max(1, min(int(days), 3650))
+    offset = max(-840, min(int(tz_offset_minutes), 840))
+    local_tz = timezone(timedelta(minutes=offset))
     now_utc = datetime.now(timezone.utc)
-    start_day = (now_utc - timedelta(days=d - 1)).date()
-    since = datetime.combine(start_day, time.min, tzinfo=timezone.utc).isoformat()
+    now_local = now_utc.astimezone(local_tz)
+    start_local_day = (now_local - timedelta(days=d - 1)).date()
+    since_utc_dt = datetime.combine(start_local_day, time.min, tzinfo=local_tz).astimezone(timezone.utc)
+    since = since_utc_dt.isoformat()
     with _lock:
         conn = _conn()
         try:
@@ -148,17 +152,15 @@ def read_llm_usage_summary(*, days: int = 30) -> dict[str, Any]:
                 """,
                 (since,),
             ).fetchall()
-            by_day_rows = conn.execute(
+            usage_rows = conn.execute(
                 """
-                SELECT substr(ts, 1, 10) AS day,
-                       COUNT(*) AS calls,
-                       SUM(prompt_tokens) AS prompt_tokens,
-                       SUM(completion_tokens) AS completion_tokens,
-                       SUM(total_tokens) AS total_tokens
+                SELECT ts,
+                       prompt_tokens,
+                       completion_tokens,
+                       total_tokens
                 FROM llm_usage
                 WHERE ts >= ?
-                GROUP BY substr(ts, 1, 10)
-                ORDER BY day ASC
+                ORDER BY ts ASC
                 """,
                 (since,),
             ).fetchall()
@@ -179,17 +181,51 @@ def read_llm_usage_summary(*, days: int = 30) -> dict[str, Any]:
         "total_tokens": _n(total_row["total_tokens"]) if total_row else 0,
     }
     day_map: dict[str, dict[str, int]] = {}
-    for r in by_day_rows:
-        day_map[str(r["day"])] = {
-            "calls": _n(r["calls"]),
-            "prompt_tokens": _n(r["prompt_tokens"]),
-            "completion_tokens": _n(r["completion_tokens"]),
-            "total_tokens": _n(r["total_tokens"]),
-        }
+    hour_map: dict[str, dict[str, int]] = {}
+    for r in usage_rows:
+        ts_raw = r["ts"]
+        if ts_raw is None:
+            continue
+        try:
+            dt_utc = datetime.fromisoformat(str(ts_raw))
+        except ValueError:
+            continue
+        if dt_utc.tzinfo is None:
+            dt_utc = dt_utc.replace(tzinfo=timezone.utc)
+        dt_local = dt_utc.astimezone(local_tz)
+        day_key = dt_local.date().isoformat()
+        hour_key = dt_local.replace(minute=0, second=0, microsecond=0).isoformat()
+        day_rec = day_map.setdefault(
+            day_key,
+            {
+                "calls": 0,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+            },
+        )
+        day_rec["calls"] += 1
+        day_rec["prompt_tokens"] += _n(r["prompt_tokens"])
+        day_rec["completion_tokens"] += _n(r["completion_tokens"])
+        day_rec["total_tokens"] += _n(r["total_tokens"])
+
+        hour_rec = hour_map.setdefault(
+            hour_key,
+            {
+                "calls": 0,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+            },
+        )
+        hour_rec["calls"] += 1
+        hour_rec["prompt_tokens"] += _n(r["prompt_tokens"])
+        hour_rec["completion_tokens"] += _n(r["completion_tokens"])
+        hour_rec["total_tokens"] += _n(r["total_tokens"])
 
     by_day: list[dict[str, Any]] = []
-    cur: date = start_day
-    end_day = now_utc.date()
+    cur: date = start_local_day
+    end_day = now_local.date()
     while cur <= end_day:
         ds = cur.isoformat()
         rec = day_map.get(ds) or {
@@ -201,10 +237,26 @@ def read_llm_usage_summary(*, days: int = 30) -> dict[str, Any]:
         by_day.append({"day": ds, **rec})
         cur = cur + timedelta(days=1)
 
+    by_hour: list[dict[str, Any]] = []
+    start_hour = datetime.combine(start_local_day, time.min, tzinfo=local_tz)
+    end_hour = now_local.replace(minute=0, second=0, microsecond=0)
+    cur_hour = start_hour
+    while cur_hour <= end_hour:
+        hk = cur_hour.isoformat()
+        rec = hour_map.get(hk) or {
+            "calls": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        }
+        by_hour.append({"hour": hk, **rec})
+        cur_hour = cur_hour + timedelta(hours=1)
+
     return {
         "days": d,
         "totals": totals,
         "by_provider": [dict(r) for r in by_provider],
         "by_feature": [dict(r) for r in by_feature],
         "by_day": by_day,
+        "by_hour": by_hour if d == 1 else [],
     }

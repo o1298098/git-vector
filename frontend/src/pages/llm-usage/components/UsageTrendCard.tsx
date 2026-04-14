@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useI18n } from "@/i18n/I18nContext";
 import {
@@ -9,10 +10,11 @@ import {
   SOFT_CARD_BORDER_CLASS,
   type DailyUsageRow,
 } from "../types";
-import { compactNum, shortDayLabel } from "../utils";
+import { compactNum, shortDayLabel, shortHourLabel } from "../utils";
 
 type UsageTrendCardProps = {
   trendRows: DailyUsageRow[];
+  trendMode: "day" | "hour";
   trendChart: {
     promptLine: string;
     completionLine: string;
@@ -29,8 +31,39 @@ type UsageTrendCardProps = {
   };
 };
 
-export function UsageTrendCard({ trendRows, trendChart }: UsageTrendCardProps) {
+export function UsageTrendCard({ trendRows, trendMode, trendChart }: UsageTrendCardProps) {
   const { t } = useI18n();
+  const singlePoint = trendRows.length === 1;
+  const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+  const formatLabel = (value: string) => (trendMode === "hour" ? shortHourLabel(value) : shortDayLabel(value));
+  const chartMax = Math.max(1, trendChart.yTicks[trendChart.yTicks.length - 1]?.value ?? 1);
+  const activeIndex = hoverIndex == null ? null : Math.max(0, Math.min(trendRows.length - 1, hoverIndex));
+  const activeRow = activeIndex == null ? null : trendRows[activeIndex];
+  const activeX =
+    activeIndex == null
+      ? null
+      : singlePoint
+        ? trendChart.mid
+        : trendChart.left + ((trendChart.right - trendChart.left) * activeIndex) / Math.max(1, trendRows.length - 1);
+  const activeXPercent = activeX == null ? "50%" : `${(activeX / 1000) * 100}%`;
+  const chartHeight = trendChart.axisBottom - trendChart.top;
+  const promptY =
+    activeRow == null ? null : trendChart.axisBottom - (chartHeight * Number(activeRow.prompt_tokens || 0)) / chartMax;
+  const completionY =
+    activeRow == null ? null : trendChart.axisBottom - (chartHeight * Number(activeRow.completion_tokens || 0)) / chartMax;
+
+  function formatTooltipTime(value: string): string {
+    const date = value.includes("T") ? new Date(value) : new Date(`${value}T00:00:00`);
+    if (Number.isNaN(date.getTime())) return value;
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, "0");
+    const d = String(date.getDate()).padStart(2, "0");
+    if (trendMode === "hour") {
+      const h = String(date.getHours()).padStart(2, "0");
+      return `${y}-${m}-${d} ${h}:00`;
+    }
+    return `${y}-${m}-${d}`;
+  }
 
   return (
     <Card className={`lg:col-span-2 ${SOFT_CARD_BORDER_CLASS}`}>
@@ -56,17 +89,64 @@ export function UsageTrendCard({ trendRows, trendChart }: UsageTrendCardProps) {
                 {t("usage.outputTokens")}
               </span>
             </div>
-            <svg viewBox="0 0 1000 240" preserveAspectRatio="none" className="h-56 w-full overflow-visible">
-              <defs>
-                <linearGradient id="usagePromptFill" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor={PROMPT_LINE_COLOR} stopOpacity="0.22" />
-                  <stop offset="100%" stopColor={PROMPT_LINE_COLOR} stopOpacity="0.02" />
-                </linearGradient>
-                <linearGradient id="usageCompletionFill" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor={COMPLETION_LINE_COLOR} stopOpacity="0.2" />
-                  <stop offset="100%" stopColor={COMPLETION_LINE_COLOR} stopOpacity="0.02" />
-                </linearGradient>
-              </defs>
+            <div className="relative w-full aspect-[1000/240]">
+              {activeRow ? (
+                <div
+                  className="pointer-events-none absolute top-2 z-10 min-w-[10rem] rounded-md border bg-background/95 px-2 py-1 text-xs shadow-sm"
+                  style={{
+                    left: activeXPercent,
+                    transform:
+                      activeX != null && activeX < 220
+                        ? "translateX(0)"
+                        : activeX != null && activeX > 780
+                          ? "translateX(calc(-100% - 8px))"
+                          : "translateX(-50%)",
+                  }}
+                >
+                  <div className="font-medium">{formatTooltipTime(activeRow.day)}</div>
+                  <div className="text-muted-foreground">
+                    {t("usage.inputTokens")}: {compactNum(activeRow.prompt_tokens)}
+                  </div>
+                  <div className="text-muted-foreground">
+                    {t("usage.outputTokens")}: {compactNum(activeRow.completion_tokens)}
+                  </div>
+                  <div className="text-muted-foreground">
+                    {t("usage.totalTokens")}: {compactNum(activeRow.total_tokens)}
+                  </div>
+                  <div className="text-muted-foreground">
+                    {t("usage.totalCalls")}: {compactNum(activeRow.calls)}
+                  </div>
+                </div>
+              ) : null}
+              <svg
+                viewBox="0 0 1000 240"
+                preserveAspectRatio="xMidYMid meet"
+                className="h-full w-full overflow-visible"
+                onMouseLeave={() => setHoverIndex(null)}
+                onMouseMove={(event) => {
+                  const rect = event.currentTarget.getBoundingClientRect();
+                  if (rect.width <= 0 || trendRows.length === 0) return;
+                  const x = ((event.clientX - rect.left) / rect.width) * 1000;
+                  const clamped = Math.max(trendChart.left, Math.min(trendChart.right, x));
+                  if (trendRows.length === 1) {
+                    setHoverIndex(0);
+                    return;
+                  }
+                  const ratio = (clamped - trendChart.left) / Math.max(1, trendChart.right - trendChart.left);
+                  const index = Math.round(ratio * (trendRows.length - 1));
+                  setHoverIndex(index);
+                }}
+              >
+                <defs>
+                  <linearGradient id="usagePromptFill" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor={PROMPT_LINE_COLOR} stopOpacity="0.22" />
+                    <stop offset="100%" stopColor={PROMPT_LINE_COLOR} stopOpacity="0.02" />
+                  </linearGradient>
+                  <linearGradient id="usageCompletionFill" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor={COMPLETION_LINE_COLOR} stopOpacity="0.2" />
+                    <stop offset="100%" stopColor={COMPLETION_LINE_COLOR} stopOpacity="0.02" />
+                  </linearGradient>
+                </defs>
 
               <line
                 x1={trendChart.left}
@@ -138,21 +218,46 @@ export function UsageTrendCard({ trendRows, trendChart }: UsageTrendCardProps) {
                 strokeLinejoin="round"
               />
 
+              {activeRow && activeX != null ? (
+                <>
+                  <line
+                    x1={activeX}
+                    y1={trendChart.top}
+                    x2={activeX}
+                    y2={trendChart.axisBottom}
+                    stroke="currentColor"
+                    opacity="0.22"
+                    strokeDasharray="3 3"
+                  />
+                  {promptY != null ? <circle cx={activeX} cy={promptY} r="3.2" fill={PROMPT_LINE_COLOR} /> : null}
+                  {completionY != null ? <circle cx={activeX} cy={completionY} r="3.2" fill={COMPLETION_LINE_COLOR} /> : null}
+                </>
+              ) : null}
+
               {trendChart.promptLast ? <circle cx={trendChart.promptLast.x} cy={trendChart.promptLast.y} r="3" fill={PROMPT_LINE_COLOR} /> : null}
               {trendChart.completionLast ? (
                 <circle cx={trendChart.completionLast.x} cy={trendChart.completionLast.y} r="3" fill={COMPLETION_LINE_COLOR} />
               ) : null}
 
-              <text x={trendChart.left} y="228" textAnchor="start" fill="currentColor" opacity="0.7" fontSize="12">
-                {shortDayLabel(trendRows[0]?.day || "")}
-              </text>
-              <text x={trendChart.mid} y="228" textAnchor="middle" fill="currentColor" opacity="0.7" fontSize="12">
-                {shortDayLabel(trendRows[Math.floor((trendRows.length - 1) / 2)]?.day || "")}
-              </text>
-              <text x={trendChart.right} y="228" textAnchor="end" fill="currentColor" opacity="0.7" fontSize="12">
-                {shortDayLabel(trendRows[trendRows.length - 1]?.day || "")}
-              </text>
-            </svg>
+                {singlePoint ? (
+                  <text x={trendChart.mid} y="228" textAnchor="middle" fill="currentColor" opacity="0.7" fontSize="12">
+                    {formatLabel(trendRows[0]?.day || "")}
+                  </text>
+                ) : (
+                  <>
+                    <text x={trendChart.left} y="228" textAnchor="start" fill="currentColor" opacity="0.7" fontSize="12">
+                      {formatLabel(trendRows[0]?.day || "")}
+                    </text>
+                    <text x={trendChart.mid} y="228" textAnchor="middle" fill="currentColor" opacity="0.7" fontSize="12">
+                      {formatLabel(trendRows[Math.floor((trendRows.length - 1) / 2)]?.day || "")}
+                    </text>
+                    <text x={trendChart.right} y="228" textAnchor="end" fill="currentColor" opacity="0.7" fontSize="12">
+                      {formatLabel(trendRows[trendRows.length - 1]?.day || "")}
+                    </text>
+                  </>
+                )}
+              </svg>
+            </div>
           </div>
         )}
       </CardContent>

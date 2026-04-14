@@ -16,6 +16,7 @@ import type { CodeChatProjectOption } from "./types";
 const STREAM_TYPING_TICK_MS = 26;
 const MAX_HISTORY_TURNS = 16;
 const MAX_HISTORY_CHARS = 10_000;
+const MAX_HISTORY_TURN_CHARS = 3_000;
 
 type ChatHistoryTurnPayload = {
   role: "user" | "assistant";
@@ -39,7 +40,7 @@ export function useCodeChat() {
     for (let i = source.length - 1; i >= 0; i -= 1) {
       const turn = source[i];
       if (turn.role !== "user" && turn.role !== "assistant") continue;
-      const content = (turn.content || "").trim();
+      const content = (turn.content || "").trim().slice(0, MAX_HISTORY_TURN_CHARS);
       if (!content) continue;
       if (totalChars + content.length > MAX_HISTORY_CHARS) break;
       normalized.push({ role: turn.role, content });

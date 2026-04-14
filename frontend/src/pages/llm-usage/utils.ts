@@ -11,9 +11,15 @@ export function numberText(value: number | undefined): string {
 }
 
 export function shortDayLabel(day: string): string {
-  const date = new Date(`${day}T00:00:00`);
+  const date = day.includes("T") ? new Date(day) : new Date(`${day}T00:00:00`);
   if (Number.isNaN(date.getTime())) return day;
   return `${date.getMonth() + 1}/${date.getDate()}`;
+}
+
+export function shortHourLabel(hour: string): string {
+  const date = new Date(hour);
+  if (Number.isNaN(date.getTime())) return hour;
+  return `${String(date.getHours()).padStart(2, "0")}:00`;
 }
 
 export function compactNum(value: number | undefined): string {
@@ -68,18 +74,29 @@ export function computeTrendChart(trendRows: DailyUsageRow[], trendMax: number) 
   const bottom = 36;
   const innerWidth = width - left - rightPadding;
   const innerHeight = height - top - bottom;
+  const isSinglePoint = trendRows.length === 1;
   const len = Math.max(1, trendRows.length - 1);
   const promptPoints: Point[] = [];
   const completionPoints: Point[] = [];
-  trendRows.forEach((row, index) => {
-    const x = left + (innerWidth * index) / len;
+  if (isSinglePoint) {
+    const row = trendRows[0];
     const prompt = Number(row.prompt_tokens || 0);
     const completion = Number(row.completion_tokens || 0);
     const promptY = top + innerHeight - (innerHeight * prompt) / trendMax;
     const completionY = top + innerHeight - (innerHeight * completion) / trendMax;
-    promptPoints.push({ x, y: promptY });
-    completionPoints.push({ x, y: completionY });
-  });
+    promptPoints.push({ x: left, y: promptY }, { x: width - rightPadding, y: promptY });
+    completionPoints.push({ x: left, y: completionY }, { x: width - rightPadding, y: completionY });
+  } else {
+    trendRows.forEach((row, index) => {
+      const x = left + (innerWidth * index) / len;
+      const prompt = Number(row.prompt_tokens || 0);
+      const completion = Number(row.completion_tokens || 0);
+      const promptY = top + innerHeight - (innerHeight * prompt) / trendMax;
+      const completionY = top + innerHeight - (innerHeight * completion) / trendMax;
+      promptPoints.push({ x, y: promptY });
+      completionPoints.push({ x, y: completionY });
+    });
+  }
   const promptLine = smoothPath(promptPoints);
   const completionLine = smoothPath(completionPoints);
   const baselineY = top + innerHeight;

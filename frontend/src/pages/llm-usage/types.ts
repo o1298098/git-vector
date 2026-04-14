@@ -15,6 +15,14 @@ export type DailyUsageRow = {
   total_tokens?: number;
 };
 
+export type HourlyUsageRow = {
+  hour: string;
+  calls?: number;
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+};
+
 export type UsageSummary = {
   days: number;
   totals: {
@@ -28,11 +36,12 @@ export type UsageSummary = {
   by_provider: UsageRow[];
   by_feature: UsageRow[];
   by_day: DailyUsageRow[];
+  by_hour?: HourlyUsageRow[];
 };
 
 export type Point = { x: number; y: number };
 
-export const DAY_OPTIONS = [7, 30, 90] as const;
+export const DAY_OPTIONS = [1, 7, 30, 90] as const;
 export const CHART_VIEW_WIDTH = 1000;
 export const CHART_LEFT_PADDING = 64;
 export const CHART_RIGHT_PADDING = 24;

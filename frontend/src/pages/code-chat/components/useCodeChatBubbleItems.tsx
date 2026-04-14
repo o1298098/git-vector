@@ -43,7 +43,7 @@ export function useCodeChatBubbleItems({
           key: turn.id,
           role: "user",
           content: turn.content,
-          className: "gv-code-chat-user-bubble",
+          className: `gv-code-chat-user-bubble gv-code-chat-turn-${turn.id}`,
           editable: {
             editing: editingUserId === turn.id,
             okText: t("chat.editSave"),
@@ -88,7 +88,7 @@ export function useCodeChatBubbleItems({
       return {
         key: turn.id,
         role: "ai",
-        className: "gv-code-chat-assistant-bubble",
+        className: `gv-code-chat-assistant-bubble gv-code-chat-turn-${turn.id}`,
         loading: pendingReply,
         footerPlacement: "outer-end",
         footer:

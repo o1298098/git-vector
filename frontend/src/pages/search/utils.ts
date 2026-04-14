@@ -24,3 +24,23 @@ export function formatMetaLine(meta: Record<string, unknown>, linesLabel: string
   }
   return parts.length ? parts.join(" · ") : null;
 }
+
+export function normalizeSourceUrl(sourceUrl?: string): string | undefined {
+  if (!sourceUrl) return undefined;
+  const trimmed = sourceUrl.trim();
+  if (!trimmed) return undefined;
+  try {
+    const url = new URL(trimmed);
+    // Handle common web URL patterns where `.git` from clone URL causes 404.
+    url.pathname = url.pathname
+      .replace(/\.git(?=\/-\/)/g, "")
+      .replace(/\.git(?=\/(?:blob|tree|raw|commit|pull|issues|wiki|actions|releases)\b)/g, "")
+      .replace(/\.git(?=\/?$)/g, "");
+    return url.toString();
+  } catch {
+    return trimmed
+      .replace(/\.git(?=\/-\/)/g, "")
+      .replace(/\.git(?=\/(?:blob|tree|raw|commit|pull|issues|wiki|actions|releases)\b)/g, "")
+      .replace(/\.git(?=\/?$)/g, "");
+  }
+}

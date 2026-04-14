@@ -38,7 +38,6 @@ export function Search() {
     setError(null);
     setLoading(true);
     setHasSearched(true);
-    setResults([]);
     try {
       const params = new URLSearchParams({ q: query.trim(), top_k: String(topK) });
       if (projectId.trim()) params.set("project_id", projectId.trim());

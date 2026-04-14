@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { SearchResultContent } from "@/components/SearchResultContent";
 import { type Hit } from "../types";
-import { formatMetaLine, formatRelevance } from "../utils";
+import { formatMetaLine, formatRelevance, normalizeSourceUrl } from "../utils";
 
 type SearchResultsPanelProps = {
   loading: boolean;
@@ -14,9 +14,40 @@ type SearchResultsPanelProps = {
   error: string | null;
 };
 
+function SearchResultsSkeleton() {
+  return (
+    <div className="space-y-4" aria-hidden>
+      {Array.from({ length: 3 }).map((_, index) => (
+        <Card key={index} className="min-w-0 overflow-hidden">
+          <CardHeader className="min-w-0 border-b bg-muted/20 py-2.5">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0 flex-1 space-y-2">
+                <div className="h-4 w-24 animate-pulse rounded bg-muted" />
+                <div className="h-3 w-3/4 animate-pulse rounded bg-muted" />
+              </div>
+              <div className="flex items-center gap-2">
+                <div className="h-3 w-16 animate-pulse rounded bg-muted" />
+                <div className="h-5 w-5 animate-pulse rounded bg-muted" />
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-2 pt-4">
+            <div className="h-3 w-full animate-pulse rounded bg-muted" />
+            <div className="h-3 w-[92%] animate-pulse rounded bg-muted" />
+            <div className="h-3 w-[88%] animate-pulse rounded bg-muted" />
+            <div className="h-3 w-[70%] animate-pulse rounded bg-muted" />
+          </CardContent>
+        </Card>
+      ))}
+    </div>
+  );
+}
+
 export function SearchResultsPanel({ loading, hasSearched, results, error }: SearchResultsPanelProps) {
   const { t } = useI18n();
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const showInitialSkeleton = loading && hasSearched && results.length === 0;
+  const showRefreshingOverlay = loading && hasSearched && results.length > 0;
 
   async function copyCitation(text: string, key: string) {
     try {
@@ -38,12 +69,10 @@ export function SearchResultsPanel({ loading, hasSearched, results, error }: Sea
         </Card>
       ) : null}
 
-      {loading && hasSearched ? (
-        <Card className="border-dashed">
-          <CardContent className="flex min-h-[min(40vh,16rem)] items-center justify-center text-muted-foreground">
-            <p className="text-sm">{t("search.searching")}</p>
-          </CardContent>
-        </Card>
+      {showInitialSkeleton ? (
+        <div role="status" aria-live="polite" aria-label={t("search.searching")}>
+          <SearchResultsSkeleton />
+        </div>
       ) : null}
 
       {hasSearched && !loading && results.length === 0 && !error ? (
@@ -55,16 +84,17 @@ export function SearchResultsPanel({ loading, hasSearched, results, error }: Sea
         </Card>
       ) : null}
 
-      {!loading && results.length > 0 ? (
-        <>
+      {results.length > 0 ? (
+        <div className="relative">
           <div className="flex flex-wrap items-baseline justify-between gap-2 border-b pb-2">
             <h2 className="text-lg font-semibold">{t("search.resultsTitle")}</h2>
             <span className="text-sm text-muted-foreground">{t("search.resultsLine", { n: String(results.length) })}</span>
           </div>
-          <ul className="space-y-4">
+          <ul className="space-y-4 pt-4">
             {results.map((result, index) => {
               const metadata = result.metadata && typeof result.metadata === "object" ? result.metadata : {};
               const metaLine = formatMetaLine(metadata, t("search.lines"));
+              const sourceUrl = normalizeSourceUrl(result.source_url);
               const copyKey = `${index}-${result.citation ?? ""}`;
               return (
                 <li key={index} className="min-w-0">
@@ -91,7 +121,7 @@ export function SearchResultsPanel({ loading, hasSearched, results, error }: Sea
                             {t("search.relevance")}{" "}
                             <span className="font-mono font-medium text-foreground">{formatRelevance(result)}</span>
                           </span>
-                          {result.source_url ? (
+                          {sourceUrl ? (
                             <Button
                               asChild
                               type="button"
@@ -100,7 +130,7 @@ export function SearchResultsPanel({ loading, hasSearched, results, error }: Sea
                               className="h-[22px] w-[22px] p-0 text-muted-foreground hover:bg-transparent hover:text-foreground"
                               title={t("search.openSource")}
                             >
-                              <a href={result.source_url} target="_blank" rel="noreferrer" aria-label={t("search.openSource")}>
+                              <a href={sourceUrl} target="_blank" rel="noreferrer" aria-label={t("search.openSource")}>
                                 <ExternalLink className="size-[14px]" />
                               </a>
                             </Button>
@@ -134,7 +164,15 @@ export function SearchResultsPanel({ loading, hasSearched, results, error }: Sea
               );
             })}
           </ul>
-        </>
+          {showRefreshingOverlay ? (
+            <div
+              role="status"
+              aria-live="polite"
+              aria-label={t("search.searching")}
+              className="pointer-events-none absolute inset-0 rounded-md bg-background/45 backdrop-blur-[1px]"
+            />
+          ) : null}
+        </div>
       ) : null}
     </section>
   );

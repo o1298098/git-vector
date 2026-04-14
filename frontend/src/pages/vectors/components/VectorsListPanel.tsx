@@ -26,6 +26,19 @@ type VectorsListPanelProps = {
   onNextPage: () => void;
 };
 
+function VectorsRowsSkeleton() {
+  return (
+    <ul className="divide-y" aria-hidden>
+      {Array.from({ length: 8 }).map((_, index) => (
+        <li key={index} className="px-3 py-2.5">
+          <div className="h-4 w-[85%] animate-pulse rounded bg-muted" />
+          <div className="mt-2 h-3 w-[60%] animate-pulse rounded bg-muted" />
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 export function VectorsListPanel({
   total,
   page,
@@ -45,6 +58,8 @@ export function VectorsListPanel({
   onNextPage,
 }: VectorsListPanelProps) {
   const { t } = useI18n();
+  const showInitialSkeleton = loading && rows.length === 0;
+  const showRefreshingOverlay = loading && rows.length > 0;
 
   return (
     <Card className="flex h-[min(84vh,860px)] flex-col">
@@ -73,9 +88,11 @@ export function VectorsListPanel({
         </div>
       </CardHeader>
       <CardContent className="flex min-h-0 flex-1 flex-col gap-4">
-        <div className="min-h-0 flex-1 overflow-auto rounded-md border bg-background">
-          {loading ? (
-            <p className="p-4 text-sm text-muted-foreground">{t("vectors.loading")}</p>
+        <div className="relative min-h-0 flex-1 overflow-auto rounded-md border bg-background">
+          {showInitialSkeleton ? (
+            <div role="status" aria-live="polite" aria-label={t("vectors.loading")} className="p-2">
+              <VectorsRowsSkeleton />
+            </div>
           ) : rows.length === 0 ? (
             <p className="p-4 text-sm text-muted-foreground">{t("vectors.empty")}</p>
           ) : (
@@ -94,6 +111,14 @@ export function VectorsListPanel({
               ))}
             </ul>
           )}
+          {showRefreshingOverlay ? (
+            <div
+              role="status"
+              aria-live="polite"
+              aria-label={t("vectors.loading")}
+              className="pointer-events-none absolute inset-0 bg-background/45 backdrop-blur-[1px]"
+            />
+          ) : null}
         </div>
         <div className="flex shrink-0 items-center justify-between">
           <span className="text-sm text-muted-foreground">{t("vectors.pageNav", { cur: String(page + 1), all: String(totalPages) })}</span>

@@ -9,6 +9,7 @@ export function Jobs() {
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(10);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [cancellingId, setCancellingId] = useState<string | null>(null);
   const [cancelError, setCancelError] = useState<string | null>(null);
@@ -19,25 +20,30 @@ export function Jobs() {
 
   const load = useCallback(async () => {
     setError(null);
-    const offset = page * pageSize;
-    const response = await apiFetch(`/api/index-jobs?limit=${pageSize}&offset=${offset}`);
-    if (!response.ok) {
-      let message = `HTTP ${response.status}`;
-      try {
-        const json = await response.json();
-        if (json?.detail) message = typeof json.detail === "string" ? json.detail : JSON.stringify(json.detail);
-      } catch {
-        /* ignore parse errors */
+    setLoading(true);
+    try {
+      const offset = page * pageSize;
+      const response = await apiFetch(`/api/index-jobs?limit=${pageSize}&offset=${offset}`);
+      if (!response.ok) {
+        let message = `HTTP ${response.status}`;
+        try {
+          const json = await response.json();
+          if (json?.detail) message = typeof json.detail === "string" ? json.detail : JSON.stringify(json.detail);
+        } catch {
+          /* ignore parse errors */
+        }
+        setError(message);
+        setJobs([]);
+        setTotal(0);
+        return;
       }
-      setError(message);
-      setJobs([]);
-      setTotal(0);
-      return;
+      const data = (await response.json()) as { total?: number; jobs: Job[] };
+      const totalCount = typeof data.total === "number" ? data.total : (data.jobs?.length ?? 0);
+      setTotal(totalCount);
+      setJobs(data.jobs ?? []);
+    } finally {
+      setLoading(false);
     }
-    const data = (await response.json()) as { total?: number; jobs: Job[] };
-    const totalCount = typeof data.total === "number" ? data.total : (data.jobs?.length ?? 0);
-    setTotal(totalCount);
-    setJobs(data.jobs ?? []);
   }, [page, pageSize]);
 
   useEffect(() => {
@@ -114,6 +120,7 @@ export function Jobs() {
       {retryError ? <p className="text-sm text-destructive">{retryError}</p> : null}
       <JobsTableCard
         jobs={jobs}
+        loading={loading}
         total={total}
         page={page}
         pageSize={pageSize}

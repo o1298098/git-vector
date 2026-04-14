@@ -10,6 +10,7 @@ import { computeTrendChart } from "./utils";
 export function LlmUsage() {
   const { t } = useI18n();
   const [days, setDays] = useState<number>(30);
+  const tzOffsetMinutes = useMemo(() => -new Date().getTimezoneOffset(), []);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<UsageSummary | null>(null);
@@ -18,7 +19,9 @@ export function LlmUsage() {
     setLoading(true);
     setError(null);
     try {
-      const result = await apiJson<UsageSummary>(`/api/admin/llm-usage?days=${days}`);
+      const result = await apiJson<UsageSummary>(
+        `/api/admin/llm-usage?days=${days}&tz_offset_minutes=${tzOffsetMinutes}`,
+      );
       setData(result);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : t("usage.loadFail"));
@@ -26,7 +29,7 @@ export function LlmUsage() {
     } finally {
       setLoading(false);
     }
-  }, [days, t]);
+  }, [days, t, tzOffsetMinutes]);
 
   useEffect(() => {
     void load();
@@ -46,7 +49,20 @@ export function LlmUsage() {
   );
   const providerRows = useMemo(() => data?.by_provider ?? [], [data?.by_provider]);
   const featureRows = useMemo(() => (data?.by_feature ?? []).slice(0, 10), [data?.by_feature]);
-  const trendRows = useMemo(() => data?.by_day ?? [], [data?.by_day]);
+  const trendMode = days === 1 ? "hour" : "day";
+  const trendRows = useMemo(
+    () =>
+      trendMode === "hour"
+        ? (data?.by_hour ?? []).map((row) => ({
+            day: row.hour,
+            calls: row.calls,
+            prompt_tokens: row.prompt_tokens,
+            completion_tokens: row.completion_tokens,
+            total_tokens: row.total_tokens,
+          }))
+        : (data?.by_day ?? []),
+    [data?.by_day, data?.by_hour, trendMode],
+  );
   const trendMax = useMemo(() => {
     let maxValue = 0;
     for (const row of trendRows) {
@@ -75,7 +91,7 @@ export function LlmUsage() {
           >
             {DAY_OPTIONS.map((option) => (
               <option key={option} value={option}>
-                {t("usage.days", { n: String(option) })}
+                {option === 1 ? t("usage.today") : t("usage.days", { n: String(option) })}
               </option>
             ))}
           </select>
@@ -86,7 +102,7 @@ export function LlmUsage() {
       <UsageSummaryCards totals={totals} />
 
       <div className="grid gap-6 lg:grid-cols-2">
-        <UsageTrendCard trendRows={trendRows} trendChart={trendChart} />
+        <UsageTrendCard trendRows={trendRows} trendMode={trendMode} trendChart={trendChart} />
         <UsageBreakdownCards hasData={!!data} providerRows={providerRows} featureRows={featureRows} />
       </div>
     </div>

@@ -53,13 +53,7 @@
   /* 代码问答：居中主栏（接近 ChatGPT 阅读宽度） */
   .gv-code-chat-thread {
     width: 100%;
-    max-width: 40rem;
-  }
-
-  @media (min-width: 1280px) {
-    .gv-code-chat-thread {
-      max-width: 44rem;
-    }
+    max-width: clamp(40rem, 46vw, 50rem);
   }
 
   .gv-code-chat-main {
@@ -476,12 +470,15 @@
 
 @layer base {
   /*
-   * 不使用 scrollbar-gutter: stable：与 Radix Dialog / react-remove-scroll 在弹层打开时
-   * 「保留滚动条占位 + padding-right」叠在一起，容易挤出横向溢出并在窗口右侧出现多余纵向滚动条。
-   * 横向溢出裁掉，纵向仍交给文档流；弹层由 remove-scroll 自行处理锁定。
+   * 搜索页加载骨架与结果态高度差异较大，可能触发页面纵向滚动条出现/消失，
+   * 从而导致顶栏横向“跳动”。这里固定保留纵向滚动槽位避免布局抖动。
+   *
+   * 继续避免使用 scrollbar-gutter: stable：与 Radix Dialog / react-remove-scroll 在弹层打开时
+   * 可能叠加 padding-right，造成额外横向溢出。
    */
   html {
     overflow-x: hidden;
+    overflow-y: auto;
   }
   * {
     @apply border-border;
@@ -532,6 +529,25 @@
 }
 
 .gv-vectors-plain-editor::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.gv-table-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: hsl(var(--border)) transparent;
+}
+
+.gv-table-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.gv-table-scroll::-webkit-scrollbar-thumb {
+  border-radius: 9999px;
+  background: hsl(var(--border));
+}
+
+.gv-table-scroll::-webkit-scrollbar-track {
   background: transparent;
 }
 
