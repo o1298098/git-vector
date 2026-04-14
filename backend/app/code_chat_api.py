@@ -23,12 +23,21 @@ router = APIRouter()
 MAX_CONTEXT_CHARS = 28_000
 MAX_CHUNK_CHARS = 8_000
 MAX_RETRIEVAL_QUERY_CHARS = 500
+MAX_HISTORY_TURNS = 16
+MAX_HISTORY_TURN_CHARS = 3_000
+MAX_HISTORY_CHARS = 10_000
+
+
+class CodeChatHistoryTurn(BaseModel):
+    role: str = Field(..., min_length=1, max_length=32)
+    content: str = Field(..., min_length=1, max_length=MAX_HISTORY_TURN_CHARS)
 
 
 class CodeChatBody(BaseModel):
     message: str = Field(..., min_length=1, max_length=8000)
     project_id: Optional[str] = None
     top_k: int = Field(12, ge=1, le=30)
+    history: list[CodeChatHistoryTurn] = Field(default_factory=list, max_length=MAX_HISTORY_TURNS)
 
 
 def _retrieval_rewrite_system(lang: str) -> str:
@@ -118,6 +127,42 @@ def _format_hit(i: int, content: str, meta: dict[str, Any]) -> str:
     return f"{head}\n{content.strip()}\n"
 
 
+def _normalize_history_turns(history: list[CodeChatHistoryTurn]) -> list[tuple[str, str]]:
+    """只保留 user/assistant 两类，按总长度裁剪，避免请求体过大。"""
+    kept: list[tuple[str, str]] = []
+    total = 0
+    for item in history:
+        role_raw = (item.role or "").strip().lower()
+        if role_raw not in ("user", "assistant"):
+            continue
+        content = (item.content or "").strip()
+        if not content:
+            continue
+        content = content[:MAX_HISTORY_TURN_CHARS]
+        part = f"{role_raw}:{content}\n"
+        if total + len(part) > MAX_HISTORY_CHARS:
+            continue
+        kept.append((role_raw, content))
+        total += len(part)
+    return kept
+
+
+def _history_block(lang: str, history: list[CodeChatHistoryTurn]) -> str:
+    normalized = _normalize_history_turns(history)
+    if not normalized:
+        return ""
+    lines = []
+    for role, content in normalized:
+        speaker = "用户" if role == "user" else "助手"
+        if (lang or "zh").lower().startswith("en"):
+            speaker = "User" if role == "user" else "Assistant"
+        lines.append(f"{speaker}:\n{content}")
+    joined = "\n\n".join(lines)
+    if (lang or "zh").lower().startswith("en"):
+        return f"Recent conversation context:\n{joined}"
+    return f"近期对话上下文：\n{joined}"
+
+
 def _code_chat_rag(
     body: CodeChatBody,
     client: LLMClient,
@@ -129,6 +174,7 @@ def _code_chat_rag(
     pid = (body.project_id or "").strip() or None
     lang = effective_content_language()
     retrieval_query = _rewrite_retrieval_query(client, msg, lang)
+    history_block = _history_block(lang, body.history)
 
     store = get_vector_store()
     results = store.query(text=retrieval_query, project_id=pid, top_k=body.top_k)
@@ -149,10 +195,20 @@ def _code_chat_rag(
 
     if parts:
         context_str = "\n---\n".join(parts)
-        user_payload = f"用户问题：\n{msg}\n\n---\n检索片段：\n{context_str}"
+        if (lang or "zh").lower().startswith("en"):
+            user_payload = (
+                (f"{history_block}\n\n---\n" if history_block else "")
+                + f"User question:\n{msg}\n\n---\nRetrieved snippets:\n{context_str}"
+            )
+        else:
+            user_payload = (
+                (f"{history_block}\n\n---\n" if history_block else "")
+                + f"用户问题：\n{msg}\n\n---\n检索片段：\n{context_str}"
+            )
     else:
         if (lang or "zh").lower().startswith("en"):
             user_payload = (
+                (f"{history_block}\n\n---\n" if history_block else "")
                 f"User question:\n{msg}\n\n"
                 f"Search query used for vector retrieval (may be LLM-rewritten):\n{retrieval_query}\n\n"
                 "Note: vector search returned no snippets from indexed documentation. "
@@ -161,6 +217,7 @@ def _code_chat_rag(
             )
         else:
             user_payload = (
+                (f"{history_block}\n\n---\n" if history_block else "")
                 f"用户问题：\n{msg}\n\n"
                 f"用于向量检索的查询语（可能经模型改写）：\n{retrieval_query}\n\n"
                 "说明：本次在已索引的代码说明中未检索到相关片段。请简要说明可能原因（如尚未索引、描述不匹配、"

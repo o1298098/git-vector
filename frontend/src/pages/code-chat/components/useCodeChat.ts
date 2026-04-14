@@ -14,6 +14,13 @@ import type { CodeChatProjectOption } from "./types";
 
 /** 流式「打字机」：与网络分包解耦，按固定节奏逐字（略加速追赶积压） */
 const STREAM_TYPING_TICK_MS = 26;
+const MAX_HISTORY_TURNS = 16;
+const MAX_HISTORY_CHARS = 10_000;
+
+type ChatHistoryTurnPayload = {
+  role: "user" | "assistant";
+  content: string;
+};
 
 export function useCodeChat() {
   const { t } = useI18n();
@@ -24,6 +31,23 @@ export function useCodeChat() {
   const [editingUserId, setEditingUserId] = useState<string | null>(null);
   const [projects, setProjects] = useState<CodeChatProjectOption[]>([]);
   const [projectsLoading, setProjectsLoading] = useState(true);
+
+  const buildHistoryPayload = useCallback((rawTurns: ChatTurn[]): ChatHistoryTurnPayload[] => {
+    const source = rawTurns.slice(-MAX_HISTORY_TURNS);
+    const normalized: ChatHistoryTurnPayload[] = [];
+    let totalChars = 0;
+    for (let i = source.length - 1; i >= 0; i -= 1) {
+      const turn = source[i];
+      if (turn.role !== "user" && turn.role !== "assistant") continue;
+      const content = (turn.content || "").trim();
+      if (!content) continue;
+      if (totalChars + content.length > MAX_HISTORY_CHARS) break;
+      normalized.push({ role: turn.role, content });
+      totalChars += content.length;
+    }
+    normalized.reverse();
+    return normalized;
+  }, []);
 
   const activeSession = useMemo(() => {
     const s = sessions.find((x) => x.id === activeId);
@@ -250,7 +274,7 @@ export function useCodeChat() {
   }, []);
 
   const streamAssistant = useCallback(
-    async (userMessage: string, assistantId: string) => {
+    async (userMessage: string, assistantId: string, historyTurns: ChatTurn[]) => {
       const trimmed = userMessage.trim();
       if (!trimmed) return;
       setLoading(true);
@@ -258,6 +282,7 @@ export function useCodeChat() {
         message: trimmed,
         project_id: projectId.trim() || null,
         top_k: topK,
+        history: buildHistoryPayload(historyTurns),
       });
       const aid = assistantId;
       try {
@@ -416,6 +441,7 @@ export function useCodeChat() {
       projectId,
       topK,
       t,
+      buildHistoryPayload,
       setTurns,
       resetStreamTyping,
       startStreamTyping,
@@ -432,10 +458,11 @@ export function useCodeChat() {
       setEditingUserId(null);
       const uid = randomId();
       const aid = randomId();
+      const historyBeforeSend = turns;
       setTurns((prev) => [...prev, { id: uid, role: "user", content: trimmed }]);
-      await streamAssistant(trimmed, aid);
+      await streamAssistant(trimmed, aid, historyBeforeSend);
     },
-    [loading, streamAssistant, setTurns],
+    [loading, streamAssistant, setTurns, turns],
   );
 
   const handleUserEditConfirm = useCallback(
@@ -443,12 +470,14 @@ export function useCodeChat() {
       const trimmed = (nextRaw || "").trim();
       setEditingUserId(null);
       if (!trimmed || loading) return;
+      let historyBeforeEditedMessage: ChatTurn[] = [];
       setTurns((prev) => {
         const i = prev.findIndex((x) => x.id === userTurnId);
         if (i < 0 || prev[i].role !== "user") return prev;
+        historyBeforeEditedMessage = prev.slice(0, i);
         return [...prev.slice(0, i), { ...prev[i], content: trimmed }];
       });
-      void streamAssistant(trimmed, randomId());
+      void streamAssistant(trimmed, randomId(), historyBeforeEditedMessage);
     },
     [loading, streamAssistant, setTurns],
   );
@@ -458,16 +487,18 @@ export function useCodeChat() {
       if (loading) return;
       setEditingUserId(null);
       let userMsg = "";
+      let historyBeforeUserMessage: ChatTurn[] = [];
       setTurns((prev) => {
         const j = prev.findIndex((x) => x.id === assistantTurnId);
         if (j <= 0) return prev;
         const u = prev[j - 1];
         if (u.role !== "user") return prev;
         userMsg = u.content.trim();
+        historyBeforeUserMessage = prev.slice(0, Math.max(0, j - 1));
         return prev.slice(0, j);
       });
       if (!userMsg) return;
-      void streamAssistant(userMsg, randomId());
+      void streamAssistant(userMsg, randomId(), historyBeforeUserMessage);
     },
     [loading, streamAssistant, setTurns],
   );
