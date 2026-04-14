@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Check, Copy, ExternalLink } from "lucide-react";
 import { useI18n } from "@/i18n/I18nContext";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
@@ -68,42 +69,59 @@ export function SearchResultsPanel({ loading, hasSearched, results, error }: Sea
               return (
                 <li key={index} className="min-w-0">
                   <Card className="min-w-0 overflow-hidden transition-shadow hover:shadow-md">
-                    <CardHeader className="min-w-0 space-y-2 border-b bg-muted/20 py-3">
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <span className="text-sm font-medium text-muted-foreground">
-                          {t("search.hitRank", { i: String(index + 1) })}
-                        </span>
-                        <span className="shrink-0 text-xs text-muted-foreground">
-                          {t("search.relevance")}{" "}
-                          <span className="font-mono font-medium text-foreground">{formatRelevance(result)}</span>
-                        </span>
+                    <CardHeader className="min-w-0 border-b bg-muted/20 py-2.5">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0 space-y-1">
+                          <span className="text-sm font-medium text-muted-foreground">
+                            {t("search.hitRank", { i: String(index + 1) })}
+                          </span>
+                          {metaLine ? (
+                            <p
+                              className="truncate text-xs font-mono text-primary/90"
+                              title={metaLine}
+                            >
+                              {metaLine}
+                            </p>
+                          ) : (
+                            <p className="h-4 text-xs" aria-hidden />
+                          )}
+                        </div>
+                        <div className="shrink-0 flex items-center gap-2">
+                          <span className="shrink-0 text-xs text-muted-foreground">
+                            {t("search.relevance")}{" "}
+                            <span className="font-mono font-medium text-foreground">{formatRelevance(result)}</span>
+                          </span>
+                          {result.source_url ? (
+                            <Button
+                              asChild
+                              type="button"
+                              size="sm"
+                              variant="ghost"
+                              className="h-[22px] w-[22px] p-0 text-muted-foreground hover:bg-transparent hover:text-foreground"
+                              title={t("search.openSource")}
+                            >
+                              <a href={result.source_url} target="_blank" rel="noreferrer" aria-label={t("search.openSource")}>
+                                <ExternalLink className="size-[14px]" />
+                              </a>
+                            </Button>
+                          ) : null}
+                          {result.citation ? (
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="ghost"
+                              className="h-[22px] w-[22px] p-0 text-muted-foreground hover:bg-transparent hover:text-foreground"
+                              onClick={() => void copyCitation(result.citation ?? "", copyKey)}
+                              title={copiedKey === copyKey ? t("search.copyCitationDone") : t("search.copyCitation")}
+                              aria-label={copiedKey === copyKey ? t("search.copyCitationDone") : t("search.copyCitation")}
+                            >
+                              {copiedKey === copyKey ? <Check className="size-[14px]" /> : <Copy className="size-[14px]" />}
+                            </Button>
+                          ) : null}
+                        </div>
                       </div>
-                      {metaLine ? (
-                        <p className="break-words text-xs font-mono text-primary/90 [overflow-wrap:anywhere]">{metaLine}</p>
-                      ) : null}
                     </CardHeader>
                     <CardContent className="min-w-0 space-y-3 pt-4 text-sm">
-                      <div className="flex flex-wrap items-center gap-2">
-                        {result.source_url ? (
-                          <Button asChild type="button" size="sm" variant="outline" className="h-7 px-2 text-xs">
-                            <a href={result.source_url} target="_blank" rel="noreferrer">
-                              {t("search.openSource")}
-                            </a>
-                          </Button>
-                        ) : null}
-                        {result.citation ? (
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="outline"
-                            className="h-7 px-2 text-xs"
-                            onClick={() => void copyCitation(result.citation ?? "", copyKey)}
-                            title={result.citation}
-                          >
-                            {copiedKey === copyKey ? t("search.copyCitationDone") : t("search.copyCitation")}
-                          </Button>
-                        ) : null}
-                      </div>
                       <SearchResultContent content={result.content} />
                       {Object.keys(metadata).length > 0 && !metaLine ? (
                         <pre className="max-h-40 overflow-auto rounded-md bg-muted/50 p-3 text-xs">

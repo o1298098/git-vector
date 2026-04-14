@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
+from functools import lru_cache
+from pathlib import Path
 from typing import Annotated, Any, Optional
 from urllib.parse import quote, urlparse
 
@@ -88,6 +91,7 @@ def _anchor_for_lines(host: str, start_line: int | None, end_line: int | None) -
 def _source_url_for_hit(
     raw_repo_url: str,
     project_id: str,
+    branch: str,
     path: str,
     start_line: int | None,
     end_line: int | None,
@@ -95,12 +99,13 @@ def _source_url_for_hit(
     base = _repo_url_for_browser(raw_repo_url, project_id)
     if not base or not path:
         return None
+    b = quote((branch or "main").strip(), safe="._-+")
     p = quote(path.strip().lstrip("/"), safe="/._-+")
     host = (urlparse(base).hostname or "").lower()
     anchor = _anchor_for_lines(host, start_line, end_line)
     if "gitlab" in host:
-        return f"{base}/-/blob/main/{p}{anchor}"
-    return f"{base}/blob/main/{p}{anchor}"
+        return f"{base}/-/blob/{b}/{p}{anchor}"
+    return f"{base}/blob/{b}/{p}{anchor}"
 
 
 def _int_or_none(v: Any) -> int | None:
@@ -122,10 +127,55 @@ def _citation_for_hit(project_id: str, path: str, start_line: int | None, end_li
     return f"{project_id}:{path}{rng}".strip(":")
 
 
+def _repo_cache_dir(project_id: str) -> Path:
+    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in (project_id or ""))
+    return settings.repos_path / safe
+
+
+@lru_cache(maxsize=256)
+def _default_branch_for_project(project_id: str) -> str:
+    pid = (project_id or "").strip()
+    if not pid:
+        return "main"
+    repo_dir = _repo_cache_dir(pid)
+    if not repo_dir.is_dir():
+        return "main"
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(repo_dir), "symbolic-ref", "refs/remotes/origin/HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+        ref = (r.stdout or "").strip()
+        if r.returncode == 0 and ref.startswith("refs/remotes/origin/"):
+            br = ref.removeprefix("refs/remotes/origin/").strip()
+            if br:
+                return br
+    except Exception:
+        pass
+    for fallback in ("main", "master"):
+        try:
+            r = subprocess.run(
+                ["git", "-C", str(repo_dir), "rev-parse", "--verify", f"origin/{fallback}"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                check=False,
+            )
+            if r.returncode == 0:
+                return fallback
+        except Exception:
+            continue
+    return "main"
+
+
 def _enrich_search_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
     from app.job_queue import get_job_store
 
     repo_urls = get_job_store().latest_repo_url_by_project_id()
+    branch_by_project: dict[str, str] = {}
     enriched: list[dict[str, Any]] = []
     for item in results:
         row = dict(item or {})
@@ -134,7 +184,16 @@ def _enrich_search_results(results: list[dict[str, Any]]) -> list[dict[str, Any]
         path = str(meta.get("path") or meta.get("file") or "").strip()
         start_line = _int_or_none(meta.get("start_line"))
         end_line = _int_or_none(meta.get("end_line"))
-        source_url = _source_url_for_hit(repo_urls.get(project_id, ""), project_id, path, start_line, end_line)
+        if project_id not in branch_by_project:
+            branch_by_project[project_id] = _default_branch_for_project(project_id)
+        source_url = _source_url_for_hit(
+            repo_urls.get(project_id, ""),
+            project_id,
+            branch_by_project.get(project_id, "main"),
+            path,
+            start_line,
+            end_line,
+        )
         citation = _citation_for_hit(project_id, path, start_line, end_line)
         if source_url:
             row["source_url"] = source_url
