@@ -23,6 +23,27 @@ Admin UI (`/admin/`): **Overview** with indexed projects, quick links, and **Sem
 
 ---
 
+## 30-second quick start
+
+```bash
+cp .env.example .env
+docker compose up -d
+curl "http://localhost:8000/health"
+```
+
+Then open:
+
+- `http://localhost:8000/docs` for OpenAPI
+- `http://localhost:8000/admin/` for admin UI
+
+Minimum required settings before first useful indexing:
+
+- **Embedding runtime**: `OLLAMA_BASE_URL` and `EMBED_MODEL`
+- **Private HTTPS repos (optional)**: `GIT_HTTPS_TOKEN` or `GITLAB_ACCESS_TOKEN`
+- **Webhook signature verification (recommended for non-LAN)**: set each platform secret
+
+---
+
 ## Repository layout
 
 | Path | Purpose |
@@ -197,7 +218,18 @@ Response shape:
 ### Projects / index status
 
 - **GET** `/api/projects`: list indexed projects and doc counts; each item includes `project_name` (display name, may be `null`); optional `q` (matches `project_id` or `project_name` substring), `limit`/`offset` pagination (omit `limit` for full list, backward compatible)
+- **DELETE** `/api/projects/{project_id}`: remove project vectors and metadata
+- **POST** `/api/projects/{project_id}/reindex`: enqueue a rebuild for the project
+- **GET** `/api/projects/{project_id}/vectors`: inspect stored vectors with pagination
 - **GET** `/api/project/index-status?project_id=xxx`: check whether a project is indexed (`indexed/doc_count`)
+
+### Admin / auth / operations APIs
+
+- **Auth UI**: `GET /api/auth/status`, `POST /api/auth/login`, `GET /api/auth/me`
+- **Admin settings**: `GET /api/admin/settings`
+- **Storage insight**: `GET /api/admin/storage`
+- **LLM usage metrics**: `GET /api/admin/llm-usage`
+- **Code chat feedback**: `POST /api/code-chat/feedback`
 
 ### Static Wiki (MkDocs / Starlight / VitePress)
 
@@ -217,6 +249,8 @@ Indexing runs through a **serial queue** (avoids concurrent writes to Chroma / l
 - **List jobs**: `GET /api/index-jobs?limit=50&offset=0` (optional `status` / `project_id` filters; response `total` is the full match count, `jobs` is the current page, `limit`/`offset` echo the request)
 - **Get one job**: `GET /api/index-jobs/{job_id}`
 - **Cancel a job**: `POST /api/index-jobs/{job_id}/cancel` (supports `queued` and `running`; running jobs are terminated)
+- **Retry a failed/cancelled job**: `POST /api/index-jobs/{job_id}/retry`
+- **Precheck a repo before enqueue**: `POST /api/index-jobs/precheck`
 
 Key fields:
 
@@ -229,6 +263,16 @@ Key fields:
 
 ## Environment variables
 
+### Required for baseline indexing
+
+| Variable | Description |
+|------|------|
+| `DATA_DIR` | Data directory (default `./data`; commonly `/data` in containers) |
+| `OLLAMA_BASE_URL` | Ollama base URL (default `http://localhost:11434` in code; Docker examples often use `http://host.docker.internal:11434`) |
+| `EMBED_MODEL` | Ollama **embeddings** model name (must exist in Ollama). **If you change the model, clear `DATA_DIR/chroma` and re-index** (dimension changes). |
+
+### Common optional settings
+
 | Variable | Description |
 |------|------|
 | `GITLAB_WEBHOOK_SECRET` | GitLab webhook secret (if unset, verification skipped) |
@@ -238,6 +282,14 @@ Key fields:
 | `GIT_HTTPS_TOKEN` | HTTPS clone token; **overrides** `GITLAB_ACCESS_TOKEN` when set |
 | `GIT_HTTPS_USERNAME` | HTTPS basic username for clone (`oauth2` default; GitHub: `x-access-token`) |
 | `GITLAB_EXTERNAL_URL` | Optional base URL for “open repo” links when no `repo_url` is stored (GitLab-style paths) |
+| `WIKI_BACKEND` | `mkdocs` (default) / `starlight` / `vitepress` (last two need Node.js + npm; Docker image includes them). |
+| `WIKI_ENABLED` | `false` / `0` disables wiki generation after describe (default: on). |
+| `SKIP_WIKI` | `1` skips wiki for a run without changing `WIKI_ENABLED`. |
+
+### Optional LLM providers
+
+| Variable | Description |
+|------|------|
 | `DIFY_API_KEY` | Dify API key (used to generate one-line chunk descriptions) |
 | `DIFY_BASE_URL` | Dify API base URL (default `https://api.dify.ai/v1`) |
 | `AZURE_OPENAI_API_KEY` | Azure OpenAI key |
@@ -247,17 +299,16 @@ Key fields:
 | `OPENAI_API_KEY` | OpenAI (or compatible) key |
 | `OPENAI_BASE_URL` | Compatible base URL (default `https://api.openai.com/v1`) |
 | `OPENAI_MODEL` | Model/deployment name |
-| `DATA_DIR` | Data directory (default `./data`; commonly `/data` in containers) |
+
+### Advanced controls
+
+| Variable | Description |
+|------|------|
 | `REPOS_CACHE_MAX_GB` | Soft cap on total size (GiB) of `DATA_DIR/repos` mirrors; evicts **other** projects’ dirs LRU-style before clone/pull; `0` disables |
 | `REPOS_CACHE_MAX_COUNT` | Max number of cached repo dirs under `DATA_DIR/repos` (including the current job); evicts **other** projects LRU-style; `0` disables |
-| `OLLAMA_BASE_URL` | Ollama base URL (default `http://localhost:11434` in code; Docker examples often use `http://host.docker.internal:11434`) |
-| `EMBED_MODEL` | Ollama **embeddings** model name (must exist in Ollama). **If you change the model, clear `DATA_DIR/chroma` and re-index** (dimension changes). |
 | `SKIP_VECTOR_STORE` | If `1`, runs clone/parse/(optional LLM) but skips Chroma upsert (useful for local validation). |
 | `INCREMENTAL_INDEX` | Set to `1` / `true` to enable incremental vector indexing (default off). Requires `project_index.sqlite3` to already have `last_indexed_commit` and vectors to use stable `gv2_` IDs; otherwise it automatically falls back to full indexing. |
 | `FORCE_FULL_INDEX` | Force a full vector reindex for a run (overrides incremental mode). |
-| `WIKI_BACKEND` | `mkdocs` (default) / `starlight` / `vitepress` (last two need Node.js + npm; Docker image includes them). |
-| `WIKI_ENABLED` | `false` / `0` disables wiki generation after describe (default: on). |
-| `SKIP_WIKI` | `1` skips wiki for a run without changing `WIKI_ENABLED`. |
 | `WIKI_KEEP_WORK` | `1` keeps intermediate `wiki_work/<project_id>` for debugging. |
 | `WIKI_MAX_FILE_PAGES` | Max per-path file pages (default `5000`). |
 | `WIKI_SYMBOL_ROWS_PER_FILE` | Max symbol table rows per Markdown file (default `4000`). |
@@ -308,6 +359,16 @@ Notes:
 - When started from `backend/`, the default `DATA_DIR=./data` resolves to `backend/data/`; set `DATA_DIR=../data` in `.env` if you want data at the repository root.
 - On startup the service attempts to start the indexing queue worker; vector store/embedding objects are typically loaded on first index or first query.
 - If you see `No function-level chunks parsed ...; using file-level fallback`, parsing produced zero function chunks and the service fell back to file-level chunks (retrieval still works, but granularity is coarser).
+
+---
+
+## README maintenance rule
+
+When adding or changing any public API, queue behavior, environment variable, or admin page:
+
+- Update **both** `README.md` and `README.zh-CN.md` in the same PR.
+- Keep the same section order and endpoint coverage in both files.
+- Ensure at least one runnable curl example still works after the change.
 
 ---
 
