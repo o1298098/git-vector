@@ -457,8 +457,8 @@ export function Settings() {
                     ) : null}
                     {storage ? (
                       <div className="space-y-5">
-                        <div className="space-y-2">
-                          <p className="text-sm font-medium">{t("settings.storageVolumeTitle")}</p>
+                        <div className="space-y-3 rounded-md border border-border/70 bg-background/80 p-3">
+                          <p className="text-sm font-medium text-foreground">{t("settings.storageVolumeTitle")}</p>
                           <p className="text-xs text-muted-foreground">
                             {t("settings.storageVolumeUsed", {
                               used: formatBytes(storage.volume.used_bytes),
@@ -466,7 +466,7 @@ export function Settings() {
                               free: formatBytes(storage.volume.free_bytes),
                             })}
                           </p>
-                          <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
+                          <div className="h-2.5 w-full overflow-hidden rounded-full bg-muted">
                             <div
                               className="h-full rounded-full bg-primary/80"
                               style={{
@@ -474,13 +474,8 @@ export function Settings() {
                               }}
                             />
                           </div>
-                        </div>
-                        <div className="space-y-1">
-                          <p className="text-sm font-medium">{t("settings.storageDataDir")}</p>
-                          <p className="break-all font-mono text-xs text-muted-foreground">{storage.data_dir}</p>
-                        </div>
-                        <div className="space-y-3">
-                          <p className="text-sm font-medium">{t("settings.storageFocusTitle")}</p>
+                          <div className="border-t border-border/60 pt-3">
+                            <p className="mb-2 text-sm font-medium">{t("settings.storageFocusTitle")}</p>
                           {(() => {
                             const items = [
                               {
@@ -504,14 +499,20 @@ export function Settings() {
                             ];
                             const total = items.reduce((sum, it) => sum + Math.max(0, Number(it.size) || 0), 0);
                             return (
-                              <div className="space-y-3 rounded-md border border-border/70 bg-background/80 p-3">
+                              <div className="space-y-3">
                                 <div className="h-2.5 w-full overflow-hidden rounded-full bg-muted">
-                                  {items.map((item) => {
+                                  {items.map((item, idx) => {
                                     const width = total > 0 ? (Math.max(0, Number(item.size) || 0) / total) * 100 : 0;
+                                    const radiusClass =
+                                      idx === 0
+                                        ? "rounded-l-full"
+                                        : idx === items.length - 1
+                                          ? "rounded-r-full"
+                                          : "";
                                     return (
                                       <div
                                         key={item.key}
-                                        className={`h-full ${item.tone} inline-block align-top`}
+                                        className={`inline-block h-full ${radiusClass} ${item.tone} align-top`}
                                         style={{ width: `${Math.max(0, Math.min(100, width))}%` }}
                                         title={`${item.label}: ${formatBytes(item.size)}`}
                                       />
@@ -534,72 +535,72 @@ export function Settings() {
                               </div>
                             );
                           })()}
+                          </div>
                         </div>
                         <div className="space-y-3">
                           <div className="space-y-1">
                             <p className="text-sm font-medium">{t("settings.storageBreakdownTitle")}</p>
-                            <p className="text-xs text-muted-foreground">{t("settings.storageBreakdownHint")}</p>
                           </div>
-                          <div className="space-y-4 rounded-md border border-border/80 bg-muted/10 p-3 sm:p-4">
-                            {storage.breakdown.map((row) => {
-                              const pct = sharePercent(row.size_bytes, storage.data_dir_total_bytes);
-                              const label = t(STORAGE_LABEL_KEYS[row.key] ?? `settings.storageCat.${row.key}`);
-                              return (
-                                <div key={row.key} className="space-y-1.5">
-                                  <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-                                    <div className="min-w-0 flex-1 text-sm font-medium leading-snug text-foreground">
-                                      <span>{label}</span>
-                                      {!row.exists ? (
-                                        <span className="ml-2 text-xs font-normal text-muted-foreground">({t("settings.storageNo")})</span>
-                                      ) : null}
+                          <details className="rounded-md border border-border/80 bg-muted/10 p-3 sm:p-4">
+                            <summary className="cursor-pointer text-sm font-medium text-foreground">
+                              {t("settings.storageDetailsToggle")}
+                            </summary>
+                            <p className="mt-1 text-xs text-muted-foreground">{t("settings.storageDetailsDesc")}</p>
+                            <div className="mt-4 space-y-4">
+                              {storage.breakdown.map((row) => {
+                                const pct = sharePercent(row.size_bytes, storage.data_dir_total_bytes);
+                                const label = t(STORAGE_LABEL_KEYS[row.key] ?? `settings.storageCat.${row.key}`);
+                                return (
+                                  <div key={row.key} className="space-y-1.5">
+                                    <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+                                      <div className="min-w-0 flex-1 text-sm font-medium leading-snug text-foreground">
+                                        <span>{label}</span>
+                                        {!row.exists ? (
+                                          <span className="ml-2 text-xs font-normal text-muted-foreground">({t("settings.storageNo")})</span>
+                                        ) : null}
+                                      </div>
+                                      <div className="shrink-0 text-right text-sm tabular-nums text-muted-foreground">
+                                        <span className="text-foreground">{formatBytes(row.size_bytes)}</span>
+                                        <span className="ml-2 text-xs">{t("settings.storagePct", { pct: String(pct) })}</span>
+                                      </div>
                                     </div>
-                                    <div className="shrink-0 text-right text-sm tabular-nums text-muted-foreground">
-                                      <span className="text-foreground">{formatBytes(row.size_bytes)}</span>
-                                      <span className="ml-2 text-xs">{t("settings.storagePct", { pct: String(pct) })}</span>
+                                    <div className="h-2.5 w-full overflow-hidden rounded-full bg-muted" title={row.path}>
+                                      <div
+                                        className="h-full rounded-full bg-primary/75 transition-[width] duration-300"
+                                        style={{ width: `${pct}%` }}
+                                      />
+                                    </div>
+                                    <p className="truncate font-mono text-[11px] text-muted-foreground" title={row.path}>
+                                      {row.path}
+                                    </p>
+                                  </div>
+                                );
+                              })}
+                              {(() => {
+                                const pct = sharePercent(storage.other_bytes, storage.data_dir_total_bytes);
+                                return (
+                                  <div className="space-y-1.5 border-t border-border/60 pt-4">
+                                    <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+                                      <div className="min-w-0 flex-1 text-sm font-medium leading-snug text-foreground">
+                                        {t("settings.storageOther")}
+                                      </div>
+                                      <div className="shrink-0 text-right text-sm tabular-nums text-muted-foreground">
+                                        <span className="text-foreground">{formatBytes(storage.other_bytes)}</span>
+                                        <span className="ml-2 text-xs">{t("settings.storagePct", { pct: String(pct) })}</span>
+                                      </div>
+                                    </div>
+                                    <div className="h-2.5 w-full overflow-hidden rounded-full bg-muted" title={storage.data_dir}>
+                                      <div className="h-full rounded-full bg-orange-500/55 dark:bg-orange-400/45" style={{ width: `${pct}%` }} />
                                     </div>
                                   </div>
-                                  <div
-                                    className="h-2.5 w-full overflow-hidden rounded-full bg-muted"
-                                    title={row.path}
-                                  >
-                                    <div
-                                      className="h-full rounded-full bg-primary/75 transition-[width] duration-300"
-                                      style={{ width: `${pct}%` }}
-                                    />
-                                  </div>
-                                  <p className="truncate font-mono text-[11px] text-muted-foreground" title={row.path}>
-                                    {row.path}
-                                  </p>
-                                </div>
-                              );
-                            })}
-                            {(() => {
-                              const pct = sharePercent(storage.other_bytes, storage.data_dir_total_bytes);
-                              return (
-                                <div className="space-y-1.5 border-t border-border/60 pt-4">
-                                  <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-                                    <div className="min-w-0 flex-1 text-sm font-medium leading-snug text-foreground">
-                                      {t("settings.storageOther")}
-                                    </div>
-                                    <div className="shrink-0 text-right text-sm tabular-nums text-muted-foreground">
-                                      <span className="text-foreground">{formatBytes(storage.other_bytes)}</span>
-                                      <span className="ml-2 text-xs">{t("settings.storagePct", { pct: String(pct) })}</span>
-                                    </div>
-                                  </div>
-                                  <div className="h-2.5 w-full overflow-hidden rounded-full bg-muted" title={storage.data_dir}>
-                                    <div
-                                      className="h-full rounded-full bg-orange-500/55 dark:bg-orange-400/45"
-                                      style={{ width: `${pct}%` }}
-                                    />
-                                  </div>
-                                </div>
-                              );
-                            })()}
-                          </div>
+                                );
+                              })()}
+                            </div>
+                          </details>
                           <p className="text-xs text-muted-foreground">
-                            {t("settings.storageDataTotal")}: <span className="font-medium text-foreground">{formatBytes(storage.data_dir_total_bytes)}</span>
-                          </p>
-                          <p className="text-xs text-muted-foreground">
+                            {t("settings.storageDataTotal")}:{" "}
+                            <span className="font-medium text-foreground">{formatBytes(storage.data_dir_total_bytes)}</span>
+                            {" · "}
                             {t("settings.storageRepoPolicy", {
                               dirs: String(storage.repo_cache.cached_repo_dirs),
                               maxGb: storage.repo_cache.max_gb > 0 ? String(storage.repo_cache.max_gb) : "0",
