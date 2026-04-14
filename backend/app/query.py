@@ -53,9 +53,21 @@ def _repo_url_for_browser(raw: str, project_id: str) -> str | None:
     """
     将任务里保存的 clone URL 转为浏览器可打开的 HTTPS 地址；失败时用 GITLAB_EXTERNAL_URL + path 兜底。
     """
+    def _normalize_repo_path(path: str) -> str:
+        return (path or "").rstrip("/").removesuffix(".git")
+
     u = (raw or "").strip()
     if u.startswith(("http://", "https://")):
-        return u.split("#", 1)[0].rstrip("/")
+        cleaned = _normalize_repo_path(u.split("#", 1)[0])
+        try:
+            pr = urlparse(cleaned)
+            # clone URL 常见为 .../<repo>.git，这里统一转成可浏览仓库地址
+            path = _normalize_repo_path(pr.path or "")
+            if pr.scheme and pr.netloc and path:
+                return f"{pr.scheme}://{pr.netloc}{path}".rstrip("/")
+        except Exception:
+            pass
+        return cleaned
     if u.startswith("git@"):
         rest = u[4:]
         if ":" in rest:
@@ -67,7 +79,7 @@ def _repo_url_for_browser(raw: str, project_id: str) -> str | None:
         try:
             pr = urlparse(u)
             if pr.hostname and pr.path:
-                path = pr.path.removesuffix(".git")
+                path = _normalize_repo_path(pr.path)
                 return f"https://{pr.hostname}{path}".rstrip("/")
         except Exception:
             pass
