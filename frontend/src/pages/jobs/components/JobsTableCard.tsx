@@ -76,7 +76,7 @@ export function JobsTableCard({
       <CardContent className="space-y-3 p-4">
         <div className="relative">
           <div className="w-full overflow-x-auto">
-            <Table className="!w-[75.5rem] max-w-none table-fixed text-xs">
+            <Table className="!w-full min-w-[75.5rem] table-fixed text-xs">
               <colgroup>
                 <col style={{ width: "19rem" }} />
                 <col style={{ width: "20rem" }} />

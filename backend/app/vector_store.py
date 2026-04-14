@@ -67,6 +67,58 @@ def is_legacy_vector_id(vid: str) -> bool:
     return bool(_LEGACY_VECTOR_ID.match(s))
 
 
+def _dedupe_upsert_rows(
+    ids: list[str],
+    docs: list[str],
+    metas: list[dict[str, Any]],
+    embs: list[list[float]],
+    *,
+    project_id: str,
+    mode: str,
+) -> tuple[list[str], list[str], list[dict[str, Any]], list[list[float]]]:
+    """
+    Chroma upsert 要求一次请求内 ids 唯一。
+    这里做请求内去重（保留首条），并输出可定位日志。
+    """
+    seen: set[str] = set()
+    keep_idx: list[int] = []
+    dup_logs: list[str] = []
+    dup_count = 0
+    for i, vid in enumerate(ids):
+        s = str(vid or "").strip()
+        if not s:
+            continue
+        if s in seen:
+            dup_count += 1
+            m = metas[i] if i < len(metas) else {}
+            dup_logs.append(
+                f"{s} path={normalize_index_path(str((m or {}).get('path') or ''))!r} "
+                f"name={str((m or {}).get('name') or '')!r} "
+                f"kind={str((m or {}).get('kind') or '')!r} "
+                f"lines={str((m or {}).get('start_line') or '?')}-{str((m or {}).get('end_line') or '?')}"
+            )
+            continue
+        seen.add(s)
+        keep_idx.append(i)
+
+    if dup_count > 0:
+        preview = "; ".join(dup_logs[:12])
+        logger.warning(
+            "Deduplicated %s duplicate vector ids before %s upsert for project %s. examples: %s",
+            dup_count,
+            mode,
+            project_id,
+            preview,
+        )
+
+    return (
+        [ids[i] for i in keep_idx],
+        [docs[i] for i in keep_idx],
+        [metas[i] for i in keep_idx],
+        [embs[i] for i in keep_idx],
+    )
+
+
 def _extract_llm_description_from_document(
     doc: str,
     *,
@@ -724,6 +776,21 @@ class VectorStore:
             )
             return
 
+        kept_ids, kept_docs, kept_metas, kept_embs = _dedupe_upsert_rows(
+            kept_ids,
+            kept_docs,
+            kept_metas,
+            kept_embs,
+            project_id=project_id,
+            mode="full",
+        )
+        if not kept_ids:
+            logger.error(
+                "All successful embeddings were deduplicated away for project %s (full), skip upsert.",
+                project_id,
+            )
+            return
+
         # 全量：先删该项目全部向量，再写入（稳定 id 与旧 :: 序号 id 不混用）
         try:
             self.collection.delete(where={"project_id": project_id})
@@ -801,6 +868,21 @@ class VectorStore:
 
         if not kept_ids:
             logger.error("No successful embeddings for project %s (incremental), skip upsert.", project_id)
+            return
+
+        kept_ids, kept_docs, kept_metas, kept_embs = _dedupe_upsert_rows(
+            kept_ids,
+            kept_docs,
+            kept_metas,
+            kept_embs,
+            project_id=project_id,
+            mode="incremental",
+        )
+        if not kept_ids:
+            logger.error(
+                "All successful embeddings were deduplicated away for project %s (incremental), skip upsert.",
+                project_id,
+            )
             return
 
         self.collection.upsert(
