@@ -33,6 +33,14 @@ def effective_embed_model() -> str:
     return _str_from_override("embed_model", settings.embed_model)
 
 
+def effective_embed_provider() -> str:
+    """ollama | openai"""
+    raw = _str_from_override("embed_provider", settings.embed_provider or "ollama").strip().lower().replace("-", "_")
+    if raw in ("openai", "openai_compat"):
+        return "openai"
+    return "ollama"
+
+
 def effective_ollama_base_url() -> str:
     v = _str_from_override("ollama_base_url", settings.ollama_base_url or "http://localhost:11434")
     return (v or "").strip() or (settings.ollama_base_url or "http://localhost:11434")
@@ -54,12 +62,38 @@ def effective_openai_api_key() -> str:
     return _str_from_override("openai_api_key", settings.openai_api_key or "")
 
 
+def effective_openai_embed_base_url() -> str:
+    v = _str_from_override(
+        "openai_embed_base_url",
+        settings.openai_embed_base_url or "https://api.openai.com/v1",
+    )
+    return (v or "").strip() or (settings.openai_embed_base_url or "https://api.openai.com/v1")
+
+
+def effective_openai_embed_api_key() -> str:
+    return _str_from_override("openai_embed_api_key", settings.openai_embed_api_key or "")
+
+
 def effective_dify_base_url() -> str:
     return _str_from_override("dify_base_url", settings.dify_base_url or "")
 
 
 def effective_dify_api_key() -> str:
     return _str_from_override("dify_api_key", settings.dify_api_key or "")
+
+
+def effective_llm_provider() -> str:
+    """dify | azure_openai | openai（默认 openai；历史 auto 等同 openai）"""
+    raw = _str_from_override("llm_provider", settings.llm_provider or "openai").strip().lower().replace("-", "_")
+    if raw in ("auto", "legacy", ""):
+        return "openai"
+    if raw == "dify":
+        return "dify"
+    if raw in ("azure_openai", "azure"):
+        return "azure_openai"
+    if raw in ("openai", "openai_compat"):
+        return "openai"
+    return "openai"
 
 
 def effective_azure_openai_api_key() -> str:
@@ -164,13 +198,23 @@ def snapshot_for_api() -> dict[str, Any]:
 
     return {
         "embed_model": {"value": effective_embed_model(), "source": field_source("embed_model")},
+        "embed_provider": {"value": effective_embed_provider(), "source": field_source("embed_provider")},
         "ollama_base_url": {"value": effective_ollama_base_url(), "source": field_source("ollama_base_url")},
         "ollama_api_key": {"value": sec_effective(effective_ollama_api_key, "ollama_api_key"), "source": field_source("ollama_api_key")},
         "openai_model": {"value": effective_openai_model(), "source": field_source("openai_model")},
         "openai_base_url": {"value": effective_openai_base_url(), "source": field_source("openai_base_url")},
         "openai_api_key": {"value": sec_effective(effective_openai_api_key, "openai_api_key"), "source": field_source("openai_api_key")},
+        "openai_embed_base_url": {
+            "value": effective_openai_embed_base_url(),
+            "source": field_source("openai_embed_base_url"),
+        },
+        "openai_embed_api_key": {
+            "value": sec_effective(effective_openai_embed_api_key, "openai_embed_api_key"),
+            "source": field_source("openai_embed_api_key"),
+        },
         "dify_base_url": {"value": effective_dify_base_url(), "source": field_source("dify_base_url")},
         "dify_api_key": {"value": sec_effective(effective_dify_api_key, "dify_api_key"), "source": field_source("dify_api_key")},
+        "llm_provider": {"value": effective_llm_provider(), "source": field_source("llm_provider")},
         "azure_openai_api_key": {
             "value": sec_effective(effective_azure_openai_api_key, "azure_openai_api_key"),
             "source": field_source("azure_openai_api_key"),
@@ -214,13 +258,17 @@ def env_defaults_for_api() -> dict[str, Any]:
 
     return {
         "embed_model": s.embed_model,
+        "embed_provider": str(s.embed_provider or "ollama"),
         "ollama_base_url": s.ollama_base_url,
         "ollama_api_key": mask("ollama_api_key"),
         "openai_model": s.openai_model,
         "openai_base_url": s.openai_base_url,
         "openai_api_key": mask("openai_api_key"),
+        "openai_embed_base_url": s.openai_embed_base_url,
+        "openai_embed_api_key": mask("openai_embed_api_key"),
         "dify_base_url": s.dify_base_url,
         "dify_api_key": mask("dify_api_key"),
+        "llm_provider": str(s.llm_provider or "openai"),
         "azure_openai_api_key": mask("azure_openai_api_key"),
         "azure_openai_endpoint": s.azure_openai_endpoint,
         "azure_openai_version": s.azure_openai_version,

@@ -47,6 +47,24 @@ def _normalize_patch_item(key: str, raw: Any) -> Any:
         if s not in ("mkdocs", "starlight", "vitepress"):
             raise ValueError("wiki_backend 须为 mkdocs、starlight 或 vitepress")
         return s
+    if key == "llm_provider":
+        s = str(raw).strip().lower().replace("-", "_")
+        if s in ("auto", "legacy", ""):
+            return "openai"
+        if s == "dify":
+            return "dify"
+        if s in ("azure_openai", "azure"):
+            return "azure_openai"
+        if s in ("openai", "openai_compat"):
+            return "openai"
+        raise ValueError("llm_provider 须为 dify、azure_openai 或 openai")
+    if key == "embed_provider":
+        s = str(raw).strip().lower().replace("-", "_")
+        if s in ("openai", "openai_compat"):
+            return "openai"
+        if s in ("ollama", ""):
+            return "ollama"
+        raise ValueError("embed_provider 须为 ollama 或 openai")
     if key == "content_language":
         s = str(raw).strip().lower()
         if s not in ("zh", "en"):
@@ -66,6 +84,8 @@ def _normalize_patch_item(key: str, raw: Any) -> Any:
         "openai_model",
         "openai_base_url",
         "openai_api_key",
+        "openai_embed_base_url",
+        "openai_embed_api_key",
         "dify_base_url",
         "dify_api_key",
         "azure_openai_api_key",
@@ -83,7 +103,16 @@ def _normalize_patch_item(key: str, raw: Any) -> Any:
         if key == "ollama_base_url" and s == "":
             # 允许在 UI 中清空地址来回退环境变量。
             return None
-        if key in ("ollama_api_key", "openai_api_key", "dify_api_key", "azure_openai_api_key", "gitlab_access_token"):
+        if key == "openai_embed_base_url" and s == "":
+            return None
+        if key in (
+            "ollama_api_key",
+            "openai_api_key",
+            "openai_embed_api_key",
+            "dify_api_key",
+            "azure_openai_api_key",
+            "gitlab_access_token",
+        ):
             if s == "***":
                 raise ValueError("请勿将掩码 *** 作为密钥提交")
         return s

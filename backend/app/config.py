@@ -36,9 +36,14 @@ class Settings(BaseSettings):
     content_language: str = "zh"
     dify_api_key: str = ""
     dify_base_url: str = "https://api.dify.ai/v1"
+    # LLM 供应商：dify | azure_openai | openai（仅使用所选供应商）
+    llm_provider: str = "openai"
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
     openai_model: str = "gpt-4o-mini"  # OpenAI 为模型名；Azure 填部署名
+    # 嵌入用 OpenAI 兼容接口（可与上方 LLM 的 OPENAI_* 指向不同服务商）
+    openai_embed_base_url: str = "https://api.openai.com/v1"
+    openai_embed_api_key: str = ""
     # Azure OpenAI（优先于 OPENAI_* 使用，需同时填 endpoint + key + version + deployment）
     azure_openai_api_key: str = ""
     azure_openai_endpoint: str = ""
@@ -49,7 +54,9 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434"
     # Ollama 访问密钥（若接入反向代理或网关可配置）
     ollama_api_key: str = ""
-    # 文本嵌入模型（需为 fastembed TextEmbedding 支持列表中的模型，如 intfloat/multilingual-e5-large）
+    # 嵌入供应商：ollama | openai（OpenAI 使用 OPENAI_EMBED_BASE_URL / OPENAI_EMBED_API_KEY）
+    embed_provider: str = "ollama"
+    # 嵌入模型名：Ollama 下为 Ollama 模型名；OpenAI 下为 embeddings 模型名（如 text-embedding-3-small）
     embed_model: str = "intfloat/multilingual-e5-large"
     # embedding 文本最大字符数（超长时截断，避免上下文窗口报错）
     embed_max_chars: int = 30000
@@ -89,6 +96,29 @@ class Settings(BaseSettings):
     def _normalize_content_language(cls, v: object) -> str:
         s = str(v or "zh").strip().lower()
         return "en" if s.startswith("en") else "zh"
+
+    @field_validator("embed_provider", mode="before")
+    @classmethod
+    def _normalize_embed_provider(cls, v: object) -> str:
+        s = str(v or "ollama").strip().lower().replace("-", "_")
+        if s in ("openai", "openai_compat"):
+            return "openai"
+        return "ollama"
+
+    @field_validator("llm_provider", mode="before")
+    @classmethod
+    def _normalize_llm_provider(cls, v: object) -> str:
+        s = str(v or "openai").strip().lower().replace("-", "_")
+        # 历史值 auto 视为 openai
+        if s in ("auto", "legacy", ""):
+            return "openai"
+        if s == "dify":
+            return "dify"
+        if s in ("azure_openai", "azure"):
+            return "azure_openai"
+        if s in ("openai", "openai_compat"):
+            return "openai"
+        return "openai"
 
     @field_validator("wiki_backend", mode="before")
     @classmethod
