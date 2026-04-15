@@ -44,6 +44,7 @@ from app.effective_settings import (
 logger = logging.getLogger(__name__)
 COLLECTION_NAME = "gitlab_code_docs"
 _chroma_client: chromadb.PersistentClient | None = None
+_chroma_init_lock = threading.Lock()
 _project_index_db_lock = threading.Lock()
 
 # 旧版向量 id：`{project_id}::{从 0 起的序号}`；新版稳定 id：`gv2_` + sha256 十六进制
@@ -547,14 +548,15 @@ def _scan_all_project_docs_from_vector_store(collection: Any) -> dict[str, int]:
 
 def _get_chroma() -> chromadb.PersistentClient:
     global _chroma_client
-    if _chroma_client is None:
-        path = str(settings.chroma_path)
-        settings.chroma_path.mkdir(parents=True, exist_ok=True)
-        _chroma_client = chromadb.PersistentClient(
-            path=path,
-            settings=ChromaSettings(anonymized_telemetry=False),
-        )
-    return _chroma_client
+    with _chroma_init_lock:
+        if _chroma_client is None:
+            path = str(settings.chroma_path)
+            settings.chroma_path.mkdir(parents=True, exist_ok=True)
+            _chroma_client = chromadb.PersistentClient(
+                path=path,
+                settings=ChromaSettings(anonymized_telemetry=False),
+            )
+        return _chroma_client
 
 
 def _embed_ollama(texts: list[str], max_chars: int) -> list[tuple[int, list[float]]]:
@@ -740,6 +742,24 @@ def precheck_embedding_connectivity() -> tuple[bool, str]:
 
 class VectorStore:
     def __init__(self):
+        self._chrom_lock = threading.RLock()
+        self.client = _get_chroma()
+        self.collection = self.client.get_or_create_collection(
+            name=COLLECTION_NAME,
+            metadata={"description": "GitLab project code descriptions"},
+        )
+
+    def _recreate_persistent_chroma_client(self) -> None:
+        """
+        在已持有 ``self._chrom_lock`` 时调用。
+
+        Chroma 0.4.x 在同一 PersistentClient 内对集合做 delete / 大批量 upsert 后，
+        内存中的 ANN 索引有时与持久化数据脱节，表现为 ``collection.query`` 长期返回空、
+        只能走关键词兜底；重启进程会新建客户端从而恢复。此处等价于「对该单例重新打开库」。
+        """
+        global _chroma_client
+        with _chroma_init_lock:
+            _chroma_client = None
         self.client = _get_chroma()
         self.collection = self.client.get_or_create_collection(
             name=COLLECTION_NAME,
@@ -765,7 +785,8 @@ class VectorStore:
             return cached
 
         try:
-            project_stats = _scan_all_project_docs_from_vector_store(self.collection)
+            with self._chrom_lock:
+                project_stats = _scan_all_project_docs_from_vector_store(self.collection)
             _replace_project_index_in_db(project_stats)
         except Exception as e:  # noqa: S110
             logger.error("Backfill project_index from vector store failed: %s", e)
@@ -807,11 +828,12 @@ class VectorStore:
             return {"project_id": project_id, "indexed": False, "doc_count": 0}
 
         try:
-            probe = self.collection.get(
-                where={"project_id": pid},
-                limit=1,
-                include=[],
-            )
+            with self._chrom_lock:
+                probe = self.collection.get(
+                    where={"project_id": pid},
+                    limit=1,
+                    include=[],
+                )
         except Exception as e:  # noqa: S110
             logger.error("get_project_index_status probe failed for %s: %s", pid, e)
             return {"project_id": pid, "indexed": False, "doc_count": 0}
@@ -821,8 +843,9 @@ class VectorStore:
             return {"project_id": pid, "indexed": False, "doc_count": 0}
 
         try:
-            full = self.collection.get(where={"project_id": pid}, include=[])
-            doc_count = len(full.get("ids") or [])
+            with self._chrom_lock:
+                full = self.collection.get(where={"project_id": pid}, include=[])
+                doc_count = len(full.get("ids") or [])
         except Exception as e:  # noqa: S110
             logger.error("get_project_index_status count failed for %s: %s", pid, e)
             return {"project_id": pid, "indexed": True, "doc_count": 0}
@@ -838,17 +861,19 @@ class VectorStore:
         pid = str(project_id).strip()
         if not pid:
             raise ValueError("project_id 不能为空")
-        doc_count = 0
-        try:
-            full = self.collection.get(where={"project_id": pid}, include=[])
-            doc_count = len(full.get("ids") or [])
-        except Exception as e:  # noqa: S110
-            logger.warning("purge_project: count failed for %s: %s", pid, e)
         had_row = _project_index_row_exists(pid)
-        try:
-            self.collection.delete(where={"project_id": pid})
-        except Exception as e:  # noqa: S110
-            logger.warning("purge_project: chroma delete failed for %s: %s", pid, e)
+        with self._chrom_lock:
+            doc_count = 0
+            try:
+                full = self.collection.get(where={"project_id": pid}, include=[])
+                doc_count = len(full.get("ids") or [])
+            except Exception as e:  # noqa: S110
+                logger.warning("purge_project: count failed for %s: %s", pid, e)
+            try:
+                self.collection.delete(where={"project_id": pid})
+            except Exception as e:  # noqa: S110
+                logger.warning("purge_project: chroma delete failed for %s: %s", pid, e)
+            self._recreate_persistent_chroma_client()
         _delete_project_index_row(pid)
         return {
             "project_id": pid,
@@ -882,10 +907,11 @@ class VectorStore:
         if not pid:
             return False
         try:
-            probe = self.collection.get(where={"project_id": pid}, limit=5, include=[])
-            for vid in probe.get("ids") or []:
-                if is_legacy_vector_id(str(vid)):
-                    return True
+            with self._chrom_lock:
+                probe = self.collection.get(where={"project_id": pid}, limit=5, include=[])
+                for vid in probe.get("ids") or []:
+                    if is_legacy_vector_id(str(vid)):
+                        return True
         except Exception as e:  # noqa: S110
             logger.warning("project_has_legacy_vector_ids probe failed for %s: %s", pid, e)
         return False
@@ -902,28 +928,30 @@ class VectorStore:
         if not want:
             return 0
         ids_to_del: list[str] = []
-        try:
-            chunk = self.collection.get(
-                where={"project_id": pid},
-                include=["metadatas"],
-                limit=100_000,
-            )
-        except TypeError:
-            chunk = self.collection.get(where={"project_id": pid}, include=["metadatas"])
-        ids = chunk.get("ids") or []
-        metas = chunk.get("metadatas") or []
-        for vid, meta in zip(ids, metas):
-            p = normalize_index_path(str((meta or {}).get("path") or ""))
-            if p in want:
-                ids_to_del.append(str(vid))
-        if not ids_to_del:
-            return 0
-        try:
-            self.collection.delete(ids=ids_to_del)
-        except Exception as e:  # noqa: S110
-            logger.warning("delete_vectors_for_paths delete failed for %s: %s", pid, e)
-            return 0
-        logger.info("Deleted %s vectors for project %s (path-based incremental)", len(ids_to_del), pid)
+        with self._chrom_lock:
+            try:
+                chunk = self.collection.get(
+                    where={"project_id": pid},
+                    include=["metadatas"],
+                    limit=100_000,
+                )
+            except TypeError:
+                chunk = self.collection.get(where={"project_id": pid}, include=["metadatas"])
+            ids = chunk.get("ids") or []
+            metas = chunk.get("metadatas") or []
+            for vid, meta in zip(ids, metas):
+                p = normalize_index_path(str((meta or {}).get("path") or ""))
+                if p in want:
+                    ids_to_del.append(str(vid))
+            if not ids_to_del:
+                return 0
+            try:
+                self.collection.delete(ids=ids_to_del)
+            except Exception as e:  # noqa: S110
+                logger.warning("delete_vectors_for_paths delete failed for %s: %s", pid, e)
+                return 0
+            logger.info("Deleted %s vectors for project %s (path-based incremental)", len(ids_to_del), pid)
+            self._recreate_persistent_chroma_client()
         return len(ids_to_del)
 
     def count_project_documents(self, project_id: str) -> int:
@@ -931,8 +959,9 @@ class VectorStore:
         if not pid:
             return 0
         try:
-            full = self.collection.get(where={"project_id": pid}, include=[])
-            return len(full.get("ids") or [])
+            with self._chrom_lock:
+                full = self.collection.get(where={"project_id": pid}, include=[])
+                return len(full.get("ids") or [])
         except Exception as e:  # noqa: S110
             logger.warning("count_project_documents failed for %s: %s", pid, e)
             return 0
@@ -947,13 +976,15 @@ class VectorStore:
             return {}
         out: dict[str, str] = {}
         try:
-            rows = self.collection.get(
-                where={"project_id": pid},
-                include=["documents", "metadatas"],
-                limit=100_000,
-            )
-        except TypeError:
-            rows = self.collection.get(where={"project_id": pid}, include=["documents", "metadatas"])
+            with self._chrom_lock:
+                try:
+                    rows = self.collection.get(
+                        where={"project_id": pid},
+                        include=["documents", "metadatas"],
+                        limit=100_000,
+                    )
+                except TypeError:
+                    rows = self.collection.get(where={"project_id": pid}, include=["documents", "metadatas"])
         except Exception as e:  # noqa: S110
             logger.warning("get_project_llm_descriptions failed for %s: %s", pid, e)
             return {}
@@ -1049,33 +1080,35 @@ class VectorStore:
             raise RuntimeError("EMBEDDING_UNAVAILABLE: dedup removed all vectors for full upsert")
 
         # 全量：先删该项目全部向量，再写入（稳定 id 与旧 :: 序号 id 不混用）
-        try:
-            self.collection.delete(where={"project_id": project_id})
-        except Exception as e:  # noqa: S110
-            logger.warning("Delete old vectors failed for project %s: %s", project_id, e)
+        with self._chrom_lock:
+            try:
+                self.collection.delete(where={"project_id": project_id})
+            except Exception as e:  # noqa: S110
+                logger.warning("Delete old vectors failed for project %s: %s", project_id, e)
 
-        self.collection.upsert(
-            ids=kept_ids,
-            embeddings=kept_embs,
-            documents=kept_docs,
-            metadatas=kept_metas,
-        )
-        logger.info("Upserted %s chunks for project %s (full)", len(kept_ids), project_id)
+            self.collection.upsert(
+                ids=kept_ids,
+                embeddings=kept_embs,
+                documents=kept_docs,
+                metadatas=kept_metas,
+            )
+            logger.info("Upserted %s chunks for project %s (full)", len(kept_ids), project_id)
 
-        # 探测实际写入数量，写入缓存，避免 delete/upsert 部分失败导致统计不一致。
-        try:
-            full = self.collection.get(where={"project_id": project_id}, include=[])
-            doc_count = len(full.get("ids") or [])
-        except Exception as e:  # noqa: S110
-            logger.warning("Failed to probe doc_count after upsert for %s: %s", project_id, e)
-            doc_count = len(kept_ids)
-        _upsert_project_index_in_db(
-            project_id,
-            doc_count,
-            project_name,
-            last_indexed_commit=last_indexed_commit,
-            last_embed_model=last_embed_model,
-        )
+            # 探测实际写入数量，写入缓存，避免 delete/upsert 部分失败导致统计不一致。
+            try:
+                full = self.collection.get(where={"project_id": project_id}, include=[])
+                doc_count = len(full.get("ids") or [])
+            except Exception as e:  # noqa: S110
+                logger.warning("Failed to probe doc_count after upsert for %s: %s", project_id, e)
+                doc_count = len(kept_ids)
+            _upsert_project_index_in_db(
+                project_id,
+                doc_count,
+                project_name,
+                last_indexed_commit=last_indexed_commit,
+                last_embed_model=last_embed_model,
+            )
+            self._recreate_persistent_chroma_client()
         return {
             "attempted": len(chunks),
             "embedded": len(kept_ids),
@@ -1148,62 +1181,43 @@ class VectorStore:
             )
             raise RuntimeError("EMBEDDING_UNAVAILABLE: dedup removed all vectors for incremental upsert")
 
-        self.collection.upsert(
-            ids=kept_ids,
-            embeddings=kept_embs,
-            documents=kept_docs,
-            metadatas=kept_metas,
-        )
-        logger.info("Incrementally upserted %s chunks for project %s", len(kept_ids), project_id)
+        with self._chrom_lock:
+            self.collection.upsert(
+                ids=kept_ids,
+                embeddings=kept_embs,
+                documents=kept_docs,
+                metadatas=kept_metas,
+            )
+            logger.info("Incrementally upserted %s chunks for project %s", len(kept_ids), project_id)
 
-        try:
-            full = self.collection.get(where={"project_id": project_id}, include=[])
-            doc_count = len(full.get("ids") or [])
-        except Exception as e:  # noqa: S110
-            logger.warning("Failed to probe doc_count after incremental upsert for %s: %s", project_id, e)
-            doc_count = 0
-        _upsert_project_index_in_db(
-            project_id,
-            doc_count,
-            project_name,
-            last_indexed_commit=last_indexed_commit,
-            last_embed_model=last_embed_model,
-        )
+            try:
+                full = self.collection.get(where={"project_id": project_id}, include=[])
+                doc_count = len(full.get("ids") or [])
+            except Exception as e:  # noqa: S110
+                logger.warning("Failed to probe doc_count after incremental upsert for %s: %s", project_id, e)
+                doc_count = 0
+            _upsert_project_index_in_db(
+                project_id,
+                doc_count,
+                project_name,
+                last_indexed_commit=last_indexed_commit,
+                last_embed_model=last_embed_model,
+            )
+            self._recreate_persistent_chroma_client()
         return {
             "attempted": len(chunks),
             "embedded": len(kept_ids),
             "status": "ok" if len(kept_ids) == len(chunks) else "partial",
         }
 
-    def query(
+    def _query_chroma_locked(
         self,
+        query_emb: list[float],
         text: str,
-        project_id: str | None = None,
-        top_k: int = 10,
+        project_id: str | None,
+        top_k: int,
     ) -> list[dict[str, Any]]:
-        # 查询时加 query 前缀；embedding 故障必须显式返回错误，避免“无结果”假象。
-        try:
-            emb_with_idx = _embed([text], prefix="query: ")
-        except Exception as e:  # noqa: S110
-            logger.error("Embedding failed for query %r: %s", text[:200], e)
-            raise_app_error(
-                status_code=503,
-                code="EMBEDDING_UNAVAILABLE",
-                message="向量检索暂时不可用",
-                hint="请稍后重试，或检查 Embedding 服务状态与模型配置。",
-                retryable=True,
-            )
-        if not emb_with_idx:
-            logger.error("Embedding returned empty list for query %r", text[:200])
-            raise_app_error(
-                status_code=503,
-                code="EMBEDDING_UNAVAILABLE",
-                message="向量检索暂时不可用",
-                hint="Embedding 服务未返回有效向量，请稍后重试。",
-                retryable=True,
-            )
-        # 只有一条 query 文本，这里取第一条成功的向量
-        query_emb = emb_with_idx[0][1]
+        """在已持有 ``_chrom_lock`` 的前提下执行 Chroma query / 兜底扫描。"""
         emb = [query_emb]
         where = {"project_id": project_id} if project_id else None
         results = self.collection.query(
@@ -1212,7 +1226,7 @@ class VectorStore:
             where=where,
             include=["documents", "metadatas", "distances"],
         )
-        out = []
+        out: list[dict[str, Any]] = []
         tokens = _query_tokens_for_boost(text)
         docs = (results.get("documents") or [[]])[0]
         metas = (results.get("metadatas") or [[]])[0]
@@ -1364,6 +1378,38 @@ class VectorStore:
                     logger.warning("Query fallback get() failed for %s: %s", pid, e)
         return out
 
+    def query(
+        self,
+        text: str,
+        project_id: str | None = None,
+        top_k: int = 10,
+    ) -> list[dict[str, Any]]:
+        # 查询时加 query 前缀；embedding 故障必须显式返回错误，避免“无结果”假象。
+        try:
+            emb_with_idx = _embed([text], prefix="query: ")
+        except Exception as e:  # noqa: S110
+            logger.error("Embedding failed for query %r: %s", text[:200], e)
+            raise_app_error(
+                status_code=503,
+                code="EMBEDDING_UNAVAILABLE",
+                message="向量检索暂时不可用",
+                hint="请稍后重试，或检查 Embedding 服务状态与模型配置。",
+                retryable=True,
+            )
+        if not emb_with_idx:
+            logger.error("Embedding returned empty list for query %r", text[:200])
+            raise_app_error(
+                status_code=503,
+                code="EMBEDDING_UNAVAILABLE",
+                message="向量检索暂时不可用",
+                hint="Embedding 服务未返回有效向量，请稍后重试。",
+                retryable=True,
+            )
+        # 只有一条 query 文本，这里取第一条成功的向量
+        query_emb = emb_with_idx[0][1]
+        with self._chrom_lock:
+            return self._query_chroma_locked(query_emb, text, project_id, top_k)
+
     def list_project_vectors(
         self,
         project_id: str,
@@ -1379,64 +1425,65 @@ class VectorStore:
         off = max(0, int(offset))
         needle = (q or "").strip().lower()
 
-        if not needle:
-            total_raw = self.collection.get(where={"project_id": pid}, include=[])
-            total = len(total_raw.get("ids") or [])
-            rows = self.collection.get(
+        with self._chrom_lock:
+            if not needle:
+                total_raw = self.collection.get(where={"project_id": pid}, include=[])
+                total = len(total_raw.get("ids") or [])
+                rows = self.collection.get(
+                    where={"project_id": pid},
+                    include=["documents", "metadatas"],
+                    limit=lim,
+                    offset=off,
+                )
+                ids = rows.get("ids") or []
+                docs = rows.get("documents") or []
+                metas = rows.get("metadatas") or []
+                items: list[dict[str, Any]] = []
+                for vid, doc, meta in zip(ids, docs, metas):
+                    items.append(
+                        {
+                            "id": str(vid),
+                            "content": str(doc or ""),
+                            "metadata": meta or {},
+                        }
+                    )
+                return {"total": total, "limit": lim, "offset": off, "items": items}
+
+            # 关键词搜索：在项目内做子串匹配（id/path/name/content/metadata），再分页
+            all_rows = self.collection.get(
                 where={"project_id": pid},
                 include=["documents", "metadatas"],
-                limit=lim,
-                offset=off,
             )
-            ids = rows.get("ids") or []
-            docs = rows.get("documents") or []
-            metas = rows.get("metadatas") or []
-            items: list[dict[str, Any]] = []
+            ids = all_rows.get("ids") or []
+            docs = all_rows.get("documents") or []
+            metas = all_rows.get("metadatas") or []
+
+            matched: list[dict[str, Any]] = []
             for vid, doc, meta in zip(ids, docs, metas):
-                items.append(
-                    {
-                        "id": str(vid),
-                        "content": str(doc or ""),
-                        "metadata": meta or {},
-                    }
-                )
-            return {"total": total, "limit": lim, "offset": off, "items": items}
+                m = meta or {}
+                path = str(m.get("path") or m.get("file") or "")
+                name = str(m.get("name") or "")
+                hay = " ".join(
+                    [
+                        str(vid or ""),
+                        path,
+                        name,
+                        str(doc or ""),
+                        json.dumps(m, ensure_ascii=False, default=str),
+                    ]
+                ).lower()
+                if needle in hay:
+                    matched.append(
+                        {
+                            "id": str(vid),
+                            "content": str(doc or ""),
+                            "metadata": m,
+                        }
+                    )
 
-        # 关键词搜索：在项目内做子串匹配（id/path/name/content/metadata），再分页
-        all_rows = self.collection.get(
-            where={"project_id": pid},
-            include=["documents", "metadatas"],
-        )
-        ids = all_rows.get("ids") or []
-        docs = all_rows.get("documents") or []
-        metas = all_rows.get("metadatas") or []
-
-        matched: list[dict[str, Any]] = []
-        for vid, doc, meta in zip(ids, docs, metas):
-            m = meta or {}
-            path = str(m.get("path") or m.get("file") or "")
-            name = str(m.get("name") or "")
-            hay = " ".join(
-                [
-                    str(vid or ""),
-                    path,
-                    name,
-                    str(doc or ""),
-                    json.dumps(m, ensure_ascii=False, default=str),
-                ]
-            ).lower()
-            if needle in hay:
-                matched.append(
-                    {
-                        "id": str(vid),
-                        "content": str(doc or ""),
-                        "metadata": m,
-                    }
-                )
-
-        total = len(matched)
-        page = matched[off : off + lim]
-        return {"total": total, "limit": lim, "offset": off, "items": page}
+            total = len(matched)
+            page = matched[off : off + lim]
+            return {"total": total, "limit": lim, "offset": off, "items": page}
 
     def update_project_vector(
         self,
@@ -1453,26 +1500,29 @@ class VectorStore:
         if not vid:
             raise ValueError("vector_id 不能为空")
 
-        existing = self.collection.get(ids=[vid], include=["metadatas"])
-        existing_ids = existing.get("ids") or []
-        if not existing_ids:
-            raise ValueError("向量条目不存在")
-        existing_meta = (existing.get("metadatas") or [{}])[0] or {}
-        existing_pid = str(existing_meta.get("project_id") or "").strip()
-        if existing_pid and existing_pid != pid:
-            raise ValueError("向量条目不属于该项目")
+        with self._chrom_lock:
+            existing = self.collection.get(ids=[vid], include=["metadatas"])
+            existing_ids = existing.get("ids") or []
+            if not existing_ids:
+                raise ValueError("向量条目不存在")
+            existing_meta = (existing.get("metadatas") or [{}])[0] or {}
+            existing_pid = str(existing_meta.get("project_id") or "").strip()
+            if existing_pid and existing_pid != pid:
+                raise ValueError("向量条目不属于该项目")
 
         text = str(content or "")
         clean_meta = self._sanitize_metadata(metadata or {})
         clean_meta["project_id"] = pid
         emb_with_idx = _embed([text], prefix="passage: ")
         emb = emb_with_idx[0][1]
-        self.collection.upsert(
-            ids=[vid],
-            embeddings=[emb],
-            documents=[text],
-            metadatas=[clean_meta],
-        )
+        with self._chrom_lock:
+            self.collection.upsert(
+                ids=[vid],
+                embeddings=[emb],
+                documents=[text],
+                metadatas=[clean_meta],
+            )
+            self._recreate_persistent_chroma_client()
         return {"id": vid, "project_id": pid}
 
 
