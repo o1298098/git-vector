@@ -40,6 +40,14 @@ class UpdateVectorBody(BaseModel):
     metadata: dict[str, Any]
 
 
+class UpdateProjectDisplayNameBody(BaseModel):
+    project_name: str = Field(
+        "",
+        max_length=200,
+        description="项目展示名称；空字符串表示清除自定义名称并回退到任务记录中的名称",
+    )
+
+
 @router.post("/query")
 def query(body: QueryBody):
     """语义检索：根据问题在已索引的项目功能说明中检索，供 Dify 或前端调用。"""
@@ -282,6 +290,36 @@ def list_projects(
             "projects": page,
         }
     return {"total": total, "projects": projects}
+
+
+@router.patch("/projects/{project_id:path}")
+async def update_project_display_name(
+    project_id: str,
+    body: UpdateProjectDisplayNameBody,
+    _user: Annotated[Optional[str], Depends(require_ui_session)],
+):
+    """
+    更新项目展示名称（写入 project_index 与该项目下全部索引任务行）。
+
+    - 与 ``GET /api/projects`` 使用相同的 ``project_id``（可含 ``/``）。
+    - 空字符串会清空自定义展示名；概览列表将回退为「最近一次任务」中的名称。
+    - 已生成的 Wiki 站点标题不会自动重建，需重新索引后才会更新。
+    """
+    from app.job_queue import get_job_store
+    from app.vector_store import get_vector_store
+
+    pid = str(project_id or "").strip()
+    if not pid:
+        raise HTTPException(status_code=400, detail="project_id 不能为空")
+    pname = (body.project_name or "").strip()[:200]
+
+    store = get_job_store()
+    vstore = get_vector_store()
+    jobs_n = await asyncio.to_thread(store.update_project_name_for_project, pid, pname)
+    idx_ok = await asyncio.to_thread(vstore.set_project_display_name, pid, pname)
+    if jobs_n == 0 and not idx_ok:
+        raise HTTPException(status_code=404, detail="未找到该项目")
+    return {"ok": True, "project_id": pid, "project_name": pname or None}
 
 
 @router.delete("/projects/{project_id:path}")

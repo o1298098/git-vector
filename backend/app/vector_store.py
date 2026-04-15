@@ -538,6 +538,27 @@ class VectorStore:
 
         return _read_project_index_from_db()
 
+    def set_project_display_name(self, project_id: str, project_name: str) -> bool:
+        """仅更新 project_index 中的展示名，不改变 doc_count；无对应行则返回 False。"""
+        pid = str(project_id or "").strip()
+        if not pid:
+            return False
+        pname = (project_name or "").strip()
+        now = _utc_now_iso()
+        db_path = _project_index_db_path()
+        with _project_index_db_lock:
+            conn = sqlite3.connect(db_path, check_same_thread=False)
+            try:
+                _init_project_index_db(conn)
+                cur = conn.execute(
+                    "UPDATE project_index SET project_name=?, updated_at=? WHERE project_id=?",
+                    (pname, now, pid),
+                )
+                conn.commit()
+                return int(cur.rowcount or 0) > 0
+            finally:
+                conn.close()
+
     def get_project_index_status(self, project_id: str) -> dict[str, Any]:
         """
         查询指定 project_id 是否已在向量库中建立索引（已成功写入至少一条向量）。

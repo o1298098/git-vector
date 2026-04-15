@@ -18,8 +18,11 @@ export function Dashboard() {
   const [error, setError] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [reindexingId, setReindexingId] = useState<string | null>(null);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<ProjectRow | null>(null);
   const [reindexTarget, setReindexTarget] = useState<ProjectRow | null>(null);
+  const [renameTarget, setRenameTarget] = useState<ProjectRow | null>(null);
+  const [renameInput, setRenameInput] = useState("");
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize) || 1);
 
@@ -82,6 +85,23 @@ export function Dashboard() {
     }
   }
 
+  async function performRename(project: ProjectRow) {
+    setRenamingId(project.project_id);
+    setError(null);
+    try {
+      await apiJson<{ ok?: boolean }>(`/api/projects/${encodeURIComponent(project.project_id)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ project_name: renameInput.trim() }),
+      });
+      setRenameTarget(null);
+      await load();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : t("dashboard.renameFail"));
+    } finally {
+      setRenamingId(null);
+    }
+  }
+
   async function performReindex(project: ProjectRow) {
     setReindexingId(project.project_id);
     setError(null);
@@ -118,20 +138,31 @@ export function Dashboard() {
         debouncedQ={debouncedQ}
         deletingId={deletingId}
         reindexingId={reindexingId}
+        renamingId={renamingId}
+        renameTargetId={renameTarget?.project_id ?? null}
         onSearchInputChange={setSearchInput}
         onPageSizeChange={onPageSizeChange}
         onPrevPage={() => setPage((currentPage) => Math.max(0, currentPage - 1))}
         onNextPage={() => setPage((currentPage) => currentPage + 1)}
         onReindexClick={setReindexTarget}
         onDeleteClick={setDeleteTarget}
+        onRenameClick={(project) => {
+          setRenameInput((project.project_name ?? "").trim());
+          setRenameTarget(project);
+        }}
       />
       <DashboardDialogs
         reindexTarget={reindexTarget}
         deleteTarget={deleteTarget}
+        renameTarget={renameTarget}
+        renameInput={renameInput}
         reindexingId={reindexingId}
         deletingId={deletingId}
+        renamingId={renamingId}
+        onRenameInputChange={setRenameInput}
         onCloseReindexDialog={() => setReindexTarget(null)}
         onCloseDeleteDialog={() => setDeleteTarget(null)}
+        onCloseRenameDialog={() => setRenameTarget(null)}
         onConfirmReindex={(target) => {
           setReindexTarget(null);
           void performReindex(target);
@@ -139,6 +170,9 @@ export function Dashboard() {
         onConfirmDelete={(target) => {
           setDeleteTarget(null);
           void performDelete(target);
+        }}
+        onConfirmRename={(target) => {
+          void performRename(target);
         }}
       />
     </div>

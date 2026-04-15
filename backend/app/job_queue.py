@@ -385,6 +385,20 @@ class JobStore:
             rows = self._conn.execute(sql, tuple(params)).fetchall()
         return [IndexJob(**dict(r)) for r in rows]  # type: ignore[misc]
 
+    def update_project_name_for_project(self, project_id: str, project_name: str) -> int:
+        """将同一 project_id 下所有历史任务的 project_name 批量更新为展示名（可为空）。"""
+        pid = str(project_id or "").strip()
+        if not pid:
+            return 0
+        pname = (project_name or "").strip()
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE index_jobs SET project_name=? WHERE project_id=?",
+                (pname, pid),
+            )
+            self._conn.commit()
+            return int(cur.rowcount or 0)
+
     def latest_project_name_by_project_id(self) -> dict[str, str]:
         """
         每个 project_id 在「创建时间最新」的那条任务里的 project_name（用于列表展示名回填）。

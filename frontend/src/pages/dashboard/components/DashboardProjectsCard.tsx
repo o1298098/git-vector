@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import { ChevronLeft, ChevronRight, ExternalLink, RefreshCw, Search, Trash2 } from "lucide-react";
+import { ChevronLeft, ChevronRight, ExternalLink, Pencil, RefreshCw, Search, Trash2 } from "lucide-react";
 import { safeProjectId } from "@/lib/projectId";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -21,12 +21,15 @@ type DashboardProjectsCardProps = {
   debouncedQ: string;
   deletingId: string | null;
   reindexingId: string | null;
+  renamingId: string | null;
+  renameTargetId: string | null;
   onSearchInputChange: (value: string) => void;
   onPageSizeChange: (value: number) => void;
   onPrevPage: () => void;
   onNextPage: () => void;
   onReindexClick: (project: ProjectRow) => void;
   onDeleteClick: (project: ProjectRow) => void;
+  onRenameClick: (project: ProjectRow) => void;
 };
 
 export function DashboardProjectsCard({
@@ -40,12 +43,15 @@ export function DashboardProjectsCard({
   debouncedQ,
   deletingId,
   reindexingId,
+  renamingId,
+  renameTargetId,
   onSearchInputChange,
   onPageSizeChange,
   onPrevPage,
   onNextPage,
   onReindexClick,
   onDeleteClick,
+  onRenameClick,
 }: DashboardProjectsCardProps) {
   const { t } = useI18n();
   const showInitialSkeleton = loading && projects.length === 0;
@@ -74,7 +80,7 @@ export function DashboardProjectsCard({
       <CardContent className="space-y-4">
         <div className="relative">
           <div className="w-full overflow-x-auto">
-            <Table className="table-fixed min-w-[67rem]">
+            <Table className="table-fixed min-w-[69rem]">
               <colgroup>
                 <col className="w-60" />
                 <col className="min-w-[11rem]" />
@@ -82,7 +88,7 @@ export function DashboardProjectsCard({
                 <col className="w-20" />
                 <col className="w-36" />
                 <col className="w-36" />
-                <col className="w-28" />
+                <col className="w-40" />
               </colgroup>
               <TableHeader>
                 <TableRow>
@@ -181,8 +187,35 @@ export function DashboardProjectsCard({
                               type="button"
                               variant="ghost"
                               size="icon"
+                              className="size-9 text-muted-foreground hover:bg-muted hover:text-foreground"
+                              disabled={
+                                deletingId !== null ||
+                                reindexingId !== null ||
+                                renamingId !== null ||
+                                renameTargetId !== null
+                              }
+                              aria-label={`${t("dashboard.rename")}: ${project.project_id}`}
+                              onClick={() => onRenameClick(project)}
+                            >
+                              <Pencil
+                                className={cn(
+                                  "size-4",
+                                  renamingId === project.project_id && "animate-pulse",
+                                  renamingId !== null && renamingId !== project.project_id && "opacity-40",
+                                )}
+                              />
+                            </Button>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
                               className="size-9 text-primary hover:bg-primary/10 hover:text-primary"
-                              disabled={deletingId !== null || reindexingId !== null}
+                              disabled={
+                                deletingId !== null ||
+                                reindexingId !== null ||
+                                renamingId !== null ||
+                                renameTargetId !== null
+                              }
                               aria-label={`${t("dashboard.reindex")}: ${project.project_id}`}
                               onClick={() => onReindexClick(project)}
                             >
@@ -199,7 +232,12 @@ export function DashboardProjectsCard({
                               variant="ghost"
                               size="icon"
                               className="size-9 text-destructive hover:bg-destructive/10 hover:text-destructive"
-                              disabled={deletingId !== null || reindexingId !== null}
+                              disabled={
+                                deletingId !== null ||
+                                reindexingId !== null ||
+                                renamingId !== null ||
+                                renameTargetId !== null
+                              }
                               aria-label={`${t("dashboard.delete")}: ${project.project_id}`}
                               onClick={() => onDeleteClick(project)}
                             >
