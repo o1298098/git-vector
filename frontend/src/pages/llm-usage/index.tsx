@@ -122,7 +122,8 @@ export function LlmUsage() {
     return maxValue <= 0 ? 1 : maxValue;
   }, [trendRows]);
   const trendChart = useMemo(() => computeTrendChart(trendRows, trendMax), [trendRows, trendMax]);
-  const showRefreshingOverlay = loading && data !== null;
+  const showSoftRefresh = loading && data !== null;
+  const blockControls = loading && data === null;
 
   return (
     <div className="mx-auto max-w-6xl space-y-5">
@@ -154,7 +155,7 @@ export function LlmUsage() {
               const next = Number(event.target.value);
               setDays(DAY_OPTIONS.some((v) => v === next) ? next : 30);
             }}
-            disabled={loading}
+            disabled={blockControls}
           >
             {DAY_OPTIONS.map((option) => (
               <option key={option} value={option}>
@@ -167,22 +168,18 @@ export function LlmUsage() {
 
       {error ? <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">{t("usage.loadFail")}</div> : null}
 
-      <div className="relative">
-        <div className={cn("space-y-6 transition-opacity duration-300", showRefreshingOverlay ? "opacity-70" : "opacity-100")}>
-          <UsageSummaryCards totals={totals} />
-          <div className="grid gap-6 lg:grid-cols-2">
-            <UsageTrendCard trendRows={trendRows} trendMode={trendMode} trendChart={trendChart} />
-            <UsageBreakdownCards hasData={!!data} providerRows={providerRows} featureRows={featureRows} />
-          </div>
+      <div
+        className={cn(
+          "space-y-6 transition-opacity duration-300 ease-out",
+          showSoftRefresh ? "opacity-[0.93]" : "opacity-100",
+        )}
+        aria-busy={showSoftRefresh}
+      >
+        <UsageSummaryCards totals={totals} />
+        <div className="grid gap-6 lg:grid-cols-2">
+          <UsageTrendCard trendRows={trendRows} trendMode={trendMode} trendChart={trendChart} />
+          <UsageBreakdownCards hasData={!!data} providerRows={providerRows} featureRows={featureRows} />
         </div>
-        {showRefreshingOverlay ? (
-          <div
-            role="status"
-            aria-live="polite"
-            aria-label={t("usage.refreshing")}
-            className="pointer-events-none absolute inset-0 rounded-md bg-background/35 backdrop-blur-[1px]"
-          />
-        ) : null}
       </div>
     </div>
   );
