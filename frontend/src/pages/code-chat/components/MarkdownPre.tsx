@@ -7,6 +7,7 @@ import type { DOMNode, Element as ParserElement } from "html-react-parser";
 import { useI18n } from "@/i18n/I18nContext";
 import { highlightMarkdownCode } from "@/lib/highlightMarkdownCode";
 import { cn } from "@/lib/utils";
+import { MermaidDiagram } from "./MermaidDiagram";
 
 /** 从 html-react-parser / domhandler 节点取纯文本（含 CDATA 等子类型） */
 function domTextContent(node: ChildNode | undefined | null): string {
@@ -43,13 +44,15 @@ function FencedCodeBlock({ code, rawLang, streamStatus }: FencedProps) {
   const { t } = useI18n();
   const [copied, setCopied] = useState(false);
   const loading = streamStatus === "loading";
+  const primaryLang = (rawLang.trim().split(/\s+/)[0] || "").toLowerCase();
+  const isMermaid = primaryLang === "mermaid";
 
   const { html, lang } = useMemo(() => {
-    if (loading) return { html: "", lang: "plaintext" as const };
+    if (loading || isMermaid) return { html: "", lang: "plaintext" as const };
     return highlightMarkdownCode(code, rawLang);
-  }, [code, rawLang, loading]);
+  }, [code, rawLang, loading, isMermaid]);
 
-  const langLabel = (rawLang.trim().split(/\s+/)[0] || (lang !== "plaintext" ? lang : "text")).toLowerCase();
+  const langLabel = (primaryLang || (lang !== "plaintext" ? lang : "text")).toLowerCase();
 
   const onCopy = useCallback(async () => {
     try {
@@ -62,6 +65,45 @@ function FencedCodeBlock({ code, rawLang, streamStatus }: FencedProps) {
   }, [code]);
 
   const empty = !code.replace(/\n$/, "").trim();
+
+  if (isMermaid) {
+    return (
+      <div className="gv-xmd-fenced-wrap">
+        <div className="gv-xmd-fenced-head">
+          <span className="gv-xmd-fenced-lang">
+            <Code2 className="gv-xmd-fenced-lang-icon" aria-hidden />
+            <span className="min-w-0 truncate">{langLabel}</span>
+          </span>
+          <button
+            type="button"
+            className="gv-xmd-fenced-copy"
+            disabled={loading || empty}
+            aria-label={t("chat.codeCopy")}
+            onClick={() => void onCopy()}
+          >
+            {copied ? (
+              <>
+                <Check className="size-4 shrink-0 text-emerald-600 dark:text-emerald-400" aria-hidden />
+                <span>{t("chat.copyDone")}</span>
+              </>
+            ) : (
+              <>
+                <Copy className="size-4 shrink-0 opacity-80" aria-hidden />
+                <span>{t("chat.codeCopy")}</span>
+              </>
+            )}
+          </button>
+        </div>
+        {loading ? (
+          <div className="rounded-b-md border border-t-0 border-black/10 bg-muted/25 px-3 py-6 text-center text-sm text-muted-foreground dark:border-white/10">
+            {t("chat.mermaidStreaming")}
+          </div>
+        ) : (
+          <MermaidDiagram code={code} />
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="gv-xmd-fenced-wrap">
