@@ -38,7 +38,7 @@ Then open:
 
 Minimum required settings before first useful indexing:
 
-- **Embedding runtime**: `OLLAMA_BASE_URL` and `EMBED_MODEL`
+- **Embeddings** (see [Environment variables](#environment-variables)): default **`EMBED_PROVIDER=ollama`** needs **`OLLAMA_BASE_URL`** and **`EMBED_MODEL`**; use **`EMBED_PROVIDER=openai`** with **`OPENAI_EMBED_BASE_URL`**, **`OPENAI_EMBED_API_KEY`**, and an OpenAI **`EMBED_MODEL`** (e.g. `text-embedding-3-small`). Embedding OpenAI settings are **not** the same as chat `OPENAI_*`.
 - **Private HTTPS repos (optional)**: `GIT_HTTPS_TOKEN` or `GITLAB_ACCESS_TOKEN`
 - **Webhook signature verification (recommended for non-LAN)**: set each platform secret
 
@@ -70,11 +70,11 @@ collect_files: scan common code/config files (skip `node_modules` / `.git` / `.e
   ↓
 parse_functions: Tree-sitter function-level parsing (0 results → file-level fallback)
   ↓
-describe_chunks (optional): generate one-line descriptions via Dify / Azure OpenAI / OpenAI
+describe_chunks (optional): one-line descriptions via `LLM_PROVIDER` (Dify / Azure OpenAI / OpenAI-compatible)
   ↓
 generate_wiki: static wiki (MkDocs / Starlight / VitePress) under DATA_DIR/wiki_sites
   ↓
-upsert_vector_store: embeddings → Chroma upsert
+upsert_vector_store: embeddings (`EMBED_PROVIDER`: Ollama or OpenAI-compatible) → Chroma upsert
   ↓
 query/search: semantic retrieval (for Dify/frontend)
 ```
@@ -92,8 +92,8 @@ cp .env.example .env
 Typical minimum config:
 
 - **Private HTTPS repos**: set `GITLAB_ACCESS_TOKEN` and/or `GIT_HTTPS_TOKEN` (see [Private HTTPS clone](#private-https-clone)); for **GitHub PAT** use `GIT_HTTPS_USERNAME=x-access-token`
-- **Embeddings**: ensure `OLLAMA_BASE_URL` is reachable and Ollama has the model named in `EMBED_MODEL` (default in `.env.example`)
-- **Optional LLM descriptions / code chat**: configure one provider (see “LLM priority”)
+- **Embeddings**: set **`EMBED_PROVIDER`** (`ollama` or `openai`) and the matching variables (see [Environment variables](#environment-variables)); **changing provider or embedding dimension requires clearing `DATA_DIR/chroma` and re-indexing**
+- **Optional LLM descriptions / code chat**: set **`LLM_PROVIDER`** to `dify`, `azure_openai`, or `openai` (default `openai`) and configure only that provider’s keys (see [LLM provider](#llm-provider))
 
 ### 2) Start
 
@@ -263,13 +263,24 @@ Key fields:
 
 ## Environment variables
 
+Most values can also be changed from the admin UI (**`/admin/` → Settings**); overrides are stored in `DATA_DIR/ui_overrides.json` and take precedence over `.env` for supported keys.
+
 ### Required for baseline indexing
 
 | Variable | Description |
 |------|------|
 | `DATA_DIR` | Data directory (default `./data`; commonly `/data` in containers) |
-| `OLLAMA_BASE_URL` | Ollama base URL (default `http://localhost:11434` in code; Docker examples often use `http://host.docker.internal:11434`) |
-| `EMBED_MODEL` | Ollama **embeddings** model name (must exist in Ollama). **If you change the model, clear `DATA_DIR/chroma` and re-index** (dimension changes). |
+
+**Embeddings** — set **`EMBED_PROVIDER`** to `ollama` (default) or `openai`:
+
+| Variable | When | Description |
+|------|------|------|
+| `EMBED_PROVIDER` | Always | `ollama` (default) or `openai`. |
+| `OLLAMA_BASE_URL` | `EMBED_PROVIDER=ollama` | Ollama base URL (default `http://localhost:11434`; Docker often `http://host.docker.internal:11434`). |
+| `OLLAMA_API_KEY` | Optional | Bearer token if Ollama sits behind a gateway. |
+| `EMBED_MODEL` | Always | With **Ollama**: Ollama embeddings model name. With **OpenAI**: embeddings model id (e.g. `text-embedding-3-small`). **If you change provider/model/dimension, clear `DATA_DIR/chroma` and re-index.** |
+| `OPENAI_EMBED_BASE_URL` | `EMBED_PROVIDER=openai` | OpenAI-compatible **embeddings** API base (usually ends with `/v1`). **Independent** of `OPENAI_BASE_URL` used for chat. |
+| `OPENAI_EMBED_API_KEY` | `EMBED_PROVIDER=openai` | API key for embeddings only. **Independent** of `OPENAI_API_KEY`. |
 
 ### Common optional settings
 
@@ -285,20 +296,28 @@ Key fields:
 | `WIKI_BACKEND` | `mkdocs` (default) / `starlight` / `vitepress` (last two need Node.js + npm; Docker image includes them). |
 | `WIKI_ENABLED` | `false` / `0` disables wiki generation after describe (default: on). |
 | `SKIP_WIKI` | `1` skips wiki for a run without changing `WIKI_ENABLED`. |
+| `EMBED_MAX_CHARS` | Max characters sent per embedding request before truncation (default `30000`). |
+| `CONTENT_LANGUAGE` | `zh` or `en`; LLM/wiki output language (default `zh`). |
+| `INDEX_EXCLUDE_PATTERNS` | Comma- or newline-separated path globs to skip during indexing. |
 
-### Optional LLM providers
+### LLM provider
+
+Chunk descriptions and **code Q&A** use **exactly one** backend, chosen by **`LLM_PROVIDER`**: `dify`, `azure_openai`, or **`openai`** (default). Configure **only** the variables for the selected provider.
 
 | Variable | Description |
 |------|------|
-| `DIFY_API_KEY` | Dify API key (used to generate one-line chunk descriptions) |
-| `DIFY_BASE_URL` | Dify API base URL (default `https://api.dify.ai/v1`) |
-| `AZURE_OPENAI_API_KEY` | Azure OpenAI key |
-| `AZURE_OPENAI_ENDPOINT` | Azure endpoint (e.g. `https://xxx.cognitiveservices.azure.com`) |
-| `AZURE_OPENAI_VERSION` | Azure API version |
-| `AZURE_OPENAI_DEPLOYMENT` | Azure deployment name |
-| `OPENAI_API_KEY` | OpenAI (or compatible) key |
-| `OPENAI_BASE_URL` | Compatible base URL (default `https://api.openai.com/v1`) |
-| `OPENAI_MODEL` | Model/deployment name |
+| `LLM_PROVIDER` | `dify` \| `azure_openai` \| `openai` (default `openai`). |
+| `DIFY_API_KEY` | Dify API key (when `LLM_PROVIDER=dify`). |
+| `DIFY_BASE_URL` | Dify API base URL (default `https://api.dify.ai/v1`). |
+| `AZURE_OPENAI_API_KEY` | Azure OpenAI key (when `LLM_PROVIDER=azure_openai`). |
+| `AZURE_OPENAI_ENDPOINT` | Azure endpoint (e.g. `https://xxx.cognitiveservices.azure.com`). |
+| `AZURE_OPENAI_VERSION` | Azure API version. |
+| `AZURE_OPENAI_DEPLOYMENT` | Azure deployment name. |
+| `OPENAI_API_KEY` | OpenAI (or compatible) key for **chat** (when `LLM_PROVIDER=openai`). |
+| `OPENAI_BASE_URL` | Chat/completions base URL (default `https://api.openai.com/v1`). |
+| `OPENAI_MODEL` | Chat model or deployment name. |
+
+If no LLM is configured for the selected provider, indexing and retrieval still work; chunk descriptions may be missing or placeholders, and code Q&A will not call a model.
 
 ### Advanced controls
 
@@ -313,16 +332,6 @@ Key fields:
 | `WIKI_MAX_FILE_PAGES` | Max per-path file pages (default `5000`). |
 | `WIKI_SYMBOL_ROWS_PER_FILE` | Max symbol table rows per Markdown file (default `4000`). |
 | `NPM_REGISTRY` | Optional. When using `starlight` / `vitepress`, sets `npm_config_registry` for npm if non-empty. Or set **`npm_config_registry`** / **`NPM_CONFIG_REGISTRY`** in the environment (the uppercase form is mapped to `npm_config_registry` for subprocesses). |
-
-### LLM priority (only one will be used)
-
-For generating a one-line description per function/file chunk, providers are selected in this priority order:
-
-1. **Dify**: `DIFY_API_KEY` (optional `DIFY_BASE_URL`)
-2. **Azure OpenAI**: `AZURE_OPENAI_API_KEY` + `AZURE_OPENAI_ENDPOINT`
-3. **OpenAI-compatible**: `OPENAI_API_KEY`
-
-If no LLM is configured, indexing and retrieval still work; results simply won’t include natural language descriptions (but still include path/name/code snippets).
 
 ---
 
