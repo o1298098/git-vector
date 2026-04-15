@@ -61,6 +61,8 @@ def _normalize_patch_item(key: str, raw: Any) -> Any:
         return s
     if key in (
         "embed_model",
+        "ollama_base_url",
+        "ollama_api_key",
         "openai_model",
         "openai_base_url",
         "openai_api_key",
@@ -78,7 +80,10 @@ def _normalize_patch_item(key: str, raw: Any) -> Any:
         if not isinstance(raw, str):
             raw = str(raw)
         s = raw.strip()
-        if key in ("openai_api_key", "dify_api_key", "azure_openai_api_key", "gitlab_access_token"):
+        if key == "ollama_base_url" and s == "":
+            # 允许在 UI 中清空地址来回退环境变量。
+            return None
+        if key in ("ollama_api_key", "openai_api_key", "dify_api_key", "azure_openai_api_key", "gitlab_access_token"):
             if s == "***":
                 raise ValueError("请勿将掩码 *** 作为密钥提交")
         return s

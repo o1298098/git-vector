@@ -18,6 +18,8 @@ export function respToForm(response: SettingsResponse): FormState {
           : false;
   return {
     embed_model: str("embed_model"),
+    ollama_base_url: str("ollama_base_url"),
+    ollama_api_key: fields.ollama_api_key?.value === "***" ? "" : str("ollama_api_key"),
     openai_model: str("openai_model"),
     openai_base_url: str("openai_base_url"),
     openai_api_key: fields.openai_api_key?.value === "***" ? "" : str("openai_api_key"),
@@ -51,6 +53,7 @@ export function buildPatch(
   const patch: Record<string, unknown> = {};
   const keys: (keyof FormState)[] = [
     "embed_model",
+    "ollama_base_url",
     "openai_model",
     "openai_base_url",
     "dify_base_url",

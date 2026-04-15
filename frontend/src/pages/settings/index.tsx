@@ -305,7 +305,11 @@ export function Settings() {
                     <CardTitle className="text-lg">{t("settings.embedTitle")}</CardTitle>
                     <CardDescription>{t("settings.embedDesc")}</CardDescription>
                   </CardHeader>
-                  <CardContent className="space-y-5 p-4 pt-6 sm:p-6">{row("embed_model", "embed_model")}</CardContent>
+                  <CardContent className="space-y-5 p-4 pt-6 sm:p-6">
+                    {row("embed_model", "embed_model")}
+                    {row("ollama_base_url", "ollama_base_url")}
+                    {row("ollama_api_key", "ollama_api_key", undefined, { secret: true })}
+                  </CardContent>
                 </Card>
               </section>
 

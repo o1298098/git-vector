@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
+import os
 import re
 import sqlite3
 import threading
@@ -29,7 +31,7 @@ from chromadb.config import Settings as ChromaSettings
 
 from app.api_errors import raise_app_error
 from app.config import settings
-from app.effective_settings import effective_embed_model
+from app.effective_settings import effective_embed_model, effective_ollama_api_key, effective_ollama_base_url
 
 logger = logging.getLogger(__name__)
 COLLECTION_NAME = "gitlab_code_docs"
@@ -214,6 +216,33 @@ def _keyword_boost_for_hit(tokens: list[str], content: str, metadata: dict[str, 
         if tk in hay:
             boost += 0.03
     return min(0.35, boost)
+
+
+def _vector_score_from_embeddings(query_emb: list[float], hit_emb: Any) -> tuple[float | None, float | None]:
+    """
+    回退检索时基于已存 embedding 计算相似度分数。
+    返回 (score, distance)，score 越大越相关，distance 越小越近。
+    """
+    if not isinstance(hit_emb, list) or not query_emb:
+        return None, None
+    if not hit_emb:
+        return None, None
+    if len(hit_emb) != len(query_emb):
+        return None, None
+    try:
+        qn = math.sqrt(sum(float(x) * float(x) for x in query_emb))
+        hn = math.sqrt(sum(float(x) * float(x) for x in hit_emb))
+        if qn <= 0 or hn <= 0:
+            return None, None
+        dot = sum(float(a) * float(b) for a, b in zip(query_emb, hit_emb))
+        cosine = dot / (qn * hn)
+        # 约束到 [-1, 1]，并映射到 [0, 1] 便于与主路径 score 对齐展示。
+        cosine = max(-1.0, min(1.0, cosine))
+        score = (cosine + 1.0) / 2.0
+        distance = 1.0 - score
+        return score, distance
+    except (TypeError, ValueError, OverflowError):
+        return None, None
 
 
 def _utc_now_iso() -> str:
@@ -497,7 +526,9 @@ def _embed(texts: list[str], prefix: str = "") -> list[tuple[int, list[float]]]:
         texts = [f"{prefix}{t}" for t in texts]
 
     model_name = effective_embed_model()
-    base_url = settings.ollama_base_url
+    base_url = effective_ollama_base_url()
+    ollama_api_key = (effective_ollama_api_key() or "").strip()
+    headers = {"Authorization": f"Bearer {ollama_api_key}"} if ollama_api_key else None
 
     # Ollama 向量模型也有上下文长度限制，这里做一个保守的字符截断防御。
     # 如需更精细可通过配置 EMBED_MAX_CHARS 调整。
@@ -521,6 +552,7 @@ def _embed(texts: list[str], prefix: str = "") -> list[tuple[int, list[float]]]:
                 try:
                     resp = client.post(
                         "/api/embeddings",
+                        headers=headers,
                         json={
                             "model": model_name,
                             # Ollama 官方接口使用 prompt 字段，而非 input
@@ -1043,7 +1075,8 @@ class VectorStore:
                 retryable=True,
             )
         # 只有一条 query 文本，这里取第一条成功的向量
-        emb = [emb_with_idx[0][1]]
+        query_emb = emb_with_idx[0][1]
+        emb = [query_emb]
         where = {"project_id": project_id} if project_id else None
         results = self.collection.query(
             query_embeddings=emb,
@@ -1091,31 +1124,114 @@ class VectorStore:
             pid = str(project_id).strip()
             if pid:
                 try:
+                    # 回退时尽量多取一些样本，优先用已存 embedding 计算相似度分数；
+                    # 若历史条目缺失 embedding，再退化为纯关键词分。
+                    fallback_scan_limit = max(int(top_k), int(os.getenv("QUERY_FALLBACK_SCAN_LIMIT", "2000")))
                     raw = self.collection.get(
                         where={"project_id": pid},
-                        include=["documents", "metadatas"],
-                        limit=max(1, int(top_k)),
+                        include=["documents", "metadatas", "embeddings"],
+                        limit=max(1, fallback_scan_limit),
                     )
                     r_docs = raw.get("documents") or []
                     r_metas = raw.get("metadatas") or []
+                    r_embs = raw.get("embeddings") or []
                     fb: list[dict[str, Any]] = []
-                    for d, m in zip(r_docs, r_metas):
+                    has_embedding_signal = False
+                    has_keyword_signal = False
+                    for i, (d, m) in enumerate(zip(r_docs, r_metas)):
+                        e = r_embs[i] if i < len(r_embs) else None
                         meta = m or {}
+                        score, dist = _vector_score_from_embeddings(query_emb, e)
                         boost = _keyword_boost_for_hit(tokens, str(d or ""), meta)
+                        if score is None:
+                            # 历史文档可能没有 embedding；此时至少给出可比较的关键词分。
+                            score = boost
+                            dist = None
+                            fallback_source = "collection_get_lexical"
+                        else:
+                            has_embedding_signal = True
+                            fallback_source = "collection_get_embeddings"
+                        if boost > 0:
+                            has_keyword_signal = True
                         fb.append(
                             {
                                 "content": d,
                                 "metadata": meta,
-                                "distance": None,
-                                "score": None,
+                                "distance": dist,
+                                "score": score,
                                 "boost": boost,
-                                "hybrid_score": boost,
-                                "fallback_source": "collection_get",
+                                "hybrid_score": min(1.0, float(score) + boost),
+                                "fallback_source": fallback_source,
                             }
                         )
+                    if fb and not has_embedding_signal and not has_keyword_signal:
+                        # 第一批样本未命中时，继续做一次分页关键词兜底扫描：
+                        # 避免因 limit 截断导致“明明有关键词却返回空”。
+                        lexical_hits: list[dict[str, Any]] = []
+                        lex_batch = max(200, int(os.getenv("QUERY_FALLBACK_LEXICAL_BATCH", "1000")))
+                        lex_max = max(lex_batch, int(os.getenv("QUERY_FALLBACK_LEXICAL_MAX_DOCS", "20000")))
+                        scanned = 0
+                        offset = 0
+                        while scanned < lex_max:
+                            remain = lex_max - scanned
+                            this_limit = min(lex_batch, remain)
+                            try:
+                                chunk = self.collection.get(
+                                    where={"project_id": pid},
+                                    include=["documents", "metadatas"],
+                                    limit=this_limit,
+                                    offset=offset,
+                                )
+                            except TypeError:
+                                # 旧版本不支持 offset，退化为单次读取并中止循环。
+                                chunk = self.collection.get(
+                                    where={"project_id": pid},
+                                    include=["documents", "metadatas"],
+                                    limit=lex_max,
+                                )
+                                scanned = lex_max
+                            docs2 = chunk.get("documents") or []
+                            metas2 = chunk.get("metadatas") or []
+                            if not docs2:
+                                break
+                            for d2, m2 in zip(docs2, metas2):
+                                meta2 = m2 or {}
+                                boost2 = _keyword_boost_for_hit(tokens, str(d2 or ""), meta2)
+                                if boost2 <= 0:
+                                    continue
+                                lexical_hits.append(
+                                    {
+                                        "content": d2,
+                                        "metadata": meta2,
+                                        "distance": None,
+                                        "score": boost2,
+                                        "boost": boost2,
+                                        "hybrid_score": boost2,
+                                        "fallback_source": "collection_get_lexical_scan",
+                                    }
+                                )
+                            got = len(docs2)
+                            scanned += got
+                            offset += got
+                            if got < this_limit:
+                                break
+                            if lexical_hits and len(lexical_hits) >= max(1, int(top_k)):
+                                break
+                        if lexical_hits:
+                            lexical_hits.sort(key=lambda x: float(x.get("hybrid_score") or 0.0), reverse=True)
+                            return lexical_hits[: max(1, int(top_k))]
+                        logger.warning(
+                            "Query fallback has no retrieval signal for %s after lexical scan; "
+                            "returning empty results (initial_docs=%s, scanned=%s, top_k=%s).",
+                            pid,
+                            len(fb),
+                            scanned,
+                            top_k,
+                        )
+                        return []
                     fb.sort(key=lambda x: float(x.get("hybrid_score") or 0.0), reverse=True)
                     if fb:
-                        return fb
+                        return fb[: max(1, int(top_k))]
                 except Exception as e:  # noqa: S110
                     logger.warning("Query fallback get() failed for %s: %s", pid, e)
         return out

@@ -33,6 +33,15 @@ def effective_embed_model() -> str:
     return _str_from_override("embed_model", settings.embed_model)
 
 
+def effective_ollama_base_url() -> str:
+    v = _str_from_override("ollama_base_url", settings.ollama_base_url or "http://localhost:11434")
+    return (v or "").strip() or (settings.ollama_base_url or "http://localhost:11434")
+
+
+def effective_ollama_api_key() -> str:
+    return _str_from_override("ollama_api_key", settings.ollama_api_key or "")
+
+
 def effective_openai_model() -> str:
     return _str_from_override("openai_model", settings.openai_model)
 
@@ -155,6 +164,8 @@ def snapshot_for_api() -> dict[str, Any]:
 
     return {
         "embed_model": {"value": effective_embed_model(), "source": field_source("embed_model")},
+        "ollama_base_url": {"value": effective_ollama_base_url(), "source": field_source("ollama_base_url")},
+        "ollama_api_key": {"value": sec_effective(effective_ollama_api_key, "ollama_api_key"), "source": field_source("ollama_api_key")},
         "openai_model": {"value": effective_openai_model(), "source": field_source("openai_model")},
         "openai_base_url": {"value": effective_openai_base_url(), "source": field_source("openai_base_url")},
         "openai_api_key": {"value": sec_effective(effective_openai_api_key, "openai_api_key"), "source": field_source("openai_api_key")},
@@ -203,6 +214,8 @@ def env_defaults_for_api() -> dict[str, Any]:
 
     return {
         "embed_model": s.embed_model,
+        "ollama_base_url": s.ollama_base_url,
+        "ollama_api_key": mask("ollama_api_key"),
         "openai_model": s.openai_model,
         "openai_base_url": s.openai_base_url,
         "openai_api_key": mask("openai_api_key"),

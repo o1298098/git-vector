@@ -22,6 +22,8 @@ _lock = threading.RLock()
 # 允许通过管理 UI 读写的键（其它键即使出现在文件中也会被 PATCH 拒绝）
 ALLOWED_OVERRIDE_KEYS: frozenset[str] = frozenset({
     "embed_model",
+    "ollama_base_url",
+    "ollama_api_key",
     "openai_model",
     "openai_base_url",
     "openai_api_key",
@@ -43,6 +45,7 @@ ALLOWED_OVERRIDE_KEYS: frozenset[str] = frozenset({
 })
 
 SECRET_KEYS: frozenset[str] = frozenset({
+    "ollama_api_key",
     "openai_api_key",
     "dify_api_key",
     "azure_openai_api_key",

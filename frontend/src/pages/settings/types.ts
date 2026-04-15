@@ -5,7 +5,7 @@ export type SettingsResponse = {
   env_defaults: Record<string, string | number | boolean>;
 };
 
-export const SECRET_KEYS = ["openai_api_key", "dify_api_key", "azure_openai_api_key", "gitlab_access_token"] as const;
+export const SECRET_KEYS = ["ollama_api_key", "openai_api_key", "dify_api_key", "azure_openai_api_key", "gitlab_access_token"] as const;
 
 export const SETTINGS_SECTIONS: { id: string; labelKey: string }[] = [
   { id: "settings-gitlab", labelKey: "settings.navGitlab" },
@@ -28,6 +28,8 @@ export type AdminStorageResponse = {
 
 export type FormState = {
   embed_model: string;
+  ollama_base_url: string;
+  ollama_api_key: string;
   openai_model: string;
   openai_base_url: string;
   openai_api_key: string;
@@ -50,6 +52,8 @@ export type FormState = {
 
 export const EMPTY_FORM: FormState = {
   embed_model: "",
+  ollama_base_url: "",
+  ollama_api_key: "",
   openai_model: "",
   openai_base_url: "",
   openai_api_key: "",

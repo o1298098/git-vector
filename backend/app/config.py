@@ -47,6 +47,8 @@ class Settings(BaseSettings):
     data_dir: str = "./data"
     # Ollama 服务地址（embedding 调用基地址）
     ollama_base_url: str = "http://localhost:11434"
+    # Ollama 访问密钥（若接入反向代理或网关可配置）
+    ollama_api_key: str = ""
     # 文本嵌入模型（需为 fastembed TextEmbedding 支持列表中的模型，如 intfloat/multilingual-e5-large）
     embed_model: str = "intfloat/multilingual-e5-large"
     # embedding 文本最大字符数（超长时截断，避免上下文窗口报错）

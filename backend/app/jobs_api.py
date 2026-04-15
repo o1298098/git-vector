@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import shutil
 import subprocess
 from typing import Optional
@@ -17,6 +16,8 @@ from app.effective_settings import (
     effective_dify_api_key,
     effective_dify_base_url,
     effective_embed_model,
+    effective_ollama_api_key,
+    effective_ollama_base_url,
     effective_openai_api_key,
     effective_openai_base_url,
 )
@@ -181,13 +182,15 @@ def _run_git_ls_remote(repo_url: str) -> tuple[bool, str]:
 
 
 def _check_embedding() -> tuple[bool, str]:
-    base_url = (os.getenv("OLLAMA_BASE_URL", "http://localhost:11434") or "").strip()
+    base_url = (effective_ollama_base_url() or "http://localhost:11434").strip()
+    ollama_api_key = (effective_ollama_api_key() or "").strip()
+    headers = {"Authorization": f"Bearer {ollama_api_key}"} if ollama_api_key else None
     model = effective_embed_model().strip()
     if not model:
         return False, "未配置 embed_model"
     try:
         with httpx.Client(base_url=base_url, timeout=20.0) as client:
-            resp = client.post("/api/embeddings", json={"model": model, "prompt": "health check"})
+            resp = client.post("/api/embeddings", headers=headers, json={"model": model, "prompt": "health check"})
             if resp.status_code >= 400:
                 return False, f"Ollama HTTP {resp.status_code}"
             data = resp.json() if resp.content else {}
