@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { apiJson } from "@/lib/api";
 import { useI18n } from "@/i18n/I18nContext";
 import { DashboardDialogs } from "./components/DashboardDialogs";
@@ -15,6 +15,7 @@ export function Dashboard() {
   const [searchInput, setSearchInput] = useState("");
   const [debouncedQ, setDebouncedQ] = useState("");
   const [loading, setLoading] = useState(false);
+  const [initialFetchDone, setInitialFetchDone] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [reindexingId, setReindexingId] = useState<string | null>(null);
@@ -23,6 +24,8 @@ export function Dashboard() {
   const [reindexTarget, setReindexTarget] = useState<ProjectRow | null>(null);
   const [renameTarget, setRenameTarget] = useState<ProjectRow | null>(null);
   const [renameInput, setRenameInput] = useState("");
+  const requestSeqRef = useRef(0);
+  const inflightControllerRef = useRef<AbortController | null>(null);
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize) || 1);
 
@@ -36,6 +39,11 @@ export function Dashboard() {
   }, [debouncedQ]);
 
   const load = useCallback(async () => {
+    inflightControllerRef.current?.abort();
+    const controller = new AbortController();
+    inflightControllerRef.current = controller;
+    const currentSeq = requestSeqRef.current + 1;
+    requestSeqRef.current = currentSeq;
     setError(null);
     setLoading(true);
     const params = new URLSearchParams({
@@ -44,22 +52,36 @@ export function Dashboard() {
     });
     if (debouncedQ) params.set("q", debouncedQ);
     try {
-      const data = await apiJson<{ total?: number; projects: ProjectRow[] }>(`/api/projects?${params}`);
+      const data = await apiJson<{ total?: number; projects: ProjectRow[] }>(`/api/projects?${params}`, {
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted) return;
+      if (currentSeq !== requestSeqRef.current) return;
       const totalCount = typeof data.total === "number" ? data.total : (data.projects?.length ?? 0);
       setTotal(totalCount);
       setProjects(data.projects ?? []);
     } catch (err: unknown) {
+      if (controller.signal.aborted) return;
+      if (currentSeq !== requestSeqRef.current) return;
       setError(err instanceof Error ? err.message : t("search.loadFail"));
-      setProjects([]);
-      setTotal(0);
     } finally {
+      if (controller.signal.aborted) return;
+      if (currentSeq !== requestSeqRef.current) return;
       setLoading(false);
+      setInitialFetchDone(true);
     }
   }, [page, pageSize, debouncedQ, t]);
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(
+    () => () => {
+      inflightControllerRef.current?.abort();
+    },
+    [],
+  );
 
   useEffect(() => {
     if (total === 0) return;
@@ -134,6 +156,7 @@ export function Dashboard() {
         pageSize={pageSize}
         totalPages={totalPages}
         loading={loading}
+        initialFetchDone={initialFetchDone}
         searchInput={searchInput}
         debouncedQ={debouncedQ}
         deletingId={deletingId}

@@ -17,6 +17,7 @@ type DashboardProjectsCardProps = {
   pageSize: number;
   totalPages: number;
   loading: boolean;
+  initialFetchDone: boolean;
   searchInput: string;
   debouncedQ: string;
   deletingId: string | null;
@@ -39,6 +40,7 @@ export function DashboardProjectsCard({
   pageSize,
   totalPages,
   loading,
+  initialFetchDone,
   searchInput,
   debouncedQ,
   deletingId,
@@ -54,8 +56,8 @@ export function DashboardProjectsCard({
   onRenameClick,
 }: DashboardProjectsCardProps) {
   const { t } = useI18n();
-  const showInitialSkeleton = loading && projects.length === 0;
-  const showRefreshingOverlay = loading && projects.length > 0;
+  const showInitialSkeleton = loading && projects.length === 0 && !initialFetchDone;
+  const showSoftRefresh = loading && projects.length > 0;
 
   return (
     <Card>
@@ -72,14 +74,19 @@ export function DashboardProjectsCard({
             className="pl-9"
             value={searchInput}
             onChange={(event) => onSearchInputChange(event.target.value)}
-            disabled={loading}
             aria-label="搜索项目"
           />
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="relative">
-          <div className="w-full overflow-x-auto">
+          <div
+            className={cn(
+              "w-full overflow-x-auto transition-opacity duration-300 ease-out",
+              showSoftRefresh ? "opacity-[0.93]" : "opacity-100",
+            )}
+            aria-busy={showSoftRefresh}
+          >
             <Table className="table-fixed min-w-[69rem]">
               <colgroup>
                 <col className="w-60" />
@@ -252,14 +259,6 @@ export function DashboardProjectsCard({
               </TableBody>
             </Table>
           </div>
-          {showRefreshingOverlay ? (
-            <div
-              role="status"
-              aria-live="polite"
-              aria-label="Loading projects"
-              className="pointer-events-none absolute inset-0 bg-background/40 backdrop-blur-[1px]"
-            />
-          ) : null}
         </div>
 
         <div className="flex flex-col gap-3 border-t pt-4 sm:flex-row sm:items-center sm:justify-between">
