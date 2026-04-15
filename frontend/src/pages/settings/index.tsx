@@ -306,9 +306,43 @@ export function Settings() {
                     <CardDescription>{t("settings.embedDesc")}</CardDescription>
                   </CardHeader>
                   <CardContent className="space-y-5 p-4 pt-6 sm:p-6">
-                    {row("embed_model", "embed_model")}
-                    {row("ollama_base_url", "ollama_base_url")}
-                    {row("ollama_api_key", "ollama_api_key", undefined, { secret: true })}
+                    <div className="space-y-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Label htmlFor="embed_provider">{t("settings.embedProviderLabel")}</Label>
+                        <SourceBadge
+                          source={fieldSource.embed_provider ?? "env"}
+                          labelOverride={t("settings.sourceOverride")}
+                          labelEnv={t("settings.sourceEnv")}
+                        />
+                      </div>
+                      <select
+                        id="embed_provider"
+                        className="flex h-9 w-full max-w-xl rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                        value={form.embed_provider === "openai" ? "openai" : "ollama"}
+                        onChange={(event) =>
+                          setForm((prev) => ({ ...prev, embed_provider: event.target.value === "openai" ? "openai" : "ollama" }))
+                        }
+                      >
+                        <option value="ollama">{t("settings.embedProvider.ollama")}</option>
+                        <option value="openai">{t("settings.embedProvider.openai")}</option>
+                      </select>
+                      <p className="text-xs text-muted-foreground">{t("settings.embedProviderHint")}</p>
+                      <p className="text-xs text-muted-foreground">
+                        {t("settings.envLine", { value: String(envDefaults.embed_provider ?? "ollama") })}
+                      </p>
+                    </div>
+                    {row("embed_model", "embed_model", t("settings.embedModelHint"))}
+                    {form.embed_provider === "ollama" ? (
+                      <>
+                        {row("ollama_base_url", "ollama_base_url")}
+                        {row("ollama_api_key", "ollama_api_key", undefined, { secret: true })}
+                      </>
+                    ) : (
+                      <>
+                        {row("openai_embed_base_url", t("settings.openaiEmbedBaseUrl"), t("settings.openaiEmbedBaseUrlHint"))}
+                        {row("openai_embed_api_key", t("settings.openaiEmbedApiKey"), undefined, { secret: true })}
+                      </>
+                    )}
                   </CardContent>
                 </Card>
               </section>
@@ -356,13 +390,45 @@ export function Settings() {
                     <CardDescription>{t("settings.llmDesc")}</CardDescription>
                   </CardHeader>
                   <CardContent className="space-y-6 p-4 pt-6 sm:p-6">
-                    <div className="space-y-4">
+                    <div className="space-y-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Label htmlFor="llm_provider">{t("settings.llmProviderLabel")}</Label>
+                        <SourceBadge
+                          source={fieldSource.llm_provider ?? "env"}
+                          labelOverride={t("settings.sourceOverride")}
+                          labelEnv={t("settings.sourceEnv")}
+                        />
+                      </div>
+                      <select
+                        id="llm_provider"
+                        className="flex h-9 w-full max-w-xl rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                        value={
+                          form.llm_provider === "dify" || form.llm_provider === "azure_openai" || form.llm_provider === "openai"
+                            ? form.llm_provider
+                            : "openai"
+                        }
+                        onChange={(event) => setForm((prev) => ({ ...prev, llm_provider: event.target.value }))}
+                      >
+                        <option value="dify">{t("settings.llmProvider.dify")}</option>
+                        <option value="azure_openai">{t("settings.llmProvider.azure")}</option>
+                        <option value="openai">{t("settings.llmProvider.openai")}</option>
+                      </select>
+                      <p className="text-xs text-muted-foreground">{t("settings.llmProviderExplicitHint")}</p>
+                      <p className="text-xs text-muted-foreground">
+                        {t("settings.envLine", { value: String(envDefaults.llm_provider ?? "openai") })}
+                      </p>
+                    </div>
+
+                    {form.llm_provider === "dify" ? (
+                    <div className="space-y-4 border-t border-border/60 pt-6">
                       <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{t("settings.groupDify")}</p>
                       <div className="space-y-5">
                         {row("dify_base_url", "dify_base_url")}
                         {row("dify_api_key", "dify_api_key", undefined, { secret: true })}
                       </div>
                     </div>
+                    ) : null}
+                    {form.llm_provider === "azure_openai" ? (
                     <div className="space-y-4 border-t border-border/60 pt-6">
                       <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{t("settings.groupAzure")}</p>
                       <div className="space-y-5">
@@ -372,6 +438,8 @@ export function Settings() {
                         {row("azure_openai_deployment", "azure_openai_deployment")}
                       </div>
                     </div>
+                    ) : null}
+                    {form.llm_provider === "openai" ? (
                     <div className="space-y-4 border-t border-border/60 pt-6">
                       <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{t("settings.groupOpenai")}</p>
                       <div className="space-y-5">
@@ -380,6 +448,7 @@ export function Settings() {
                         {row("openai_model", "openai_model")}
                       </div>
                     </div>
+                    ) : null}
                   </CardContent>
                 </Card>
               </section>

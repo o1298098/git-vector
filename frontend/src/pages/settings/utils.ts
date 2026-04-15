@@ -18,11 +18,18 @@ export function respToForm(response: SettingsResponse): FormState {
           : false;
   return {
     embed_model: str("embed_model"),
+    embed_provider: (() => {
+      const v = str("embed_provider").toLowerCase().replace(/-/g, "_");
+      if (v === "openai" || v === "openai_compat") return "openai";
+      return "ollama";
+    })(),
     ollama_base_url: str("ollama_base_url"),
     ollama_api_key: fields.ollama_api_key?.value === "***" ? "" : str("ollama_api_key"),
     openai_model: str("openai_model"),
     openai_base_url: str("openai_base_url"),
     openai_api_key: fields.openai_api_key?.value === "***" ? "" : str("openai_api_key"),
+    openai_embed_base_url: str("openai_embed_base_url"),
+    openai_embed_api_key: fields.openai_embed_api_key?.value === "***" ? "" : str("openai_embed_api_key"),
     dify_base_url: str("dify_base_url"),
     dify_api_key: fields.dify_api_key?.value === "***" ? "" : str("dify_api_key"),
     azure_openai_api_key: fields.azure_openai_api_key?.value === "***" ? "" : str("azure_openai_api_key"),
@@ -41,6 +48,14 @@ export function respToForm(response: SettingsResponse): FormState {
       return value === "en" ? "en" : "zh";
     })(),
     index_exclude_patterns: str("index_exclude_patterns"),
+    llm_provider: (() => {
+      const v = str("llm_provider").toLowerCase().replace(/-/g, "_");
+      if (v === "dify") return "dify";
+      if (v === "azure_openai" || v === "azure") return "azure_openai";
+      if (v === "openai" || v === "openai_compat") return "openai";
+      if (v === "auto" || v === "legacy") return "openai";
+      return "openai";
+    })(),
   };
 }
 
@@ -56,6 +71,7 @@ export function buildPatch(
     "ollama_base_url",
     "openai_model",
     "openai_base_url",
+    "openai_embed_base_url",
     "dify_base_url",
     "azure_openai_endpoint",
     "azure_openai_version",
@@ -88,6 +104,12 @@ export function buildPatch(
   }
   if (initial.content_language !== form.content_language) {
     patch.content_language = form.content_language === "en" ? "en" : "zh";
+  }
+  if (initial.llm_provider !== form.llm_provider) {
+    patch.llm_provider = form.llm_provider;
+  }
+  if (initial.embed_provider !== form.embed_provider) {
+    patch.embed_provider = form.embed_provider;
   }
   if (initial.index_exclude_patterns !== form.index_exclude_patterns) {
     patch.index_exclude_patterns = form.index_exclude_patterns;
