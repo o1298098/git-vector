@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import httpx
+import numpy as np
 
 # Chroma 0.4.x 使用旧版 PostHog 调用方式 capture(distinct_id, event, properties)，
 # 而 posthog 6.x 仅接受 capture(event, **kwargs)。在首次 import chromadb 前做兼容补丁：
@@ -225,23 +226,53 @@ def _keyword_boost_for_hit(tokens: list[str], content: str, metadata: dict[str, 
     return min(0.35, boost)
 
 
+def _coerce_embedding_to_float_list(emb: Any) -> list[float] | None:
+    """
+    Chroma get(include=['embeddings']) 常返回 numpy.ndarray，而 httpx 解析的 query 向量是 list。
+    仅接受「单条」向量（一维或 shape (1, dim)）；整块 (n, dim) 应在调用方按行切片后再传入。
+    """
+    if emb is None:
+        return None
+    if isinstance(emb, np.ndarray):
+        if emb.ndim > 1:
+            if emb.shape[0] != 1:
+                return None
+            emb = emb.reshape(-1)
+        if emb.size == 0:
+            return None
+        return [float(x) for x in emb.ravel()]
+    if isinstance(emb, (list, tuple)):
+        try:
+            out = [float(x) for x in emb]
+        except (TypeError, ValueError):
+            return None
+        return out if out else None
+    if hasattr(emb, "tolist") and not isinstance(emb, (str, bytes)):
+        try:
+            raw = emb.tolist()
+        except Exception:  # noqa: S110
+            return None
+        return _coerce_embedding_to_float_list(raw)
+    return None
+
+
 def _vector_score_from_embeddings(query_emb: list[float], hit_emb: Any) -> tuple[float | None, float | None]:
     """
     回退检索时基于已存 embedding 计算相似度分数。
     返回 (score, distance)，score 越大越相关，distance 越小越近。
     """
-    if not isinstance(hit_emb, list) or not query_emb:
+    q = _coerce_embedding_to_float_list(query_emb)
+    h = _coerce_embedding_to_float_list(hit_emb)
+    if not q or not h:
         return None, None
-    if not hit_emb:
-        return None, None
-    if len(hit_emb) != len(query_emb):
+    if len(h) != len(q):
         return None, None
     try:
-        qn = math.sqrt(sum(float(x) * float(x) for x in query_emb))
-        hn = math.sqrt(sum(float(x) * float(x) for x in hit_emb))
+        qn = math.sqrt(sum(float(x) * float(x) for x in q))
+        hn = math.sqrt(sum(float(x) * float(x) for x in h))
         if qn <= 0 or hn <= 0:
             return None, None
-        dot = sum(float(a) * float(b) for a, b in zip(query_emb, hit_emb))
+        dot = sum(float(a) * float(b) for a, b in zip(q, h))
         cosine = dot / (qn * hn)
         # 约束到 [-1, 1]，并映射到 [0, 1] 便于与主路径 score 对齐展示。
         cosine = max(-1.0, min(1.0, cosine))
