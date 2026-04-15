@@ -9,6 +9,7 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.config import settings
+from app.vector_store import resolve_project_display_name_for_enqueue
 
 router = APIRouter()
 
@@ -34,15 +35,16 @@ def _enqueue_if_main_branch(
         raise HTTPException(status_code=400, detail="Missing repository URL")
     from app.job_queue import get_job_queue
 
+    pname = resolve_project_display_name_for_enqueue(str(project_id), project_name)
     job = get_job_queue().enqueue(
         project_id=str(project_id),
         repo_url=str(repo_url),
-        project_name=project_name,
+        project_name=pname,
     )
     return {
         "status": "queued",
         "project_id": project_id,
-        "project_name": project_name or None,
+        "project_name": pname or None,
         "job_id": job.job_id,
     }
 

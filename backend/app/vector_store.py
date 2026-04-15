@@ -271,6 +271,22 @@ def get_project_index_meta(project_id: str) -> dict[str, Any] | None:
     }
 
 
+def resolve_project_display_name_for_enqueue(project_id: str, incoming: str) -> str:
+    """
+    自动化入队（如 GitLab/GitHub push Webhook）使用的展示名解析。
+
+    若 ``project_index`` 中已有非空 ``project_name``（通常来自用户在概览里 PATCH 的展示名），
+    则优先复用，避免托管方事件里的仓库短名写入新任务，进而覆盖列表与 ``latest`` 展示逻辑。
+    """
+    pid = str(project_id or "").strip()
+    inc = (incoming or "").strip()
+    if not pid:
+        return inc
+    meta = get_project_index_meta(pid)
+    saved = str((meta or {}).get("project_name") or "").strip()
+    return saved if saved else inc
+
+
 def _upsert_project_index_in_db(
     project_id: str,
     doc_count: int,
