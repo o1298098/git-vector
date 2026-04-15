@@ -5,23 +5,12 @@ import shutil
 import subprocess
 from typing import Optional
 
-import httpx
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from app.effective_settings import (
-    effective_azure_openai_api_key,
-    effective_azure_openai_endpoint,
-    effective_azure_openai_version,
-    effective_dify_api_key,
-    effective_dify_base_url,
-    effective_embed_model,
-    effective_ollama_api_key,
-    effective_ollama_base_url,
-    effective_openai_api_key,
-    effective_openai_base_url,
-)
 from app.job_queue import JobStatus, build_repo_url_for_clone, get_job_queue, get_job_store, sanitize_text
+from app.llm_client import precheck_llm_connectivity
+from app.vector_store import precheck_embedding_connectivity
 from app.config import settings
 from app.wiki_generator import wiki_manifest
 
@@ -182,70 +171,13 @@ def _run_git_ls_remote(repo_url: str) -> tuple[bool, str]:
 
 
 def _check_embedding() -> tuple[bool, str]:
-    base_url = (effective_ollama_base_url() or "http://localhost:11434").strip()
-    ollama_api_key = (effective_ollama_api_key() or "").strip()
-    headers = {"Authorization": f"Bearer {ollama_api_key}"} if ollama_api_key else None
-    model = effective_embed_model().strip()
-    if not model:
-        return False, "未配置 embed_model"
-    try:
-        with httpx.Client(base_url=base_url, timeout=20.0) as client:
-            resp = client.post("/api/embeddings", headers=headers, json={"model": model, "prompt": "health check"})
-            if resp.status_code >= 400:
-                return False, f"Ollama HTTP {resp.status_code}"
-            data = resp.json() if resp.content else {}
-            emb = data.get("embedding") if isinstance(data, dict) else None
-            embs = data.get("embeddings") if isinstance(data, dict) else None
-            if emb or embs:
-                return True, f"embedding 可用（model={model}）"
-            return False, "embedding 返回为空"
-    except Exception as e:  # noqa: S110
-        return False, sanitize_text(str(e))
+    ok, msg = precheck_embedding_connectivity()
+    return ok, sanitize_text(msg)
 
 
 def _check_llm() -> tuple[bool, str]:
-    dify_key = (effective_dify_api_key() or "").strip()
-    dify_base = (effective_dify_base_url() or "").strip().rstrip("/")
-    if dify_key and dify_base:
-        try:
-            with httpx.Client(timeout=20.0) as client:
-                r = client.get(dify_base)
-                if r.status_code < 500:
-                    return True, "Dify 可达"
-                return False, f"Dify HTTP {r.status_code}"
-        except Exception as e:  # noqa: S110
-            return False, sanitize_text(str(e))
-
-    az_key = (effective_azure_openai_api_key() or "").strip()
-    az_ep = (effective_azure_openai_endpoint() or "").strip().rstrip("/")
-    if az_key and az_ep:
-        version = (effective_azure_openai_version() or "2024-05-01-preview").strip()
-        url = f"{az_ep}/openai/deployments?api-version={version}"
-        try:
-            with httpx.Client(timeout=20.0) as client:
-                r = client.get(url, headers={"api-key": az_key})
-                if r.status_code < 400:
-                    return True, "Azure OpenAI 可达"
-                return False, f"Azure OpenAI HTTP {r.status_code}"
-        except Exception as e:  # noqa: S110
-            return False, sanitize_text(str(e))
-
-    oa_key = (effective_openai_api_key() or "").strip()
-    oa_base = (effective_openai_base_url() or "https://api.openai.com/v1").strip().rstrip("/")
-    if oa_key:
-        try:
-            with httpx.Client(timeout=20.0) as client:
-                r = client.get(
-                    f"{oa_base}/models",
-                    headers={"Authorization": f"Bearer {oa_key}"},
-                )
-                if r.status_code < 400:
-                    return True, "OpenAI 兼容接口可达"
-                return False, f"OpenAI 兼容接口 HTTP {r.status_code}"
-        except Exception as e:  # noqa: S110
-            return False, sanitize_text(str(e))
-
-    return True, "未配置 LLM（可选）"
+    ok, msg = precheck_llm_connectivity()
+    return ok, sanitize_text(msg)
 
 
 @router.post("/index-jobs/precheck")

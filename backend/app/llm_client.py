@@ -17,6 +17,7 @@ from app.effective_settings import (
     effective_azure_openai_version,
     effective_dify_api_key,
     effective_dify_base_url,
+    effective_llm_provider,
     effective_openai_api_key,
     effective_openai_base_url,
     effective_openai_model,
@@ -600,33 +601,101 @@ def reset_llm_client_cache() -> None:
     _cached_client = None
 
 
-def get_llm_client() -> LLMClient | None:
-    global _cached_client
-    if _cached_client is not None:
-        return _cached_client
+def _try_dify_client() -> LLMClient | None:
     dify_key = effective_dify_api_key()
     dify_url = effective_dify_base_url()
     if dify_key and dify_url:
-        _cached_client = DifyChatClient(dify_key, dify_url)
-        return _cached_client
-    # Azure OpenAI：优先使用官方 SDK
+        return DifyChatClient(dify_key, dify_url)
+    return None
+
+
+def _try_azure_client() -> LLMClient | None:
     az_key = effective_azure_openai_api_key()
     az_ep = effective_azure_openai_endpoint()
     if az_key and az_ep:
         version = effective_azure_openai_version() or "2024-05-01-preview"
         deployment = effective_azure_openai_deployment() or "gpt-4o-mini"
-        _cached_client = AzureOpenAISDKClient(
-            az_key,
-            az_ep,
-            version,
-            deployment,
-        )
-        return _cached_client
+        return AzureOpenAISDKClient(az_key, az_ep, version, deployment)
+    return None
+
+
+def _try_openai_client() -> LLMClient | None:
     oa_key = effective_openai_api_key()
     if oa_key:
         base = effective_openai_base_url() or "https://api.openai.com/v1"
-        _cached_client = OpenAICompatibleClient(
-            oa_key, base, model=effective_openai_model()
-        )
-        return _cached_client
+        return OpenAICompatibleClient(oa_key, base, model=effective_openai_model())
     return None
+
+
+def get_llm_client() -> LLMClient | None:
+    global _cached_client
+    if _cached_client is not None:
+        return _cached_client
+    provider = effective_llm_provider()
+    if provider == "dify":
+        _cached_client = _try_dify_client()
+        return _cached_client
+    if provider == "azure_openai":
+        _cached_client = _try_azure_client()
+        return _cached_client
+    _cached_client = _try_openai_client()
+    return _cached_client
+
+
+def precheck_llm_connectivity() -> tuple[bool, str]:
+    """按 llm_provider 检查对应 LLM 是否可达（与 get_llm_client 选型一致）。"""
+    provider = effective_llm_provider()
+
+    def check_dify() -> tuple[bool, str]:
+        dify_key = (effective_dify_api_key() or "").strip()
+        dify_base = (effective_dify_base_url() or "").strip().rstrip("/")
+        if not dify_key or not dify_base:
+            return False, "已选择 Dify，但未配置 DIFY_API_KEY 或 DIFY_BASE_URL"
+        try:
+            with httpx.Client(timeout=20.0) as client:
+                r = client.get(dify_base)
+                if r.status_code < 500:
+                    return True, "Dify 可达"
+                return False, f"Dify HTTP {r.status_code}"
+        except Exception as e:  # noqa: S110
+            return False, str(e)
+
+    def check_azure() -> tuple[bool, str]:
+        az_key = (effective_azure_openai_api_key() or "").strip()
+        az_ep = (effective_azure_openai_endpoint() or "").strip().rstrip("/")
+        if not az_key or not az_ep:
+            return False, "已选择 Azure OpenAI，但未配置密钥或 Endpoint"
+        version = (effective_azure_openai_version() or "2024-05-01-preview").strip()
+        url = f"{az_ep}/openai/deployments?api-version={version}"
+        try:
+            with httpx.Client(timeout=20.0) as client:
+                r = client.get(url, headers={"api-key": az_key})
+                if r.status_code < 400:
+                    return True, "Azure OpenAI 可达"
+                return False, f"Azure OpenAI HTTP {r.status_code}"
+        except Exception as e:  # noqa: S110
+            return False, str(e)
+
+    def check_openai() -> tuple[bool, str]:
+        oa_key = (effective_openai_api_key() or "").strip()
+        oa_base = (effective_openai_base_url() or "https://api.openai.com/v1").strip().rstrip("/")
+        if not oa_key:
+            return False, "已选择 OpenAI 兼容，但未配置 OPENAI_API_KEY"
+        try:
+            with httpx.Client(timeout=20.0) as client:
+                r = client.get(f"{oa_base}/models", headers={"Authorization": f"Bearer {oa_key}"})
+                if r.status_code < 400:
+                    return True, "OpenAI 兼容接口可达"
+                return False, f"OpenAI 兼容接口 HTTP {r.status_code}"
+        except Exception as e:  # noqa: S110
+            return False, str(e)
+
+    if provider == "dify":
+        return check_dify()
+    if provider == "azure_openai":
+        return check_azure()
+    # openai：无 API Key 时视为未启用 LLM，不阻塞索引预检
+    oa_key = (effective_openai_api_key() or "").strip()
+    if not oa_key:
+        return True, "未配置 OPENAI_API_KEY（LLM 可选）"
+    return check_openai()
