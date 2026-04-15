@@ -10,6 +10,8 @@ import { PAGE_SIZES, type Job } from "../types";
 type JobsTableCardProps = {
   jobs: Job[];
   loading: boolean;
+  /** After first request finishes (success or error); avoids skeleton flashing on empty-list polling. */
+  initialFetchDone: boolean;
   total: number;
   page: number;
   pageSize: number;
@@ -53,6 +55,7 @@ function getJobDuration(job: Job): string {
 export function JobsTableCard({
   jobs,
   loading,
+  initialFetchDone,
   total,
   page,
   pageSize,
@@ -70,8 +73,8 @@ export function JobsTableCard({
   const closeDetailBtnRef = useRef<HTMLButtonElement | null>(null);
   const detailDialogRef = useRef<HTMLDivElement | null>(null);
   const detailJob = useMemo(() => jobs.find((j) => j.job_id === detailJobId) ?? null, [jobs, detailJobId]);
-  const showInitialSkeleton = loading && jobs.length === 0;
-  const showRefreshingOverlay = loading && jobs.length > 0;
+  const showInitialSkeleton = loading && jobs.length === 0 && !initialFetchDone;
+  const showSoftRefresh = loading && jobs.length > 0;
 
   useEffect(() => {
     if (!detailJob) return;
@@ -111,7 +114,13 @@ export function JobsTableCard({
     <Card>
       <CardContent className="space-y-3 p-4">
         <div className="relative">
-          <div className="w-full overflow-x-auto">
+          <div
+            className={cn(
+              "w-full overflow-x-auto transition-opacity duration-300 ease-out",
+              showSoftRefresh ? "opacity-[0.93]" : "opacity-100",
+            )}
+            aria-busy={showSoftRefresh}
+          >
             <Table className="!w-full min-w-[75.5rem] table-fixed text-xs">
               <colgroup>
                 <col style={{ width: "19rem" }} />
@@ -282,14 +291,6 @@ export function JobsTableCard({
               </TableBody>
             </Table>
           </div>
-          {showRefreshingOverlay ? (
-            <div
-              role="status"
-              aria-live="polite"
-              aria-label={t("jobs.loadingAria")}
-              className="pointer-events-none absolute inset-0 bg-background/40 backdrop-blur-[1px]"
-            />
-          ) : null}
         </div>
 
         <div className="flex flex-col gap-2 border-t pt-3 sm:flex-row sm:items-center sm:justify-between">
@@ -314,7 +315,7 @@ export function JobsTableCard({
               {t("jobs.rows")}
             </label>
             <div className="flex items-center gap-1">
-              <Button type="button" variant="outline" size="sm" disabled={page <= 0 || loading} onClick={onPrevPage}>
+              <Button type="button" variant="outline" size="sm" disabled={page <= 0} onClick={onPrevPage}>
                 <ChevronLeft className="size-4" />
                 {t("jobs.prev")}
               </Button>
@@ -322,7 +323,7 @@ export function JobsTableCard({
                 type="button"
                 variant="outline"
                 size="sm"
-                disabled={page + 1 >= totalPages || total === 0 || loading}
+                disabled={page + 1 >= totalPages || total === 0}
                 onClick={onNextPage}
               >
                 {t("jobs.next")}

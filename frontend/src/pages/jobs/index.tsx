@@ -10,6 +10,7 @@ export function Jobs() {
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(10);
   const [loading, setLoading] = useState(false);
+  const [initialFetchDone, setInitialFetchDone] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [cancellingId, setCancellingId] = useState<string | null>(null);
   const [cancelError, setCancelError] = useState<string | null>(null);
@@ -68,6 +69,7 @@ export function Jobs() {
       if (controller.signal.aborted) return;
       if (currentSeq !== requestSeqRef.current) return;
       setLoading(false);
+      setInitialFetchDone(true);
     }
   }, [page, pageSize]);
 
@@ -167,6 +169,7 @@ export function Jobs() {
       <JobsTableCard
         jobs={jobs}
         loading={loading}
+        initialFetchDone={initialFetchDone}
         total={total}
         page={page}
         pageSize={pageSize}
