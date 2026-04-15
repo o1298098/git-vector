@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { RefreshCw } from "lucide-react";
 import { apiJson } from "@/lib/api";
+import { Button } from "@/components/ui/button";
 import { useI18n } from "@/i18n/I18nContext";
 import { cn } from "@/lib/utils";
 import { UsageBreakdownCards } from "./components/UsageBreakdownCards";
@@ -126,7 +128,21 @@ export function LlmUsage() {
     <div className="mx-auto max-w-6xl space-y-5">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">{t("usage.title")}</h1>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <h1 className="text-2xl font-semibold tracking-tight">{t("usage.title")}</h1>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 shrink-0 text-muted-foreground hover:bg-transparent hover:text-foreground"
+              onClick={() => void load()}
+              aria-label={t("usage.refresh")}
+              title={t("usage.refresh")}
+              disabled={loading}
+            >
+              <RefreshCw className={cn("size-4", loading && "animate-spin")} aria-hidden />
+            </Button>
+          </div>
           <p className="text-muted-foreground">{t("usage.subtitle")}</p>
         </div>
         <label className="text-sm text-muted-foreground">
