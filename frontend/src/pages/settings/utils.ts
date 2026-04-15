@@ -38,6 +38,7 @@ export function respToForm(response: SettingsResponse): FormState {
       const value = str("content_language").toLowerCase();
       return value === "en" ? "en" : "zh";
     })(),
+    index_exclude_patterns: str("index_exclude_patterns"),
   };
 }
 
@@ -84,6 +85,9 @@ export function buildPatch(
   }
   if (initial.content_language !== form.content_language) {
     patch.content_language = form.content_language === "en" ? "en" : "zh";
+  }
+  if (initial.index_exclude_patterns !== form.index_exclude_patterns) {
+    patch.index_exclude_patterns = form.index_exclude_patterns;
   }
   return patch;
 }

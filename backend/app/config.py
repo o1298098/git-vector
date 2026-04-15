@@ -67,6 +67,16 @@ class Settings(BaseSettings):
     # 本地 Git 镜像缓存（DATA_DIR/repos）：多项目时按 LRU 删其它项目目录以控磁盘；0 表示不启用
     repos_cache_max_gb: float = 0
     repos_cache_max_count: int = 0
+    # 索引时排除的仓库相对路径 glob（见 index_exclude 模块）；多行或逗号分隔；可在管理端「设置」覆盖
+    index_exclude_patterns: str = ""
+
+    @field_validator("index_exclude_patterns", mode="before")
+    @classmethod
+    def _normalize_index_exclude_patterns(cls, v: object) -> str:
+        s = "" if v is None else str(v)
+        if len(s) > 65536:
+            s = s[:65536]
+        return s
 
     @field_validator("content_language", mode="before")
     @classmethod

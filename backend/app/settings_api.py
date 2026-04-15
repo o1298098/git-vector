@@ -52,6 +52,13 @@ def _normalize_patch_item(key: str, raw: Any) -> Any:
         if s not in ("zh", "en"):
             raise ValueError("content_language 须为 zh 或 en")
         return s
+    if key == "index_exclude_patterns":
+        if not isinstance(raw, str):
+            raw = str(raw)
+        s = raw.strip()
+        if len(s) > 65536:
+            raise ValueError("index_exclude_patterns 过长（最多 65536 字符）")
+        return s
     if key in (
         "embed_model",
         "openai_model",

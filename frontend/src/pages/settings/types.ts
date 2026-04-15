@@ -10,6 +10,7 @@ export const SECRET_KEYS = ["openai_api_key", "dify_api_key", "azure_openai_api_
 export const SETTINGS_SECTIONS: { id: string; labelKey: string }[] = [
   { id: "settings-gitlab", labelKey: "settings.navGitlab" },
   { id: "settings-embedding", labelKey: "settings.navEmbedding" },
+  { id: "settings-indexing", labelKey: "settings.navIndexing" },
   { id: "settings-llm", labelKey: "settings.navLlm" },
   { id: "settings-output", labelKey: "settings.navOutput" },
   { id: "settings-storage", labelKey: "settings.navStorage" },
@@ -44,6 +45,7 @@ export type FormState = {
   wiki_symbol_rows_per_file: string;
   npm_registry: string;
   content_language: string;
+  index_exclude_patterns: string;
 };
 
 export const EMPTY_FORM: FormState = {
@@ -65,4 +67,5 @@ export const EMPTY_FORM: FormState = {
   wiki_symbol_rows_per_file: "4000",
   npm_registry: "",
   content_language: "zh",
+  index_exclude_patterns: "",
 };

@@ -39,6 +39,7 @@ ALLOWED_OVERRIDE_KEYS: frozenset[str] = frozenset({
     "wiki_symbol_rows_per_file",
     "npm_registry",
     "content_language",
+    "index_exclude_patterns",
 })
 
 SECRET_KEYS: frozenset[str] = frozenset({

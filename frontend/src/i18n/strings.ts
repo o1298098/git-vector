@@ -253,6 +253,7 @@ export const messages: Record<Locale, Record<string, string>> = {
     "settings.useEnv": "改用环境变量",
     "settings.navGitlab": "Git 仓库",
     "settings.navEmbedding": "嵌入模型",
+    "settings.navIndexing": "索引排除",
     "settings.navLlm": "大模型 API",
     "settings.navOutput": "语言与 Wiki",
     "settings.groupDify": "Dify",
@@ -260,6 +261,12 @@ export const messages: Record<Locale, Record<string, string>> = {
     "settings.groupOpenai": "OpenAI 兼容",
     "settings.embedTitle": "向量嵌入模型",
     "settings.embedDesc": "须与 Ollama / 嵌入服务端一致，用于索引与语义检索时的向量生成。",
+    "settings.indexExcludeTitle": "索引路径排除",
+    "settings.indexExcludeDesc":
+      "按 glob 跳过仓库内相对路径（正斜杠），不进入解析与 LLM 说明；与内置跳过目录（如 node_modules）叠加。修改后需重新索引才生效。",
+    "settings.indexExcludeLabel": "排除规则（每行一条；# 开头为注释）",
+    "settings.indexExcludeHint":
+      "示例：**/*.pb.go、generated/**/*、docs/internal/**。单行可写多条并用英文逗号分隔；多行时每行一条。目录树建议写成 …/**/*。环境变量 INDEX_EXCLUDE_PATTERNS；保存到本页后会写入 ui_overrides 并覆盖 .env 中的同名项（删除该键可恢复为环境变量）。",
     "settings.llmTitle": "大语言模型",
     "settings.llmDesc": "生成代码说明、架构分析与 Wiki 等文本时的调用顺序：依次尝试 Dify、Azure OpenAI、OpenAI 兼容接口。",
     "settings.gitlabTitle": "HTTPS 克隆",
@@ -640,6 +647,7 @@ export const messages: Record<Locale, Record<string, string>> = {
     "settings.useEnv": "Use env value",
     "settings.navGitlab": "Git repository",
     "settings.navEmbedding": "Embeddings",
+    "settings.navIndexing": "Index excludes",
     "settings.navLlm": "LLM API",
     "settings.navOutput": "Language & wiki",
     "settings.groupDify": "Dify",
@@ -647,6 +655,12 @@ export const messages: Record<Locale, Record<string, string>> = {
     "settings.groupOpenai": "OpenAI-compatible",
     "settings.embedTitle": "Embedding model",
     "settings.embedDesc": "Must match Ollama / your embedding server; used when indexing and for semantic search vectors.",
+    "settings.indexExcludeTitle": "Index path excludes",
+    "settings.indexExcludeDesc":
+      "Glob patterns (forward slashes, repo-relative) skip parsing and LLM descriptions; combined with built-in skips (e.g. node_modules). Re-index to apply.",
+    "settings.indexExcludeLabel": "Patterns (one per line; # starts a comment)",
+    "settings.indexExcludeHint":
+      "Examples: **/*.pb.go, generated/**/*, docs/internal/**. In a single line you may separate entries with commas. Prefer /**/* for full directory trees. Env INDEX_EXCLUDE_PATTERNS or UI; UI override wins.",
     "settings.llmTitle": "Large language model",
     "settings.llmDesc": "Used for descriptions, architecture text, and wiki. Tries Dify, then Azure OpenAI, then an OpenAI-compatible API.",
     "settings.gitlabTitle": "HTTPS clone",

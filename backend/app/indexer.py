@@ -8,7 +8,8 @@ from typing import Callable, Optional, Any
 
 import git
 from app.config import settings
-from app.effective_settings import effective_embed_model, effective_wiki_enabled
+from app.effective_settings import effective_embed_model, effective_index_exclude_patterns, effective_wiki_enabled
+from app.index_exclude import parse_index_exclude_patterns, path_matches_index_exclude
 from app.code_parser import EXT_TO_LANG, parse_files
 from app.analyzer import describe_functions_batch
 from app.vector_store import (
@@ -179,6 +180,7 @@ def clone_or_pull(repo_url: str, project_id: str) -> Path:
 
 def collect_code_files(repo_path: Path) -> list[tuple[str, str]]:
     """返回 [(相对路径, 文件内容), ...]，仅常见代码/配置。"""
+    exclude_pats = parse_index_exclude_patterns(effective_index_exclude_patterns())
     out = []
     for root, dirs, files in os.walk(repo_path):
         dirs[:] = [d for d in dirs if not _should_skip(d)]
@@ -187,6 +189,9 @@ def collect_code_files(repo_path: Path) -> list[tuple[str, str]]:
             if _should_skip(f):
                 continue
             path = rel_root / f
+            rel_posix = str(path).replace("\\", "/")
+            if path_matches_index_exclude(rel_posix, exclude_pats):
+                continue
             ext = path.suffix.lower()
             if ext not in {
                 ".py", ".js", ".ts", ".tsx", ".jsx", ".java", ".go", ".rs", ".cs",

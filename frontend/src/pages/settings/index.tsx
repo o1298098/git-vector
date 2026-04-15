@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import { useI18n } from "@/i18n/I18nContext";
 import { SettingsActionsBar } from "./components/SettingsActionsBar";
 import { SettingsSideNav } from "./components/SettingsSideNav";
@@ -305,6 +306,42 @@ export function Settings() {
                     <CardDescription>{t("settings.embedDesc")}</CardDescription>
                   </CardHeader>
                   <CardContent className="space-y-5 p-4 pt-6 sm:p-6">{row("embed_model", "embed_model")}</CardContent>
+                </Card>
+              </section>
+
+              <section id="settings-indexing" className="scroll-mt-24 space-y-0">
+                <Card className="border shadow-sm">
+                  <CardHeader className="border-b bg-muted/30 py-4">
+                    <CardTitle className="text-lg">{t("settings.indexExcludeTitle")}</CardTitle>
+                    <CardDescription>{t("settings.indexExcludeDesc")}</CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-3 p-4 pt-6 sm:p-6">
+                    <div className="space-y-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Label htmlFor="index_exclude_patterns">{t("settings.indexExcludeLabel")}</Label>
+                        <SourceBadge
+                          source={fieldSource.index_exclude_patterns ?? "env"}
+                          labelOverride={t("settings.sourceOverride")}
+                          labelEnv={t("settings.sourceEnv")}
+                        />
+                      </div>
+                      <Textarea
+                        id="index_exclude_patterns"
+                        className="min-h-[140px] max-w-3xl font-mono text-xs"
+                        spellCheck={false}
+                        value={form.index_exclude_patterns}
+                        onChange={(event) => setForm((prev) => ({ ...prev, index_exclude_patterns: event.target.value }))}
+                        placeholder={"**/*.pb.go\ngenerated/**/*"}
+                      />
+                      <p className="text-xs text-muted-foreground">{t("settings.indexExcludeHint")}</p>
+                      {envDefaults.index_exclude_patterns != null &&
+                      String(envDefaults.index_exclude_patterns).trim() !== "" ? (
+                        <p className="whitespace-pre-wrap break-words text-xs text-muted-foreground">
+                          {t("settings.envLine", { value: String(envDefaults.index_exclude_patterns) })}
+                        </p>
+                      ) : null}
+                    </div>
+                  </CardContent>
                 </Card>
               </section>
 
