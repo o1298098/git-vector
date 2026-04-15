@@ -118,7 +118,11 @@ async def gitlab_webhook(
     ref = data.get("ref", "")
     project = data.get("project", {})
     repo_url = project.get("http_url") or project.get("ssh_url_to_repo")
-    project_id = project.get("id") or project.get("path_with_namespace", "unknown")
+    path_ns = project.get("path_with_namespace")
+    if isinstance(path_ns, str) and path_ns.strip():
+        project_id = path_ns.strip()
+    else:
+        project_id = str(project.get("id") or "unknown")
     project_name = str(project.get("name") or "").strip()
 
     return _enqueue_if_main_branch(ref, repo_url, str(project_id), project_name)
@@ -148,7 +152,11 @@ async def github_webhook(
     ref = data.get("ref", "")
     repo = data.get("repository") or {}
     repo_url = repo.get("clone_url") or repo.get("git_url") or repo.get("ssh_url")
-    project_id = repo.get("full_name") or repo.get("name") or "unknown"
+    full_name = repo.get("full_name")
+    if isinstance(full_name, str) and full_name.strip():
+        project_id = full_name.strip()
+    else:
+        project_id = str(repo.get("name") or repo.get("id") or "unknown")
     project_name = str(repo.get("name") or "").strip()
 
     return _enqueue_if_main_branch(ref, repo_url, str(project_id), project_name)
