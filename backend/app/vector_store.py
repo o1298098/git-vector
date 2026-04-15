@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import re
 import sqlite3
 import threading
@@ -137,6 +136,15 @@ def _extract_llm_description_from_document(
     text = str(doc or "")
     if not text.strip():
         return ""
+    tagged = _parse_tagged_document(text)
+    summary = str(
+        tagged.get("SUMMARY")
+        or tagged.get("SUMMARY_ZH")
+        or tagged.get("FUNCTIONALITY")
+        or ""
+    ).strip()
+    if summary:
+        return summary
     lines = text.splitlines()
     if not lines:
         return ""
@@ -148,10 +156,64 @@ def _extract_llm_description_from_document(
         s = (ln or "").strip()
         if not s:
             continue
-        if s.startswith("Calls:") or s.startswith("```"):
+        if s.startswith("Calls:") or s.startswith("[") or s.startswith("```"):
             return ""
         return s
     return ""
+
+
+def _parse_tagged_document(doc: str) -> dict[str, str]:
+    """
+    解析形如 `[KEY] value` 的弱结构化 DSL 文本。
+    仅提取第一层标签行，不解析 JSON/嵌套结构。
+    """
+    out: dict[str, str] = {}
+    for ln in str(doc or "").splitlines():
+        s = ln.strip()
+        if not s.startswith("["):
+            continue
+        end = s.find("]")
+        if end <= 1:
+            continue
+        key = s[1:end].strip().upper()
+        val = s[end + 1 :].strip()
+        if not key or not val:
+            continue
+        out[key] = val
+    return out
+
+
+def _query_tokens_for_boost(text: str) -> list[str]:
+    q = str(text or "").strip().lower()
+    if not q:
+        return []
+    tokens: set[str] = {q}
+    tokens.update(t for t in re.split(r"[^0-9a-zA-Z_\-./]+", q) if len(t) >= 2)
+    # 限制 token 数量，避免极长 query 增加过多 CPU 开销
+    return list(tokens)[:12]
+
+
+def _keyword_boost_for_hit(tokens: list[str], content: str, metadata: dict[str, Any]) -> float:
+    if not tokens:
+        return 0.0
+    path = str(metadata.get("path") or "").lower()
+    name = str(metadata.get("name") or metadata.get("symbol") or "").lower()
+    tags_csv = str(metadata.get("tags_csv") or "").lower()
+    calls_csv = str(metadata.get("calls_csv") or "").lower()
+    hay = str(content or "").lower()
+    boost = 0.0
+    for tk in tokens:
+        if tk in path:
+            boost += 0.10
+        if tk in name:
+            boost += 0.08
+        if tags_csv and tk in tags_csv:
+            boost += 0.12
+        if calls_csv and tk in calls_csv:
+            boost += 0.12
+        if tk in hay:
+            boost += 0.03
+    return min(0.35, boost)
 
 
 def _utc_now_iso() -> str:
@@ -435,15 +497,11 @@ def _embed(texts: list[str], prefix: str = "") -> list[tuple[int, list[float]]]:
         texts = [f"{prefix}{t}" for t in texts]
 
     model_name = effective_embed_model()
-    base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    base_url = settings.ollama_base_url
 
     # Ollama 向量模型也有上下文长度限制，这里做一个保守的字符截断防御。
-    # 这里默认按 qwen3-embedding 40K context 估算，大约用 2 万字符作为安全上限，
-    # 如需更精细可通过环境变量 EMBED_MAX_CHARS 调整。
-    try:
-        max_chars = int(os.getenv("EMBED_MAX_CHARS", "30000"))
-    except ValueError:
-        max_chars = 8000
+    # 如需更精细可通过配置 EMBED_MAX_CHARS 调整。
+    max_chars = settings.embed_max_chars
 
     # 返回值中带有原始 texts 的索引，方便上层只写入成功的那几条
     embeddings: list[tuple[int, list[float]]] = []
@@ -772,12 +830,13 @@ class VectorStore:
         if not chunks:
             return {"attempted": 0, "embedded": 0, "status": "skipped"}
         documents = [c.get("content", "") for c in chunks]
+        embed_inputs = [c.get("embedding_text") or c.get("content", "") for c in chunks]
         raw_metas = [{**c.get("metadata", {}), "project_id": project_id} for c in chunks]
         metadatas = [self._sanitize_metadata(m) for m in raw_metas]
         ids = [stable_vector_id(project_id, m) for m in metadatas]
-        # 存文档时加 passage 前缀；若某条向量生成失败，只跳过该条；若全部失败则跳过整个项目
+        # 向量化优先使用 embedding_text（不含大段源码）；documents 仍保存完整 content 供展示/二阶段分析。
         try:
-            emb_with_idx = _embed(documents, prefix="passage: ")
+            emb_with_idx = _embed(embed_inputs, prefix="passage: ")
         except Exception as e:  # noqa: S110
             logger.error(
                 "Embedding failed for project %s, skip upsert to vector store: %s",
@@ -876,11 +935,12 @@ class VectorStore:
         if not chunks:
             return {"attempted": 0, "embedded": 0, "status": "skipped"}
         documents = [c.get("content", "") for c in chunks]
+        embed_inputs = [c.get("embedding_text") or c.get("content", "") for c in chunks]
         raw_metas = [{**c.get("metadata", {}), "project_id": project_id} for c in chunks]
         metadatas = [self._sanitize_metadata(m) for m in raw_metas]
         ids = [stable_vector_id(project_id, m) for m in metadatas]
         try:
-            emb_with_idx = _embed(documents, prefix="passage: ")
+            emb_with_idx = _embed(embed_inputs, prefix="passage: ")
         except Exception as e:  # noqa: S110
             logger.error(
                 "Embedding failed for project %s (incremental), skip upsert: %s",
@@ -992,6 +1052,7 @@ class VectorStore:
             include=["documents", "metadatas", "distances"],
         )
         out = []
+        tokens = _query_tokens_for_boost(text)
         docs = (results.get("documents") or [[]])[0]
         metas = (results.get("metadatas") or [[]])[0]
         dists = (results.get("distances") or [[]])[0]
@@ -1002,7 +1063,57 @@ class VectorStore:
                 dist_f = None
             # Chroma 返回的是距离（越小越近）；API 同时给出 score 供前端展示「相似度」：越大越相关
             score = (1.0 / (1.0 + dist_f)) if dist_f is not None else None
-            out.append({"content": d, "metadata": m or {}, "distance": dist_f, "score": score})
+            meta = m or {}
+            boost = _keyword_boost_for_hit(tokens, str(d or ""), meta)
+            base = float(score) if score is not None else 0.0
+            hybrid = min(1.0, base + boost)
+            out.append(
+                {
+                    "content": d,
+                    "metadata": meta,
+                    "distance": dist_f,
+                    "score": score,
+                    "boost": boost,
+                    "hybrid_score": hybrid,
+                }
+            )
+        out.sort(key=lambda x: float(x.get("hybrid_score") or 0.0), reverse=True)
+        if out:
+            return out
+
+        # 兜底：部分历史数据可能存在“有 documents/metadatas，但向量索引不可检索”的状态。
+        # 当语义 query 返回空时，退化到项目内文档检索，避免接口全空。
+        if project_id:
+            pid = str(project_id).strip()
+            if pid:
+                try:
+                    raw = self.collection.get(
+                        where={"project_id": pid},
+                        include=["documents", "metadatas"],
+                        limit=max(1, int(top_k)),
+                    )
+                    r_docs = raw.get("documents") or []
+                    r_metas = raw.get("metadatas") or []
+                    fb: list[dict[str, Any]] = []
+                    for d, m in zip(r_docs, r_metas):
+                        meta = m or {}
+                        boost = _keyword_boost_for_hit(tokens, str(d or ""), meta)
+                        fb.append(
+                            {
+                                "content": d,
+                                "metadata": meta,
+                                "distance": None,
+                                "score": None,
+                                "boost": boost,
+                                "hybrid_score": boost,
+                                "fallback_source": "collection_get",
+                            }
+                        )
+                    fb.sort(key=lambda x: float(x.get("hybrid_score") or 0.0), reverse=True)
+                    if fb:
+                        return fb
+                except Exception as e:  # noqa: S110
+                    logger.warning("Query fallback get() failed for %s: %s", pid, e)
         return out
 
     def list_project_vectors(

@@ -1,5 +1,6 @@
 import logging
 import os
+import json
 import shutil
 import subprocess
 import time
@@ -8,7 +9,12 @@ from typing import Callable, Optional, Any
 
 import git
 from app.config import settings
-from app.effective_settings import effective_embed_model, effective_index_exclude_patterns, effective_wiki_enabled
+from app.effective_settings import (
+    effective_content_language,
+    effective_embed_model,
+    effective_index_exclude_patterns,
+    effective_wiki_enabled,
+)
 from app.index_exclude import parse_index_exclude_patterns, path_matches_index_exclude
 from app.code_parser import EXT_TO_LANG, parse_files
 from app.analyzer import describe_functions_batch
@@ -266,6 +272,137 @@ def _fenced_code_block(code: str, path: str) -> tuple[str, str | None]:
     return (f"\n```{lang}\n{code.rstrip()}\n```", lang)
 
 
+def _uniq_strs(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for raw in values:
+        s = str(raw or "").strip()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+    return out
+
+
+def _to_csv(values: list[str]) -> str:
+    return ",".join(_uniq_strs(values))
+
+
+def _derive_framework(path: str) -> str:
+    p = path.lower()
+    if p.endswith(".vue"):
+        return "vue"
+    if p.endswith((".tsx", ".jsx")):
+        return "react"
+    return ""
+
+
+def _derive_tags(path: str, kind: str, code_lang: str | None) -> list[str]:
+    p = path.lower()
+    tags: list[str] = [str(kind or "").strip().lower()]
+    if code_lang:
+        tags.append(str(code_lang).strip().lower())
+    if p.endswith(".vue"):
+        tags.extend(["vue", "component"])
+    if p.endswith((".tsx", ".jsx")):
+        tags.extend(["react", "component"])
+    if "table" in p:
+        tags.append("table")
+    if "list" in p:
+        tags.append("list")
+    if "/views/" in p or "\\views\\" in p:
+        tags.append("view")
+    return _uniq_strs(tags)
+
+
+def _derive_patterns(symbol: str, calls: list[str], code: str) -> list[str]:
+    s = str(symbol or "").lower()
+    code_l = str(code or "").lower()
+    cset = {str(x or "").lower() for x in calls}
+    out: list[str] = []
+    if "override" in s and (" or " in code_l or "??" in code_l or " if " in code_l):
+        out.append("override-fallback")
+    if {"create", "get"} <= cset or {"create", "query"} <= cset:
+        out.append("query-or-create")
+    if "useeffect" in cset and "usestate" in cset:
+        out.append("react-state-effect")
+    if "v-for" in code_l or "map(" in code_l:
+        out.append("list-render")
+    return _uniq_strs(out)
+
+
+def _normalize_sentence(text: str) -> str:
+    s = " ".join(str(text or "").strip().split())
+    if not s:
+        return ""
+    if s[-1] not in ".!?。！？":
+        s += "."
+    return s
+
+
+def _build_functionality_text(
+    *,
+    summary: str,
+    symbol: str,
+    kind: str,
+    tags: list[str],
+    calls: list[str],
+    content_lang: str,
+) -> str:
+    """
+    生成用于 embedding 的规范化语义文本。
+    - 若已有 LLM 描述，直接规范化复用（不改写语义，不替换语言）。
+    - 仅在描述缺失时使用稳定模板兜底。
+    """
+    summary_text = str(summary or "").strip()
+    if summary_text:
+        return _normalize_sentence(summary_text)
+    zh = str(content_lang or "").strip().lower().startswith("zh")
+    if zh:
+        lines: list[str] = [_normalize_sentence(f"{kind} 类型符号 {symbol} 实现项目相关逻辑")]
+        if tags:
+            lines.append(_normalize_sentence("相关标签: " + ", ".join(tags[:8])))
+        if calls:
+            lines.append(_normalize_sentence("调用: " + ", ".join(calls[:10])))
+    else:
+        lines = [_normalize_sentence(f"{kind} symbol {symbol} handles project logic")]
+        if tags:
+            lines.append(_normalize_sentence("Related tags: " + ", ".join(tags[:8])))
+        if calls:
+            lines.append(_normalize_sentence("Invokes: " + ", ".join(calls[:10])))
+    return " ".join(lines)
+
+
+def _build_embedding_dsl(
+    *,
+    path: str,
+    symbol: str,
+    kind: str,
+    summary: str,
+    functionality: list[str],
+    calls: list[str],
+    tags: list[str],
+    patterns: list[str],
+) -> str:
+    lines = [
+        f"{path} :: {symbol}",
+        f"[TYPE] {kind}",
+        f"[SYMBOL] {symbol}",
+        f"[PATH] {path}",
+    ]
+    if summary:
+        lines.append(f"[SUMMARY] {summary}")
+    if functionality:
+        lines.append("[FUNCTIONALITY] " + "; ".join(functionality))
+    if calls:
+        lines.append("[CALLS] " + ", ".join(calls))
+    if tags:
+        lines.append("[TAGS] " + ", ".join(tags))
+    if patterns:
+        lines.append("[PATTERNS] " + ", ".join(patterns))
+    return "\n".join(lines)
+
+
 def _git_rev_parse(repo_path: Path) -> Optional[str]:
     try:
         r = subprocess.run(
@@ -313,32 +450,67 @@ def _git_diff_name_only(repo_path: Path, old_commit: str, new_commit: str) -> Op
 def _chunks_to_embedding_docs(project_id: str, chunks: list[dict]) -> list[dict]:
     """将已含 description 的 chunk 转为向量库格式（不再重复调用 LLM）。"""
     out = []
+    content_lang = effective_content_language()
     for c in chunks:
-        path = c["path"]
-        name = c["name"]
+        path = normalize_index_path(str(c.get("path") or ""))
+        name = str(c.get("name") or "").strip() or path
+        kind = str(c.get("kind") or "function").strip() or "function"
         code = c.get("code", "")
-        desc = c.get("description", "")
+        desc = str(c.get("description") or "").strip()
         raw_calls = c.get("calls") or []
-        calls = list(dict.fromkeys(str(x) for x in raw_calls if str(x).strip()))
-        # 用于检索的文本：路径、名称、描述、代码（便于判断功能是否实现）
-        content = f"{path} :: {name}"
-        if desc:
-            content += f"\n{desc}"
-        if calls:
-            content += "\nCalls: " + ", ".join(str(x) for x in calls)
+        calls = _uniq_strs([str(x) for x in raw_calls if str(x).strip()])
         fence_suffix, code_lang = _fenced_code_block(code, path)
-        content += fence_suffix
+        tags = _derive_tags(path, kind, code_lang)
+        llm_tags = _uniq_strs([str(x) for x in (c.get("llm_tags") or []) if str(x).strip()])
+        tags = _uniq_strs(tags + llm_tags)
+        functionality = _uniq_strs([str(x) for x in (c.get("llm_functionality") or []) if str(x).strip()])
+        patterns = _derive_patterns(name, calls, str(code or ""))
+        summary = _build_functionality_text(
+            summary=desc,
+            symbol=name,
+            kind=kind,
+            tags=tags,
+            calls=calls,
+            content_lang=content_lang,
+        )
+        embedding_text = _build_embedding_dsl(
+            path=path,
+            symbol=name,
+            kind=kind,
+            summary=summary,
+            functionality=functionality,
+            calls=calls,
+            tags=tags,
+            patterns=patterns,
+        )
+        content = embedding_text + fence_suffix
+        framework = _derive_framework(path)
         meta = {
             "path": path,
             "name": name,
-            "kind": c.get("kind", "function"),
+            "symbol": name,
+            "kind": kind,
+            "framework": framework,
             "start_line": c.get("start_line"),
             "end_line": c.get("end_line"),
             "calls": calls,
+            "calls_csv": _to_csv(calls),
+            "calls_json": json.dumps(calls, ensure_ascii=False),
+            "imports_csv": "",
+            "imports_json": "[]",
+            "tags": tags,
+            "tags_csv": _to_csv(tags),
+            "tags_json": json.dumps(tags, ensure_ascii=False),
+            "summary": summary,
+            "functionality_csv": "; ".join(functionality),
+            "functionality_json": json.dumps(functionality, ensure_ascii=False),
+            "patterns_csv": _to_csv(patterns),
+            "patterns_json": json.dumps(patterns, ensure_ascii=False),
+            "chunk_version": "v3",
         }
         if code_lang is not None:
             meta["code_lang"] = code_lang
-        out.append({"content": content, "metadata": meta})
+        out.append({"content": content, "embedding_text": embedding_text, "metadata": meta})
     return out
 
 

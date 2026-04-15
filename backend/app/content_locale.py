@@ -348,32 +348,29 @@ def describe_batch_system_user(lang: str) -> tuple[str, str]:
     """describe_functions_batch：system 与 user 指令前缀（不含代码块）。"""
     if normalize_content_lang(lang) == "en":
         system = (
-            "You are a code assistant. For each function/method or template/markup snippet, output exactly "
-            "one line in English describing it—moderately detailed. For templates, focus on UI structure and "
-            "interaction; for functions, focus on logic and side effects. No line breaks, no extra prefixes. "
-            "One line per input item in order."
+            "You are a code analysis assistant. For each input item, output exactly one JSON object in ONE line. "
+            "Required keys: idx (integer), summary (string), functionality (array of 2-4 short strings), tags (array of 3-5 keywords). "
+            "Return JSONL only (one JSON object per input item, in the same order). "
+            "Do not include markdown, numbering, or code fences."
         )
         user_head = (
             "Each item below is either a function/method or a UI template/markup fragment. "
-            "For each, output **one line in English** describing it accurately: "
-            "for functions, cover behavior, key I/O, conditions, side effects; "
-            "for templates, cover structure, main interactive elements, bindings. "
-            "Do not invent unrelated business meaning. Output only the descriptions, one per line in order [0][1]..., "
-            "no numbering, no paths in the answer:\n\n"
+            "For functions/methods, summarize logic/inputs/outputs/side effects; "
+            "for templates, summarize structure/interaction/bindings. "
+            "Use only information present in code. Set idx from the bracket prefix like [0], [1], ... . "
+            "Output JSONL only:\n\n"
         )
         return system, user_head
     system = (
-        "你是代码分析助手。根据提供的函数/方法或模板/标记片段，只输出一行中文描述，"
-        "可以适当详细；模板项侧重 UI 结构与交互含义，函数项侧重逻辑与副作用。"
-        "不要换行、不要添加额外前缀。每一行只对应一个输入项。"
+        "你是代码分析助手。对每个输入项输出一行 JSON 对象（JSONL）。"
+        "必须包含键：idx（整数）、summary（字符串）、functionality（2-4条短句数组）、tags（3-5个关键词数组）。"
+        "只输出 JSONL，不要编号、不要 Markdown、不要代码围栏，顺序与输入严格一致。"
     )
     user_head = (
         "以下每一项要么是函数/方法代码，要么是界面模板或标记类片段（如 HTML、组件模板等）。"
-        "请为每一个用**一行中文**较为详细地、准确地描述："
-        "对函数/方法写清业务逻辑、关键输入输出、重要条件或副作用等；"
-        "对模板写清页面结构、主要交互元素、条件/列表渲染、数据绑定意图等。"
-        "不要凭空臆测与代码无关的业务含义。只输出描述本身，每行一个，与 [0][1]... 顺序严格对应，"
-        "不要换行、不要编号、不要重复文件路径或名称：\n\n"
+        "函数/方法重点提炼逻辑、输入输出、副作用；模板重点提炼结构、交互、绑定。"
+        "仅基于代码，不要臆测。idx 必须使用每项前缀方括号里的数字（如 [0]、[1]）。"
+        "请直接输出 JSONL：\n\n"
     )
     return system, user_head
 

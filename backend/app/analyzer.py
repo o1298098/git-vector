@@ -1,4 +1,5 @@
 import logging
+import json
 from typing import Any
 
 from app.content_locale import analyze_repo_system_user, describe_batch_system_user
@@ -15,6 +16,68 @@ MAX_CODE_LEN = 4096
 # 单次发给 LLM 的最大文件数/字符，避免超长（保留用于兼容）
 MAX_FILES_PER_BATCH = 30
 MAX_CHARS_PER_BATCH = 80_000
+
+
+def _norm_text(v: Any) -> str:
+    return " ".join(str(v or "").strip().split())
+
+
+def _norm_tags(v: Any) -> list[str]:
+    if isinstance(v, list):
+        raw = v
+    elif isinstance(v, str):
+        raw = [x.strip() for x in v.split(",")]
+    else:
+        raw = []
+    out: list[str] = []
+    seen: set[str] = set()
+    for x in raw:
+        s = _norm_text(x).lower()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+    return out[:8]
+
+
+def _norm_points(v: Any) -> list[str]:
+    if isinstance(v, list):
+        raw = v
+    elif isinstance(v, str):
+        raw = [x.strip() for x in v.split(";")]
+    else:
+        raw = []
+    out: list[str] = []
+    for x in raw:
+        s = _norm_text(x)
+        if s:
+            out.append(s)
+    return out[:6]
+
+
+def _parse_batch_json_lines(text: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for ln in (text or "").splitlines():
+        s = ln.strip()
+        if not s:
+            continue
+        try:
+            obj = json.loads(s)
+        except Exception:
+            continue
+        if isinstance(obj, dict):
+            rows.append(obj)
+    return rows
+
+
+def _idx_from_row(row: dict[str, Any], batch_len: int) -> int | None:
+    try:
+        idx = int(row.get("idx"))
+    except Exception:
+        return None
+    if 0 <= idx < batch_len:
+        return idx
+    return None
 
 
 def describe_functions_batch(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -52,10 +115,34 @@ def describe_functions_batch(chunks: list[dict[str, Any]]) -> list[dict[str, Any
                 user=prompt,
                 feature="index_describe_chunks",
             )
+            json_rows = _parse_batch_json_lines(text or "")
             lines = [ln.strip() for ln in (text or "").strip().split("\n") if ln.strip()]
+            row_by_idx: dict[int, dict[str, Any]] = {}
+            for row in json_rows:
+                idx = _idx_from_row(row, len(batch))
+                if idx is None:
+                    continue
+                row_by_idx[idx] = row
             for j, c in enumerate(batch):
-                desc = lines[j] if j < len(lines) else ""
-                out.append({**c, "description": desc})
+                row = row_by_idx.get(j)
+                if row is None and j < len(json_rows):
+                    # 回退：兼容旧模型未返回 idx 的顺序对齐结果
+                    row = json_rows[j]
+                if row is not None:
+                    summary = _norm_text(row.get("summary"))
+                    if not summary:
+                        summary = _norm_text(lines[j] if j < len(lines) else "")
+                    out.append(
+                        {
+                            **c,
+                            "description": summary,
+                            "llm_functionality": _norm_points(row.get("functionality")),
+                            "llm_tags": _norm_tags(row.get("tags")),
+                        }
+                    )
+                else:
+                    desc = _norm_text(lines[j] if j < len(lines) else "")
+                    out.append({**c, "description": desc})
         except Exception as e:
             logger.warning("LLM describe batch failed: %s", e)
             out.extend(batch)

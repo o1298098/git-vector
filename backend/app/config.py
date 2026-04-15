@@ -45,8 +45,12 @@ class Settings(BaseSettings):
     azure_openai_version: str = "2024-05-01-preview"
     azure_openai_deployment: str = "gpt-4o-mini"  # 部署名，与 Azure 门户中一致
     data_dir: str = "./data"
+    # Ollama 服务地址（embedding 调用基地址）
+    ollama_base_url: str = "http://localhost:11434"
     # 文本嵌入模型（需为 fastembed TextEmbedding 支持列表中的模型，如 intfloat/multilingual-e5-large）
     embed_model: str = "intfloat/multilingual-e5-large"
+    # embedding 文本最大字符数（超长时截断，避免上下文窗口报错）
+    embed_max_chars: int = 30000
     # 索引成功后是否生成静态 Wiki（见 README / .env.example）
     wiki_enabled: bool = True
     # mkdocs：纯 Python；starlight / vitepress：需 Node.js + npm，首次会 npm install
@@ -121,6 +125,17 @@ class Settings(BaseSettings):
         except (TypeError, ValueError):
             return 0
         return n if n > 0 else 0
+
+    @field_validator("embed_max_chars", mode="before")
+    @classmethod
+    def _normalize_embed_max_chars(cls, v: object) -> int:
+        if v is None or v == "":
+            return 30000
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return 30000
+        return n if n > 0 else 30000
 
     @property
     def data_path(self) -> Path:
