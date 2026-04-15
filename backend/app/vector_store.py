@@ -1056,7 +1056,11 @@ class VectorStore:
         docs = (results.get("documents") or [[]])[0]
         metas = (results.get("metadatas") or [[]])[0]
         dists = (results.get("distances") or [[]])[0]
-        for d, m, dist in zip(docs, metas, dists):
+        n = min(len(docs), len(metas))
+        for i in range(n):
+            d = docs[i]
+            m = metas[i]
+            dist = dists[i] if i < len(dists) else None
             try:
                 dist_f = float(dist) if dist is not None else None
             except (TypeError, ValueError):
