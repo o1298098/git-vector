@@ -7,7 +7,9 @@ import math
 import os
 import re
 import sqlite3
+import socket
 import threading
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -49,6 +51,29 @@ _project_index_db_lock = threading.Lock()
 
 # 旧版向量 id：`{project_id}::{从 0 起的序号}`；新版稳定 id：`gv2_` + sha256 十六进制
 _LEGACY_VECTOR_ID = re.compile(r"^.*::\d+$")
+
+
+def _chroma_reload_marker_path() -> str:
+    return str(settings.chroma_path / ".chroma_reload_marker")
+
+
+def _read_chroma_reload_marker_mtime() -> float:
+    marker = _chroma_reload_marker_path()
+    try:
+        return float(os.path.getmtime(marker))
+    except OSError:
+        return 0.0
+
+
+def _touch_chroma_reload_marker() -> None:
+    try:
+        settings.chroma_path.mkdir(parents=True, exist_ok=True)
+        marker = _chroma_reload_marker_path()
+        with open(marker, "a", encoding="utf-8"):
+            pass
+        os.utime(marker, None)
+    except Exception as e:  # noqa: S110
+        logger.warning("Failed to touch chroma reload marker: %s", e)
 
 
 def normalize_index_path(path: str) -> str:
@@ -743,11 +768,19 @@ def precheck_embedding_connectivity() -> tuple[bool, str]:
 class VectorStore:
     def __init__(self):
         self._chrom_lock = threading.RLock()
+        self._reload_marker_mtime = _read_chroma_reload_marker_mtime()
         self.client = _get_chroma()
         self.collection = self.client.get_or_create_collection(
             name=COLLECTION_NAME,
             metadata={"description": "GitLab project code descriptions"},
         )
+
+    def _ensure_fresh_client_by_marker(self) -> None:
+        marker_mtime = _read_chroma_reload_marker_mtime()
+        if marker_mtime > self._reload_marker_mtime + 1e-6:
+            logger.info("Detected external Chroma update marker; recreating client.")
+            self._recreate_persistent_chroma_client()
+            self._reload_marker_mtime = marker_mtime
 
     def _recreate_persistent_chroma_client(self) -> None:
         """
@@ -758,6 +791,14 @@ class VectorStore:
         只能走关键词兜底；重启进程会新建客户端从而恢复。此处等价于「对该单例重新打开库」。
         """
         global _chroma_client
+        # 仅重建 PersistentClient 在部分场景不足以清理进程级系统缓存；
+        # clear_system_cache() 可强制刷新 Chroma 在当前进程内维护的底层索引状态。
+        try:
+            from chromadb.api.client import SharedSystemClient
+
+            SharedSystemClient.clear_system_cache()
+        except Exception as e:  # noqa: S110
+            logger.warning("Failed to clear Chroma shared system cache: %s", e)
         with _chroma_init_lock:
             _chroma_client = None
         self.client = _get_chroma()
@@ -765,6 +806,7 @@ class VectorStore:
             name=COLLECTION_NAME,
             metadata={"description": "GitLab project code descriptions"},
         )
+        self._reload_marker_mtime = _read_chroma_reload_marker_mtime()
 
     def list_projects(self) -> list[dict[str, Any]]:
         """
@@ -863,6 +905,7 @@ class VectorStore:
             raise ValueError("project_id 不能为空")
         had_row = _project_index_row_exists(pid)
         with self._chrom_lock:
+            self._ensure_fresh_client_by_marker()
             doc_count = 0
             try:
                 full = self.collection.get(where={"project_id": pid}, include=[])
@@ -873,6 +916,7 @@ class VectorStore:
                 self.collection.delete(where={"project_id": pid})
             except Exception as e:  # noqa: S110
                 logger.warning("purge_project: chroma delete failed for %s: %s", pid, e)
+            _touch_chroma_reload_marker()
             self._recreate_persistent_chroma_client()
         _delete_project_index_row(pid)
         return {
@@ -929,6 +973,7 @@ class VectorStore:
             return 0
         ids_to_del: list[str] = []
         with self._chrom_lock:
+            self._ensure_fresh_client_by_marker()
             try:
                 chunk = self.collection.get(
                     where={"project_id": pid},
@@ -951,6 +996,7 @@ class VectorStore:
                 logger.warning("delete_vectors_for_paths delete failed for %s: %s", pid, e)
                 return 0
             logger.info("Deleted %s vectors for project %s (path-based incremental)", len(ids_to_del), pid)
+            _touch_chroma_reload_marker()
             self._recreate_persistent_chroma_client()
         return len(ids_to_del)
 
@@ -960,6 +1006,7 @@ class VectorStore:
             return 0
         try:
             with self._chrom_lock:
+                self._ensure_fresh_client_by_marker()
                 full = self.collection.get(where={"project_id": pid}, include=[])
                 return len(full.get("ids") or [])
         except Exception as e:  # noqa: S110
@@ -977,6 +1024,7 @@ class VectorStore:
         out: dict[str, str] = {}
         try:
             with self._chrom_lock:
+                self._ensure_fresh_client_by_marker()
                 try:
                     rows = self.collection.get(
                         where={"project_id": pid},
@@ -1081,6 +1129,7 @@ class VectorStore:
 
         # 全量：先删该项目全部向量，再写入（稳定 id 与旧 :: 序号 id 不混用）
         with self._chrom_lock:
+            self._ensure_fresh_client_by_marker()
             try:
                 self.collection.delete(where={"project_id": project_id})
             except Exception as e:  # noqa: S110
@@ -1108,6 +1157,7 @@ class VectorStore:
                 last_indexed_commit=last_indexed_commit,
                 last_embed_model=last_embed_model,
             )
+            _touch_chroma_reload_marker()
             self._recreate_persistent_chroma_client()
         return {
             "attempted": len(chunks),
@@ -1182,6 +1232,7 @@ class VectorStore:
             raise RuntimeError("EMBEDDING_UNAVAILABLE: dedup removed all vectors for incremental upsert")
 
         with self._chrom_lock:
+            self._ensure_fresh_client_by_marker()
             self.collection.upsert(
                 ids=kept_ids,
                 embeddings=kept_embs,
@@ -1203,6 +1254,7 @@ class VectorStore:
                 last_indexed_commit=last_indexed_commit,
                 last_embed_model=last_embed_model,
             )
+            _touch_chroma_reload_marker()
             self._recreate_persistent_chroma_client()
         return {
             "attempted": len(chunks),
@@ -1232,6 +1284,16 @@ class VectorStore:
         metas = (results.get("metadatas") or [[]])[0]
         dists = (results.get("distances") or [[]])[0]
         n = min(len(docs), len(metas))
+        if n == 0 and project_id:
+            logger.warning(
+                "Primary vector query returned empty. host=%s pid=%s project=%s top_k=%s q_len=%s chroma_path=%s",
+                socket.gethostname(),
+                os.getpid(),
+                project_id,
+                top_k,
+                len(query_emb),
+                str(settings.chroma_path),
+            )
         for i in range(n):
             d = docs[i]
             m = metas[i]
@@ -1280,10 +1342,21 @@ class VectorStore:
                     fb: list[dict[str, Any]] = []
                     has_embedding_signal = False
                     has_keyword_signal = False
+                    emb_missing = 0
+                    emb_dim_mismatch = 0
+                    emb_usable = 0
+                    q_len = len(query_emb)
                     for i, (d, m) in enumerate(zip(r_docs, r_metas)):
                         e = r_embs[i] if i < len(r_embs) else None
                         meta = m or {}
-                        score, dist = _vector_score_from_embeddings(query_emb, e)
+                        hit_vec = _coerce_embedding_to_float_list(e)
+                        if hit_vec is None:
+                            emb_missing += 1
+                        elif len(hit_vec) != q_len:
+                            emb_dim_mismatch += 1
+                        else:
+                            emb_usable += 1
+                        score, dist = _vector_score_from_embeddings(query_emb, hit_vec)
                         boost = _keyword_boost_for_hit(tokens, str(d or ""), meta)
                         if score is None:
                             # 历史文档可能没有 embedding；此时至少给出可比较的关键词分。
@@ -1371,6 +1444,18 @@ class VectorStore:
                             top_k,
                         )
                         return []
+                    if fb and not has_embedding_signal:
+                        logger.warning(
+                            "Fallback has no embedding signal. host=%s pid=%s project=%s docs=%s emb_usable=%s emb_missing=%s emb_dim_mismatch=%s q_len=%s",
+                            socket.gethostname(),
+                            os.getpid(),
+                            pid,
+                            len(fb),
+                            emb_usable,
+                            emb_missing,
+                            emb_dim_mismatch,
+                            q_len,
+                        )
                     fb.sort(key=lambda x: float(x.get("hybrid_score") or 0.0), reverse=True)
                     if fb:
                         return fb[: max(1, int(top_k))]
@@ -1408,35 +1493,48 @@ class VectorStore:
         # 只有一条 query 文本，这里取第一条成功的向量
         query_emb = emb_with_idx[0][1]
         with self._chrom_lock:
+            self._ensure_fresh_client_by_marker()
             first = self._query_chroma_locked(query_emb, text, project_id, top_k)
             pid = str(project_id or "").strip()
             if not pid:
                 return first
 
             # 自愈：若当前进程内 Chroma 查询视图陈旧，结果会退化为纯 lexical fallback（或空）。
-            # 遇到此特征时重建一次 PersistentClient 并重试，尽量避免必须重启整个服务。
+            # 遇到此特征时重建 PersistentClient 并重试，尽量避免必须重启整个服务。
             fallback_kind = {
                 "collection_get_lexical",
                 "collection_get_lexical_scan",
             }
-            is_lexical_only = bool(first) and all(
-                str((row or {}).get("fallback_source") or "") in fallback_kind for row in first
-            )
-            if not first or is_lexical_only:
+            max_retry = max(1, int(os.getenv("QUERY_CLIENT_REFRESH_RETRIES", "3")))
+
+            def _is_lexical_only(rows: list[dict[str, Any]]) -> bool:
+                return bool(rows) and all(
+                    str((row or {}).get("fallback_source") or "") in fallback_kind for row in rows
+                )
+
+            current = first
+            if not current or _is_lexical_only(current):
                 try:
                     probe = self.collection.get(where={"project_id": pid}, limit=1, include=[])
                     has_project_docs = bool(probe.get("ids") or [])
                 except Exception:  # noqa: S110
                     has_project_docs = False
                 if has_project_docs:
-                    logger.warning(
-                        "Query returned %s for %s; recreating Chroma client and retrying once",
-                        "lexical fallback only" if is_lexical_only else "empty result",
-                        pid,
-                    )
-                    self._recreate_persistent_chroma_client()
-                    return self._query_chroma_locked(query_emb, text, project_id, top_k)
-            return first
+                    for i in range(max_retry):
+                        logger.warning(
+                            "Query returned %s for %s; recreating Chroma client and retrying (%s/%s)",
+                            "lexical fallback only" if _is_lexical_only(current) else "empty result",
+                            pid,
+                            i + 1,
+                            max_retry,
+                        )
+                        self._recreate_persistent_chroma_client()
+                        current = self._query_chroma_locked(query_emb, text, project_id, top_k)
+                        if current and not _is_lexical_only(current):
+                            return current
+                        if i + 1 < max_retry:
+                            time.sleep(0.15)
+            return current
 
     def list_project_vectors(
         self,
@@ -1454,6 +1552,7 @@ class VectorStore:
         needle = (q or "").strip().lower()
 
         with self._chrom_lock:
+            self._ensure_fresh_client_by_marker()
             if not needle:
                 total_raw = self.collection.get(where={"project_id": pid}, include=[])
                 total = len(total_raw.get("ids") or [])
@@ -1529,6 +1628,7 @@ class VectorStore:
             raise ValueError("vector_id 不能为空")
 
         with self._chrom_lock:
+            self._ensure_fresh_client_by_marker()
             existing = self.collection.get(ids=[vid], include=["metadatas"])
             existing_ids = existing.get("ids") or []
             if not existing_ids:
@@ -1544,12 +1644,14 @@ class VectorStore:
         emb_with_idx = _embed([text], prefix="passage: ")
         emb = emb_with_idx[0][1]
         with self._chrom_lock:
+            self._ensure_fresh_client_by_marker()
             self.collection.upsert(
                 ids=[vid],
                 embeddings=[emb],
                 documents=[text],
                 metadatas=[clean_meta],
             )
+            _touch_chroma_reload_marker()
             self._recreate_persistent_chroma_client()
         return {"id": vid, "project_id": pid}
 
@@ -1561,4 +1663,7 @@ def get_vector_store() -> VectorStore:
     global _store
     if _store is None:
         _store = VectorStore()
+    else:
+        with _store._chrom_lock:
+            _store._ensure_fresh_client_by_marker()
     return _store
