@@ -1408,7 +1408,35 @@ class VectorStore:
         # 只有一条 query 文本，这里取第一条成功的向量
         query_emb = emb_with_idx[0][1]
         with self._chrom_lock:
-            return self._query_chroma_locked(query_emb, text, project_id, top_k)
+            first = self._query_chroma_locked(query_emb, text, project_id, top_k)
+            pid = str(project_id or "").strip()
+            if not pid:
+                return first
+
+            # 自愈：若当前进程内 Chroma 查询视图陈旧，结果会退化为纯 lexical fallback（或空）。
+            # 遇到此特征时重建一次 PersistentClient 并重试，尽量避免必须重启整个服务。
+            fallback_kind = {
+                "collection_get_lexical",
+                "collection_get_lexical_scan",
+            }
+            is_lexical_only = bool(first) and all(
+                str((row or {}).get("fallback_source") or "") in fallback_kind for row in first
+            )
+            if not first or is_lexical_only:
+                try:
+                    probe = self.collection.get(where={"project_id": pid}, limit=1, include=[])
+                    has_project_docs = bool(probe.get("ids") or [])
+                except Exception:  # noqa: S110
+                    has_project_docs = False
+                if has_project_docs:
+                    logger.warning(
+                        "Query returned %s for %s; recreating Chroma client and retrying once",
+                        "lexical fallback only" if is_lexical_only else "empty result",
+                        pid,
+                    )
+                    self._recreate_persistent_chroma_client()
+                    return self._query_chroma_locked(query_emb, text, project_id, top_k)
+            return first
 
     def list_project_vectors(
         self,
