@@ -3,18 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import math
 import os
 import re
-import sqlite3
 import socket
 import threading
 import time
-from datetime import datetime, timezone
 from typing import Any
-
-import httpx
-import numpy as np
 
 # Chroma 0.4.x 使用旧版 PostHog 调用方式 capture(distinct_id, event, properties)，
 # 而 posthog 6.x 仅接受 capture(event, **kwargs)。在首次 import chromadb 前做兼容补丁：
@@ -34,20 +28,28 @@ from chromadb.config import Settings as ChromaSettings
 
 from app.api_errors import raise_app_error
 from app.config import settings
-from app.effective_settings import (
-    effective_embed_model,
-    effective_embed_provider,
-    effective_ollama_api_key,
-    effective_ollama_base_url,
-    effective_openai_embed_api_key,
-    effective_openai_embed_base_url,
+from app.vector_embeddings import _embed, precheck_embedding_connectivity
+from app.vector_project_index_repo import (
+    _delete_project_index_row,
+    _project_index_row_exists,
+    _read_project_index_from_db,
+    _replace_project_index_in_db,
+    _upsert_project_index_in_db,
+    get_project_index_meta,
+    resolve_project_display_name_for_enqueue,
+    set_project_display_name as repo_set_project_display_name,
+)
+from app.vector_query_fallback import (
+    coerce_embedding_to_float_list,
+    keyword_boost_for_hit,
+    query_tokens_for_boost,
+    vector_score_from_embeddings,
 )
 
 logger = logging.getLogger(__name__)
 COLLECTION_NAME = "gitlab_code_docs"
 _chroma_client: chromadb.PersistentClient | None = None
 _chroma_init_lock = threading.Lock()
-_project_index_db_lock = threading.Lock()
 
 # 旧版向量 id：`{project_id}::{从 0 起的序号}`；新版稳定 id：`gv2_` + sha256 十六进制
 _LEGACY_VECTOR_ID = re.compile(r"^.*::\d+$")
@@ -219,295 +221,6 @@ def _parse_tagged_document(doc: str) -> dict[str, str]:
     return out
 
 
-def _query_tokens_for_boost(text: str) -> list[str]:
-    q = str(text or "").strip().lower()
-    if not q:
-        return []
-    tokens: set[str] = {q}
-    tokens.update(t for t in re.split(r"[^0-9a-zA-Z_\-./]+", q) if len(t) >= 2)
-    # 限制 token 数量，避免极长 query 增加过多 CPU 开销
-    return list(tokens)[:12]
-
-
-def _keyword_boost_for_hit(tokens: list[str], content: str, metadata: dict[str, Any]) -> float:
-    if not tokens:
-        return 0.0
-    path = str(metadata.get("path") or "").lower()
-    name = str(metadata.get("name") or metadata.get("symbol") or "").lower()
-    tags_csv = str(metadata.get("tags_csv") or "").lower()
-    calls_csv = str(metadata.get("calls_csv") or "").lower()
-    hay = str(content or "").lower()
-    boost = 0.0
-    for tk in tokens:
-        if tk in path:
-            boost += 0.10
-        if tk in name:
-            boost += 0.08
-        if tags_csv and tk in tags_csv:
-            boost += 0.12
-        if calls_csv and tk in calls_csv:
-            boost += 0.12
-        if tk in hay:
-            boost += 0.03
-    return min(0.35, boost)
-
-
-def _coerce_embedding_to_float_list(emb: Any) -> list[float] | None:
-    """
-    Chroma get(include=['embeddings']) 常返回 numpy.ndarray，而 httpx 解析的 query 向量是 list。
-    仅接受「单条」向量（一维或 shape (1, dim)）；整块 (n, dim) 应在调用方按行切片后再传入。
-    """
-    if emb is None:
-        return None
-    if isinstance(emb, np.ndarray):
-        if emb.ndim > 1:
-            if emb.shape[0] != 1:
-                return None
-            emb = emb.reshape(-1)
-        if emb.size == 0:
-            return None
-        return [float(x) for x in emb.ravel()]
-    if isinstance(emb, (list, tuple)):
-        try:
-            out = [float(x) for x in emb]
-        except (TypeError, ValueError):
-            return None
-        return out if out else None
-    if hasattr(emb, "tolist") and not isinstance(emb, (str, bytes)):
-        try:
-            raw = emb.tolist()
-        except Exception:  # noqa: S110
-            return None
-        return _coerce_embedding_to_float_list(raw)
-    return None
-
-
-def _vector_score_from_embeddings(query_emb: list[float], hit_emb: Any) -> tuple[float | None, float | None]:
-    """
-    回退检索时基于已存 embedding 计算相似度分数。
-    返回 (score, distance)，score 越大越相关，distance 越小越近。
-    """
-    q = _coerce_embedding_to_float_list(query_emb)
-    h = _coerce_embedding_to_float_list(hit_emb)
-    if not q or not h:
-        return None, None
-    if len(h) != len(q):
-        return None, None
-    try:
-        qn = math.sqrt(sum(float(x) * float(x) for x in q))
-        hn = math.sqrt(sum(float(x) * float(x) for x in h))
-        if qn <= 0 or hn <= 0:
-            return None, None
-        dot = sum(float(a) * float(b) for a, b in zip(q, h))
-        cosine = dot / (qn * hn)
-        # 约束到 [-1, 1]，并映射到 [0, 1] 便于与主路径 score 对齐展示。
-        cosine = max(-1.0, min(1.0, cosine))
-        score = (cosine + 1.0) / 2.0
-        distance = 1.0 - score
-        return score, distance
-    except (TypeError, ValueError, OverflowError):
-        return None, None
-
-
-def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _project_index_db_path() -> str:
-    # 独立一个小库，避免与 index_jobs.sqlite3 的写入争用
-    return str(settings.data_path / "project_index.sqlite3")
-
-
-def _init_project_index_db(conn: sqlite3.Connection) -> None:
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS project_index (
-            project_id TEXT PRIMARY KEY,
-            doc_count INTEGER NOT NULL DEFAULT 0,
-            updated_at TEXT NOT NULL
-        )
-        """
-    )
-    cols = {row[1] for row in conn.execute("PRAGMA table_info(project_index)").fetchall()}
-    if "project_name" not in cols:
-        conn.execute("ALTER TABLE project_index ADD COLUMN project_name TEXT NOT NULL DEFAULT ''")
-    if "last_indexed_commit" not in cols:
-        conn.execute("ALTER TABLE project_index ADD COLUMN last_indexed_commit TEXT NOT NULL DEFAULT ''")
-    if "last_embed_model" not in cols:
-        conn.execute("ALTER TABLE project_index ADD COLUMN last_embed_model TEXT NOT NULL DEFAULT ''")
-    conn.commit()
-
-
-def _read_project_index_from_db() -> list[dict[str, Any]]:
-    db_path = _project_index_db_path()
-    with _project_index_db_lock:
-        conn = sqlite3.connect(db_path, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        try:
-            _init_project_index_db(conn)
-            rows = conn.execute(
-                """
-                SELECT project_id, doc_count,
-                       COALESCE(project_name, '') AS project_name
-                FROM project_index
-                ORDER BY project_id ASC
-                """
-            ).fetchall()
-            return [
-                {
-                    "project_id": r["project_id"],
-                    "doc_count": int(r["doc_count"]),
-                    "project_name": (r["project_name"] or "").strip(),
-                }
-                for r in rows
-            ]
-        finally:
-            conn.close()
-
-
-def _project_index_row_exists(project_id: str) -> bool:
-    db_path = _project_index_db_path()
-    with _project_index_db_lock:
-        conn = sqlite3.connect(db_path, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        try:
-            _init_project_index_db(conn)
-            row = conn.execute(
-                "SELECT 1 AS ok FROM project_index WHERE project_id=? LIMIT 1",
-                (project_id,),
-            ).fetchone()
-            return row is not None
-        finally:
-            conn.close()
-
-
-def _delete_project_index_row(project_id: str) -> None:
-    db_path = _project_index_db_path()
-    with _project_index_db_lock:
-        conn = sqlite3.connect(db_path, check_same_thread=False)
-        try:
-            _init_project_index_db(conn)
-            conn.execute("DELETE FROM project_index WHERE project_id=?", (project_id,))
-            conn.commit()
-        finally:
-            conn.close()
-
-
-def get_project_index_meta(project_id: str) -> dict[str, Any] | None:
-    """读取 project_index 行（含增量索引用的 commit / 嵌入模型记录）。"""
-    pid = str(project_id or "").strip()
-    if not pid:
-        return None
-    db_path = _project_index_db_path()
-    with _project_index_db_lock:
-        conn = sqlite3.connect(db_path, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        try:
-            _init_project_index_db(conn)
-            row = conn.execute(
-                """
-                SELECT project_id, doc_count, project_name,
-                       COALESCE(last_indexed_commit, '') AS last_indexed_commit,
-                       COALESCE(last_embed_model, '') AS last_embed_model
-                FROM project_index WHERE project_id=?
-                """,
-                (pid,),
-            ).fetchone()
-        finally:
-            conn.close()
-    if not row:
-        return None
-    return {
-        "project_id": str(row["project_id"]),
-        "doc_count": int(row["doc_count"]),
-        "project_name": (row["project_name"] or "").strip(),
-        "last_indexed_commit": str(row["last_indexed_commit"] or "").strip(),
-        "last_embed_model": str(row["last_embed_model"] or "").strip(),
-    }
-
-
-def resolve_project_display_name_for_enqueue(project_id: str, incoming: str) -> str:
-    """
-    自动化入队（如 GitLab/GitHub push Webhook）使用的展示名解析。
-
-    若 ``project_index`` 中已有非空 ``project_name``（通常来自用户在概览里 PATCH 的展示名），
-    则优先复用，避免托管方事件里的仓库短名写入新任务，进而覆盖列表与 ``latest`` 展示逻辑。
-    """
-    pid = str(project_id or "").strip()
-    inc = (incoming or "").strip()
-    if not pid:
-        return inc
-    meta = get_project_index_meta(pid)
-    saved = str((meta or {}).get("project_name") or "").strip()
-    return saved if saved else inc
-
-
-def _upsert_project_index_in_db(
-    project_id: str,
-    doc_count: int,
-    project_name: str = "",
-    *,
-    last_indexed_commit: str = "",
-    last_embed_model: str = "",
-) -> None:
-    pname = (project_name or "").strip()
-    lc = (last_indexed_commit or "").strip()
-    em = (last_embed_model or "").strip()
-    now = _utc_now_iso()
-    db_path = _project_index_db_path()
-    with _project_index_db_lock:
-        conn = sqlite3.connect(db_path, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        try:
-            _init_project_index_db(conn)
-            conn.execute(
-                """
-                INSERT INTO project_index
-                    (project_id, doc_count, updated_at, project_name, last_indexed_commit, last_embed_model)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(project_id) DO UPDATE SET
-                    doc_count = excluded.doc_count,
-                    updated_at = excluded.updated_at,
-                    project_name = CASE
-                        WHEN TRIM(excluded.project_name) != '' THEN TRIM(excluded.project_name)
-                        ELSE project_index.project_name
-                    END,
-                    last_indexed_commit = CASE
-                        WHEN TRIM(excluded.last_indexed_commit) != '' THEN TRIM(excluded.last_indexed_commit)
-                        ELSE project_index.last_indexed_commit
-                    END,
-                    last_embed_model = CASE
-                        WHEN TRIM(excluded.last_embed_model) != '' THEN TRIM(excluded.last_embed_model)
-                        ELSE project_index.last_embed_model
-                    END
-                """,
-                (project_id, int(doc_count), now, pname, lc, em),
-            )
-            conn.commit()
-        finally:
-            conn.close()
-
-
-def _replace_project_index_in_db(project_stats: dict[str, int]) -> None:
-    db_path = _project_index_db_path()
-    with _project_index_db_lock:
-        conn = sqlite3.connect(db_path, check_same_thread=False)
-        try:
-            _init_project_index_db(conn)
-            conn.execute("DELETE FROM project_index")
-            conn.executemany(
-                """
-                INSERT INTO project_index
-                    (project_id, doc_count, updated_at, project_name, last_indexed_commit, last_embed_model)
-                VALUES (?, ?, ?, '', '', '')
-                """,
-                [(pid, int(count), _utc_now_iso()) for pid, count in project_stats.items()],
-            )
-            conn.commit()
-        finally:
-            conn.close()
-
-
 def _scan_all_project_docs_from_vector_store(collection: Any) -> dict[str, int]:
     """
     仅用于首次回填 project_index 缓存（或缓存为空时）。
@@ -584,187 +297,6 @@ def _get_chroma() -> chromadb.PersistentClient:
         return _chroma_client
 
 
-def _embed_ollama(texts: list[str], max_chars: int) -> list[tuple[int, list[float]]]:
-    model_name = effective_embed_model()
-    base_url = effective_ollama_base_url()
-    ollama_api_key = (effective_ollama_api_key() or "").strip()
-    headers = {"Authorization": f"Bearer {ollama_api_key}"} if ollama_api_key else None
-    embeddings: list[tuple[int, list[float]]] = []
-
-    with httpx.Client(base_url=base_url, timeout=60.0) as client:
-        for idx, raw_text in enumerate(texts):
-            text = raw_text
-            if len(text) > max_chars:
-                logger.warning(
-                    "Embedding text length %s exceeds max_chars=%s, will be truncated to avoid Ollama context error.",
-                    len(text),
-                    max_chars,
-                )
-                text = text[:max_chars]
-
-            try:
-                resp = client.post(
-                    "/api/embeddings",
-                    headers=headers,
-                    json={
-                        "model": model_name,
-                        "prompt": text,
-                    },
-                )
-                resp.raise_for_status()
-                data = resp.json()
-
-                if isinstance(data, dict):
-                    if "embeddings" in data:
-                        emb_list = data["embeddings"]
-                    elif "data" in data:
-                        emb_list = [item["embedding"] for item in data["data"]]
-                    elif "embedding" in data:
-                        emb = data["embedding"]
-                        if not emb:
-                            raise RuntimeError("Ollama returned empty embedding")
-                        if isinstance(emb[0], (int, float)):
-                            emb_list = [emb]
-                        else:
-                            emb_list = emb
-                    else:
-                        raise RuntimeError(f"Unexpected Ollama embeddings response format: {data!r}")
-                else:
-                    raise RuntimeError(f"Unexpected Ollama embeddings response format: {data!r}")
-
-                if emb_list and isinstance(emb_list[0], (int, float)):
-                    embeddings.append((idx, emb_list))  # type: ignore[arg-type]
-                else:
-                    for emb in emb_list:  # type: ignore[assignment]
-                        embeddings.append((idx, emb))
-            except Exception as e:  # noqa: S110
-                logger.error("Ollama embedding request failed for index %s: %s", idx, e)
-                continue
-
-    return embeddings
-
-
-def _embed_openai(texts: list[str], max_chars: int) -> list[tuple[int, list[float]]]:
-    model_name = (effective_embed_model() or "").strip()
-    if not model_name:
-        raise RuntimeError("embed_model is required for OpenAI embeddings")
-    api_key = (effective_openai_embed_api_key() or "").strip()
-    if not api_key:
-        raise RuntimeError("OPENAI_EMBED_API_KEY is required when embed_provider=openai")
-    base = (effective_openai_embed_base_url() or "https://api.openai.com/v1").strip().rstrip("/")
-    embeddings: list[tuple[int, list[float]]] = []
-
-    with httpx.Client(base_url=base, timeout=60.0) as client:
-        for idx, raw_text in enumerate(texts):
-            text = raw_text
-            if len(text) > max_chars:
-                logger.warning(
-                    "Embedding text length %s exceeds max_chars=%s, will be truncated.",
-                    len(text),
-                    max_chars,
-                )
-                text = text[:max_chars]
-
-            try:
-                resp = client.post(
-                    "/embeddings",
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={"model": model_name, "input": text},
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                if not isinstance(data, dict):
-                    raise RuntimeError(f"Unexpected OpenAI embeddings response format: {data!r}")
-                items = data.get("data")
-                if not isinstance(items, list) or not items:
-                    raise RuntimeError("OpenAI returned empty embeddings data")
-                emb = items[0].get("embedding") if isinstance(items[0], dict) else None
-                if not emb or not isinstance(emb, list):
-                    raise RuntimeError("OpenAI returned empty embedding")
-                embeddings.append((idx, emb))
-            except Exception as e:  # noqa: S110
-                logger.error("OpenAI embedding request failed for index %s: %s", idx, e)
-                continue
-
-    return embeddings
-
-
-def _embed(texts: list[str], prefix: str = "") -> list[tuple[int, list[float]]]:
-    if not texts:
-        return []
-    if prefix:
-        texts = [f"{prefix}{t}" for t in texts]
-
-    max_chars = settings.embed_max_chars
-    provider = effective_embed_provider()
-
-    try:
-        if provider == "openai":
-            embeddings = _embed_openai(texts, max_chars)
-        else:
-            embeddings = _embed_ollama(texts, max_chars)
-    except Exception as e:  # noqa: S110
-        logger.exception("Unexpected error during embedding loop: %s", e)
-        raise
-
-    if not embeddings:
-        raise RuntimeError("All embedding requests failed")
-
-    return embeddings
-
-
-def precheck_embedding_connectivity() -> tuple[bool, str]:
-    """索引前健康检查：按 embed_provider 检查嵌入接口。"""
-    model = effective_embed_model().strip()
-    if not model:
-        return False, "未配置 embed_model"
-
-    if effective_embed_provider() == "openai":
-        api_key = (effective_openai_embed_api_key() or "").strip()
-        if not api_key:
-            return False, "已选择 OpenAI 嵌入，但未配置 OPENAI_EMBED_API_KEY"
-        base = (effective_openai_embed_base_url() or "https://api.openai.com/v1").strip().rstrip("/")
-        try:
-            with httpx.Client(base_url=base, timeout=20.0) as client:
-                resp = client.post(
-                    "/embeddings",
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={"model": model, "input": "health check"},
-                )
-                if resp.status_code >= 400:
-                    return False, f"OpenAI embeddings HTTP {resp.status_code}"
-                data = resp.json() if resp.content else {}
-                items = data.get("data") if isinstance(data, dict) else None
-                if isinstance(items, list) and items and isinstance(items[0], dict) and items[0].get("embedding"):
-                    return True, f"OpenAI 嵌入可用（model={model}）"
-                return False, "OpenAI 嵌入返回为空"
-        except Exception as e:  # noqa: S110
-            return False, str(e)
-
-    base_url = (effective_ollama_base_url() or "http://localhost:11434").strip()
-    ollama_api_key = (effective_ollama_api_key() or "").strip()
-    headers = {"Authorization": f"Bearer {ollama_api_key}"} if ollama_api_key else None
-    try:
-        with httpx.Client(base_url=base_url, timeout=20.0) as client:
-            resp = client.post("/api/embeddings", headers=headers, json={"model": model, "prompt": "health check"})
-            if resp.status_code >= 400:
-                return False, f"Ollama HTTP {resp.status_code}"
-            data = resp.json() if resp.content else {}
-            emb = data.get("embedding") if isinstance(data, dict) else None
-            embs = data.get("embeddings") if isinstance(data, dict) else None
-            if emb or embs:
-                return True, f"Ollama 嵌入可用（model={model}）"
-            return False, "embedding 返回为空"
-    except Exception as e:  # noqa: S110
-        return False, str(e)
-
-
 class VectorStore:
     def __init__(self):
         self._chrom_lock = threading.RLock()
@@ -837,24 +369,7 @@ class VectorStore:
 
     def set_project_display_name(self, project_id: str, project_name: str) -> bool:
         """仅更新 project_index 中的展示名，不改变 doc_count；无对应行则返回 False。"""
-        pid = str(project_id or "").strip()
-        if not pid:
-            return False
-        pname = (project_name or "").strip()
-        now = _utc_now_iso()
-        db_path = _project_index_db_path()
-        with _project_index_db_lock:
-            conn = sqlite3.connect(db_path, check_same_thread=False)
-            try:
-                _init_project_index_db(conn)
-                cur = conn.execute(
-                    "UPDATE project_index SET project_name=?, updated_at=? WHERE project_id=?",
-                    (pname, now, pid),
-                )
-                conn.commit()
-                return int(cur.rowcount or 0) > 0
-            finally:
-                conn.close()
+        return repo_set_project_display_name(project_id, project_name)
 
     def get_project_index_status(self, project_id: str) -> dict[str, Any]:
         """
@@ -1057,26 +572,30 @@ class VectorStore:
             out[key] = desc
         return out
 
-    def upsert_project(
+    def _prepare_upsert_rows(
         self,
         project_id: str,
         chunks: list[dict[str, Any]],
         *,
-        project_name: str = "",
-        last_indexed_commit: str = "",
-        last_embed_model: str = "",
-    ) -> dict[str, Any]:
-        if not chunks:
-            return {"attempted": 0, "embedded": 0, "status": "skipped"}
+        mode: str,
+    ) -> tuple[list[str], list[str], list[dict[str, Any]], list[list[float]]]:
+        """准备 upsert 参数并完成 embedding/失败过滤/去重。"""
         documents = [c.get("content", "") for c in chunks]
         embed_inputs = [c.get("embedding_text") or c.get("content", "") for c in chunks]
         raw_metas = [{**c.get("metadata", {}), "project_id": project_id} for c in chunks]
         metadatas = [self._sanitize_metadata(m) for m in raw_metas]
         ids = [stable_vector_id(project_id, m) for m in metadatas]
-        # 向量化优先使用 embedding_text（不含大段源码）；documents 仍保存完整 content 供展示/二阶段分析。
+
         try:
             emb_with_idx = _embed(embed_inputs, prefix="passage: ")
         except Exception as e:  # noqa: S110
+            if mode == "incremental":
+                logger.error(
+                    "Embedding failed for project %s (incremental), skip upsert: %s",
+                    project_id,
+                    e,
+                )
+                raise RuntimeError("EMBEDDING_UNAVAILABLE: embedding failed for all chunks (incremental)")
             logger.error(
                 "Embedding failed for project %s, skip upsert to vector store: %s",
                 project_id,
@@ -1084,7 +603,6 @@ class VectorStore:
             )
             raise RuntimeError("EMBEDDING_UNAVAILABLE: embedding failed for all chunks")
 
-        # 只保留成功生成向量的那些条目
         idx_to_emb: dict[int, list[float]] = {idx: emb for idx, emb in emb_with_idx}
         kept_ids: list[str] = []
         kept_docs: list[str] = []
@@ -1094,11 +612,18 @@ class VectorStore:
         for i, (id_, doc, meta) in enumerate(zip(ids, documents, metadatas)):
             emb = idx_to_emb.get(i)
             if emb is None:
-                logger.warning(
-                    "Skip upsert for project %s, chunk index %s due to embedding failure.",
-                    project_id,
-                    i,
-                )
+                if mode == "incremental":
+                    logger.warning(
+                        "Skip incremental upsert for project %s, chunk index %s due to embedding failure.",
+                        project_id,
+                        i,
+                    )
+                else:
+                    logger.warning(
+                        "Skip upsert for project %s, chunk index %s due to embedding failure.",
+                        project_id,
+                        i,
+                    )
                 continue
             kept_ids.append(id_)
             kept_docs.append(doc)
@@ -1106,6 +631,9 @@ class VectorStore:
             kept_embs.append(emb)
 
         if not kept_ids:
+            if mode == "incremental":
+                logger.error("No successful embeddings for project %s (incremental), skip upsert.", project_id)
+                raise RuntimeError("EMBEDDING_UNAVAILABLE: no successful embeddings for incremental upsert")
             logger.error(
                 "No successful embeddings for project %s, skip upsert to vector store.",
                 project_id,
@@ -1118,14 +646,67 @@ class VectorStore:
             kept_metas,
             kept_embs,
             project_id=project_id,
-            mode="full",
+            mode=mode,
         )
         if not kept_ids:
+            if mode == "incremental":
+                logger.error(
+                    "All successful embeddings were deduplicated away for project %s (incremental), skip upsert.",
+                    project_id,
+                )
+                raise RuntimeError("EMBEDDING_UNAVAILABLE: dedup removed all vectors for incremental upsert")
             logger.error(
                 "All successful embeddings were deduplicated away for project %s (full), skip upsert.",
                 project_id,
             )
             raise RuntimeError("EMBEDDING_UNAVAILABLE: dedup removed all vectors for full upsert")
+
+        return kept_ids, kept_docs, kept_metas, kept_embs
+
+    def _probe_doc_count_after_upsert(
+        self,
+        project_id: str,
+        *,
+        fallback: int,
+        mode: str,
+    ) -> int:
+        """upsert 后探测项目向量数；失败时返回调用方提供的 fallback。"""
+        try:
+            full = self.collection.get(where={"project_id": project_id}, include=[])
+            return len(full.get("ids") or [])
+        except Exception as e:  # noqa: S110
+            if mode == "incremental":
+                logger.warning("Failed to probe doc_count after incremental upsert for %s: %s", project_id, e)
+            else:
+                logger.warning("Failed to probe doc_count after upsert for %s: %s", project_id, e)
+            return fallback
+
+    @staticmethod
+    def _build_upsert_result(chunks: list[dict[str, Any]], kept_ids: list[str]) -> dict[str, Any]:
+        """构建标准 upsert 返回体。"""
+        return {
+            "attempted": len(chunks),
+            "embedded": len(kept_ids),
+            "status": "ok" if len(kept_ids) == len(chunks) else "partial",
+        }
+
+    def upsert_project(
+        self,
+        project_id: str,
+        chunks: list[dict[str, Any]],
+        *,
+        project_name: str = "",
+        last_indexed_commit: str = "",
+        last_embed_model: str = "",
+    ) -> dict[str, Any]:
+        if not chunks:
+            return {"attempted": 0, "embedded": 0, "status": "skipped"}
+        # 向量化优先使用 embedding_text（不含大段源码）；documents 仍保存完整 content 供展示/二阶段分析。
+        kept_ids, kept_docs, kept_metas, kept_embs = self._prepare_upsert_rows(
+            project_id,
+            chunks,
+            mode="full",
+        )
 
         # 全量：先删该项目全部向量，再写入（稳定 id 与旧 :: 序号 id 不混用）
         with self._chrom_lock:
@@ -1144,12 +725,11 @@ class VectorStore:
             logger.info("Upserted %s chunks for project %s (full)", len(kept_ids), project_id)
 
             # 探测实际写入数量，写入缓存，避免 delete/upsert 部分失败导致统计不一致。
-            try:
-                full = self.collection.get(where={"project_id": project_id}, include=[])
-                doc_count = len(full.get("ids") or [])
-            except Exception as e:  # noqa: S110
-                logger.warning("Failed to probe doc_count after upsert for %s: %s", project_id, e)
-                doc_count = len(kept_ids)
+            doc_count = self._probe_doc_count_after_upsert(
+                project_id,
+                fallback=len(kept_ids),
+                mode="full",
+            )
             _upsert_project_index_in_db(
                 project_id,
                 doc_count,
@@ -1159,11 +739,7 @@ class VectorStore:
             )
             _touch_chroma_reload_marker()
             self._recreate_persistent_chroma_client()
-        return {
-            "attempted": len(chunks),
-            "embedded": len(kept_ids),
-            "status": "ok" if len(kept_ids) == len(chunks) else "partial",
-        }
+        return self._build_upsert_result(chunks, kept_ids)
 
     def upsert_project_incremental(
         self,
@@ -1177,59 +753,11 @@ class VectorStore:
         """仅 upsert 给定条目，不删全项目；调用方应先按路径删除待刷新路径上的旧向量。"""
         if not chunks:
             return {"attempted": 0, "embedded": 0, "status": "skipped"}
-        documents = [c.get("content", "") for c in chunks]
-        embed_inputs = [c.get("embedding_text") or c.get("content", "") for c in chunks]
-        raw_metas = [{**c.get("metadata", {}), "project_id": project_id} for c in chunks]
-        metadatas = [self._sanitize_metadata(m) for m in raw_metas]
-        ids = [stable_vector_id(project_id, m) for m in metadatas]
-        try:
-            emb_with_idx = _embed(embed_inputs, prefix="passage: ")
-        except Exception as e:  # noqa: S110
-            logger.error(
-                "Embedding failed for project %s (incremental), skip upsert: %s",
-                project_id,
-                e,
-            )
-            raise RuntimeError("EMBEDDING_UNAVAILABLE: embedding failed for all chunks (incremental)")
-
-        idx_to_emb: dict[int, list[float]] = {idx: emb for idx, emb in emb_with_idx}
-        kept_ids: list[str] = []
-        kept_docs: list[str] = []
-        kept_metas: list[dict[str, Any]] = []
-        kept_embs: list[list[float]] = []
-
-        for i, (id_, doc, meta) in enumerate(zip(ids, documents, metadatas)):
-            emb = idx_to_emb.get(i)
-            if emb is None:
-                logger.warning(
-                    "Skip incremental upsert for project %s, chunk index %s due to embedding failure.",
-                    project_id,
-                    i,
-                )
-                continue
-            kept_ids.append(id_)
-            kept_docs.append(doc)
-            kept_metas.append(meta)
-            kept_embs.append(emb)
-
-        if not kept_ids:
-            logger.error("No successful embeddings for project %s (incremental), skip upsert.", project_id)
-            raise RuntimeError("EMBEDDING_UNAVAILABLE: no successful embeddings for incremental upsert")
-
-        kept_ids, kept_docs, kept_metas, kept_embs = _dedupe_upsert_rows(
-            kept_ids,
-            kept_docs,
-            kept_metas,
-            kept_embs,
-            project_id=project_id,
+        kept_ids, kept_docs, kept_metas, kept_embs = self._prepare_upsert_rows(
+            project_id,
+            chunks,
             mode="incremental",
         )
-        if not kept_ids:
-            logger.error(
-                "All successful embeddings were deduplicated away for project %s (incremental), skip upsert.",
-                project_id,
-            )
-            raise RuntimeError("EMBEDDING_UNAVAILABLE: dedup removed all vectors for incremental upsert")
 
         with self._chrom_lock:
             self._ensure_fresh_client_by_marker()
@@ -1241,12 +769,11 @@ class VectorStore:
             )
             logger.info("Incrementally upserted %s chunks for project %s", len(kept_ids), project_id)
 
-            try:
-                full = self.collection.get(where={"project_id": project_id}, include=[])
-                doc_count = len(full.get("ids") or [])
-            except Exception as e:  # noqa: S110
-                logger.warning("Failed to probe doc_count after incremental upsert for %s: %s", project_id, e)
-                doc_count = 0
+            doc_count = self._probe_doc_count_after_upsert(
+                project_id,
+                fallback=0,
+                mode="incremental",
+            )
             _upsert_project_index_in_db(
                 project_id,
                 doc_count,
@@ -1256,11 +783,7 @@ class VectorStore:
             )
             _touch_chroma_reload_marker()
             self._recreate_persistent_chroma_client()
-        return {
-            "attempted": len(chunks),
-            "embedded": len(kept_ids),
-            "status": "ok" if len(kept_ids) == len(chunks) else "partial",
-        }
+        return self._build_upsert_result(chunks, kept_ids)
 
     def _query_chroma_locked(
         self,
@@ -1279,7 +802,7 @@ class VectorStore:
             include=["documents", "metadatas", "distances"],
         )
         out: list[dict[str, Any]] = []
-        tokens = _query_tokens_for_boost(text)
+        tokens = query_tokens_for_boost(text)
         docs = (results.get("documents") or [[]])[0]
         metas = (results.get("metadatas") or [[]])[0]
         dists = (results.get("distances") or [[]])[0]
@@ -1305,7 +828,7 @@ class VectorStore:
             # Chroma 返回的是距离（越小越近）；API 同时给出 score 供前端展示「相似度」：越大越相关
             score = (1.0 / (1.0 + dist_f)) if dist_f is not None else None
             meta = m or {}
-            boost = _keyword_boost_for_hit(tokens, str(d or ""), meta)
+            boost = keyword_boost_for_hit(tokens, str(d or ""), meta)
             base = float(score) if score is not None else 0.0
             hybrid = min(1.0, base + boost)
             out.append(
@@ -1349,15 +872,15 @@ class VectorStore:
                     for i, (d, m) in enumerate(zip(r_docs, r_metas)):
                         e = r_embs[i] if i < len(r_embs) else None
                         meta = m or {}
-                        hit_vec = _coerce_embedding_to_float_list(e)
+                        hit_vec = coerce_embedding_to_float_list(e)
                         if hit_vec is None:
                             emb_missing += 1
                         elif len(hit_vec) != q_len:
                             emb_dim_mismatch += 1
                         else:
                             emb_usable += 1
-                        score, dist = _vector_score_from_embeddings(query_emb, hit_vec)
-                        boost = _keyword_boost_for_hit(tokens, str(d or ""), meta)
+                        score, dist = vector_score_from_embeddings(query_emb, hit_vec)
+                        boost = keyword_boost_for_hit(tokens, str(d or ""), meta)
                         if score is None:
                             # 历史文档可能没有 embedding；此时至少给出可比较的关键词分。
                             score = boost
@@ -1411,7 +934,7 @@ class VectorStore:
                                 break
                             for d2, m2 in zip(docs2, metas2):
                                 meta2 = m2 or {}
-                                boost2 = _keyword_boost_for_hit(tokens, str(d2 or ""), meta2)
+                                boost2 = keyword_boost_for_hit(tokens, str(d2 or ""), meta2)
                                 if boost2 <= 0:
                                     continue
                                 lexical_hits.append(

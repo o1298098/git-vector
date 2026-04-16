@@ -13,15 +13,11 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from itertools import groupby
 from pathlib import Path
 from typing import Any
-
-import yaml
 
 from app.config import settings
 from app.content_locale import WikiI18n, wiki_i18n
@@ -32,7 +28,8 @@ from app.effective_settings import (
     effective_wiki_max_file_pages,
     effective_wiki_symbol_rows_per_file,
 )
-from app.wiki_node_build import build_starlight_site, build_vitepress_site
+from app.wiki_build_runner import build_wiki_site
+from app.wiki_docs_writer import write_file_pages, write_symbol_index_parts
 from app.llm_client import get_llm_client
 
 logger = logging.getLogger(__name__)
@@ -545,79 +542,23 @@ def _write_file_pages(
     *,
     use_pymdownx_admonitions: bool,
 ) -> None:
-    files_dir = docs_dir / "files"
-    files_dir.mkdir(parents=True, exist_ok=True)
-    items = sorted(by_file.items(), key=lambda x: x[0])
-    for i, (rel_path, syms) in enumerate(items):
-        if i >= max_pages:
-            break
-        slug = slug_map[rel_path]
-        path_norm = _normalize_rel_path(rel_path)
-        ext = _ext_of(path_norm)
-        title_esc = _safe_yaml_double_quoted_title(path_norm)
-        desc_esc = _safe_yaml_double_quoted_title(ws.file_page_desc.format(path=path_norm))
-        lines: list[str] = [
-            "---",
-            f'title: "{title_esc}"',
-            f'description: "{desc_esc}"',
-            "---",
-            "",
-            f"# `{path_norm}`",
-            "",
-            ws.lang_ext_label.format(ext=ext or "n/a"),
-            ws.sym_count_label.format(n=len(syms)),
-            "",
-            ws.sym_list_h2,
-            "",
-        ]
-        for c in sorted(syms, key=lambda x: (int(x.get("start_line") or 0), str(x.get("name", "")))):
-            name = str(c.get("name", ""))
-            kind = str(c.get("kind", "function"))
-            sl = c.get("start_line")
-            el = c.get("end_line")
-            llm_desc = _wiki_llm_function_description(c, ws)
-            calls = c.get("calls") or []
-            anchor = _symbol_anchor(kind, name)
-            lines.append(_file_symbol_heading(name, kind, anchor))
-            lines.append("")
-            lines.append(ws.func_desc_llm_label)
-            lines.extend(_md_list_item_body(llm_desc))
-            src_doc = _wiki_source_docstring_supplement(c, ws)
-            if src_doc:
-                lines.append("")
-                lines.append(ws.source_doc_bullet)
-                lines.extend(_md_list_item_body(src_doc))
-            lines.append("")
-            if el:
-                lines.append(ws.pos_lines_range.format(sl=sl, el=el))
-            else:
-                lines.append(ws.pos_lines_from.format(sl=sl))
-            if calls:
-                lines.append(f"{ws.calls_label}{', '.join(str(x) for x in calls[:40])}")
-            code = (c.get("code") or "").strip()
-            if code:
-                snippet = code[:MAX_CODE_IN_WIKI]
-                if len(code) > MAX_CODE_IN_WIKI:
-                    snippet += ws.truncated_comment
-                if use_pymdownx_admonitions:
-                    lines.extend(["", ws.code_extract_admonition, "", "```text", snippet, "```", ""])
-                else:
-                    lines.extend(
-                        [
-                            "",
-                            "<details>",
-                            f"<summary>{ws.code_extract_summary_text}</summary>",
-                            "",
-                            "```text",
-                            snippet,
-                            "```",
-                            "",
-                            "</details>",
-                            "",
-                        ]
-                    )
-            lines.append("")
-        (files_dir / f"{slug}.md").write_text("\n".join(lines), encoding="utf-8")
+    write_file_pages(
+        docs_dir,
+        by_file,
+        slug_map,
+        max_pages,
+        ws,
+        use_pymdownx_admonitions=use_pymdownx_admonitions,
+        max_code_in_wiki=MAX_CODE_IN_WIKI,
+        normalize_rel_path_fn=_normalize_rel_path,
+        ext_of_fn=_ext_of,
+        safe_yaml_double_quoted_title_fn=_safe_yaml_double_quoted_title,
+        wiki_llm_function_description_fn=_wiki_llm_function_description,
+        wiki_source_docstring_supplement_fn=_wiki_source_docstring_supplement,
+        symbol_anchor_fn=_symbol_anchor,
+        file_symbol_heading_fn=_file_symbol_heading,
+        md_list_item_body_fn=_md_list_item_body,
+    )
 
 
 def _write_symbol_index_parts(
@@ -632,73 +573,22 @@ def _write_symbol_index_parts(
     node_deploy_prefix: str | None,
 ) -> list[str]:
     """按文件分组输出符号表（避免每行重复长路径导致表格过窄难读）；返回 nav 用的文件名列表。"""
-    nav_names: list[str] = []
-    sorted_chunks = sorted(
+    return write_symbol_index_parts(
+        docs_dir,
         chunks,
-        key=lambda x: (_normalize_rel_path(str(x.get("path", ""))), str(x.get("name", ""))),
+        slug_map,
+        rows_per_file,
+        paths_with_file_page,
+        ws,
+        mkdocs_style_links=mkdocs_style_links,
+        node_deploy_prefix=node_deploy_prefix,
+        normalize_rel_path_fn=_normalize_rel_path,
+        file_slug_fn=_file_slug,
+        escape_md_table_cell_fn=_escape_md_table_cell,
+        wiki_llm_function_description_fn=_wiki_llm_function_description,
+        symbol_anchor_fn=_symbol_anchor,
+        wiki_link_to_file_page_fn=_wiki_link_to_file_page,
     )
-    parts: list[list[dict[str, Any]]] = []
-    cur: list[dict[str, Any]] = []
-    for c in sorted_chunks:
-        cur.append(c)
-        if len(cur) >= rows_per_file:
-            parts.append(cur)
-            cur = []
-    if cur:
-        parts.append(cur)
-
-    for pi, group in enumerate(parts):
-        md_filename = "symbol-index.md" if pi == 0 else f"symbol-index-{pi + 1}.md"
-        nav_names.append(md_filename)
-        title = ws.sym_idx_title if pi == 0 else ws.sym_idx_part_title.format(n=pi + 1)
-        title_esc = _safe_yaml_double_quoted_title(title)
-        desc_esc = _safe_yaml_double_quoted_title(ws.sym_idx_desc_yaml)
-        lines: list[str] = [
-            "---",
-            f'title: "{title_esc}"',
-            f'description: "{desc_esc}"',
-            "---",
-            "",
-            ws.sym_idx_h1,
-            "",
-            ws.sym_idx_intro,
-            "",
-        ]
-        for path_norm, file_chunks_iter in groupby(
-            group,
-            key=lambda x: _normalize_rel_path(str(x.get("path", ""))),
-        ):
-            file_chunks = list(file_chunks_iter)
-            slug = slug_map.get(path_norm, _file_slug(path_norm))
-            path_esc = _escape_md_table_cell(path_norm)
-            lines.append(f"## `{path_esc}`")
-            lines.append("")
-            if path_norm in paths_with_file_page:
-                href = _wiki_link_to_file_page(
-                    slug, mkdocs_style=mkdocs_style_links, node_deploy_prefix=node_deploy_prefix
-                )
-                lines.append(ws.open_file_page_link.format(href=href))
-                lines.append("")
-            lines.append(f"| {ws.tbl_symbol} | {ws.tbl_kind} | {ws.tbl_lines} | {ws.tbl_desc} |")
-            lines.append("| --- | --- | --- | --- |")
-            for c in file_chunks:
-                sym_name = str(c.get("name", ""))
-                kind = str(c.get("kind", ""))
-                sl = c.get("start_line", "")
-                el = c.get("end_line", "")
-                row_line = f"{sl}-{el}" if el else str(sl)
-                desc = _escape_md_table_cell(_wiki_llm_function_description(c, ws))
-                anchor = _symbol_anchor(kind, sym_name)
-                sym_cell = (
-                    f"[`{_escape_md_table_cell(sym_name)}`]("
-                    f"{_wiki_link_to_file_page(slug, mkdocs_style=mkdocs_style_links, anchor=anchor, node_deploy_prefix=node_deploy_prefix)})"
-                )
-                if path_norm not in paths_with_file_page:
-                    sym_cell = f"`{_escape_md_table_cell(sym_name)}`"
-                lines.append(f"| {sym_cell} | `{kind}` | {row_line} | {desc} |")
-            lines.append("")
-        (docs_dir / md_filename).write_text("\n".join(lines), encoding="utf-8")
-    return nav_names
 
 
 def _write_wiki_documentation(
@@ -881,6 +771,93 @@ def _write_wiki_documentation(
     )
 
 
+def _normalize_wiki_backend() -> str:
+    """读取并规范化 WIKI_BACKEND，不支持的值回退 mkdocs。"""
+    backend = str(effective_wiki_backend()).strip().lower()
+    if backend not in ("mkdocs", "starlight", "vitepress"):
+        logger.warning("未知 WIKI_BACKEND=%s，回退 mkdocs", backend)
+        return "mkdocs"
+    return backend
+
+
+def _prepare_wiki_workspace(project_id: str, backend: str) -> tuple[str, str, Path, Path, Path, Path]:
+    """准备 wiki 工作目录并返回关键路径元组。"""
+    safe = _safe_project_id(project_id)
+    # 与 app.main 中 StaticFiles(directory=wiki_sites) 挂载到 /wiki 的路径一致（用于 Astro/VitePress base）
+    wiki_browse_base = f"/wiki/{safe}/site/"
+    wiki_root = settings.data_path / "wiki_sites" / safe
+    work_dir = settings.data_path / "wiki_work" / safe
+    site_out = wiki_root / "site"
+    if work_dir.exists():
+        shutil.rmtree(work_dir, ignore_errors=True)
+    if backend == "starlight":
+        docs_dir = work_dir / "src" / "content" / "docs"
+    else:
+        docs_dir = work_dir / "docs"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    return safe, wiki_browse_base, wiki_root, work_dir, site_out, docs_dir
+
+
+def _group_chunks_by_file(chunks: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """按 path 聚合 chunks，忽略空路径条目。"""
+    by_file: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for c in chunks:
+        p = _normalize_rel_path(str(c.get("path", "")))
+        if p:
+            by_file[p].append(c)
+    return dict(by_file)
+
+
+def _count_exts(by_file: dict[str, list[dict[str, Any]]]) -> dict[str, int]:
+    """统计包含符号文件的扩展名分布。"""
+    ext_counts: dict[str, int] = defaultdict(int)
+    for p in by_file:
+        ext_counts[_ext_of(p) or "none"] += 1
+    return dict(ext_counts)
+
+
+def _build_wiki_doc_context(
+    *,
+    project_id: str,
+    project_name: str,
+    repo_path: Path,
+    chunks: list[dict[str, Any]],
+    collected_files: list[tuple[str, str]] | None,
+    max_file_pages: int,
+    rows_per: int,
+) -> WikiDocContext:
+    """构建文档写入阶段所需的上下文快照。"""
+    pname = (project_name or "").strip()
+    by_file = _group_chunks_by_file(chunks)
+    slug_map: dict[str, str] = {p: _file_slug(p) for p in by_file}
+    ext_counts = _count_exts(by_file)
+    ws = wiki_i18n(effective_content_language())
+    raw_page_title = (
+        ws.page_title_pair.format(pname=pname, pid=project_id)
+        if pname
+        else ws.wiki_title_suffix.format(pid=project_id)
+    )
+    return WikiDocContext(
+        project_id=project_id,
+        repo_path=repo_path,
+        project_name=pname,
+        commit=_git_head(repo_path),
+        generated_at=datetime.now(timezone.utc).isoformat(),
+        chunks=chunks,
+        by_file=by_file,
+        slug_map=slug_map,
+        ext_counts=ext_counts,
+        readme=_readme_excerpt(collected_files or [], limit=8000),
+        tree_text=_build_directory_tree(repo_path),
+        page_title=_safe_yaml_double_quoted_title(raw_page_title),
+        site_title=f"{pname} · {project_id}" if pname else f"Wiki — {project_id}",
+        h1_line=pname if pname else project_id,
+        max_file_pages=max_file_pages,
+        rows_per=rows_per,
+        i18n=ws,
+    )
+
+
 def generate_project_wiki(
     project_id: str,
     repo_path: Path,
@@ -895,78 +872,24 @@ def generate_project_wiki(
     if not effective_wiki_enabled():
         return {"skipped": True, "reason": "wiki_disabled"}
 
-    pname = (project_name or "").strip()
-    safe = _safe_project_id(project_id)
-    # 与 app.main 中 StaticFiles(directory=wiki_sites) 挂载到 /wiki 的路径一致（用于 Astro/VitePress base）
-    wiki_browse_base = f"/wiki/{safe}/site/"
-    wiki_root = settings.data_path / "wiki_sites" / safe
-    work_dir = settings.data_path / "wiki_work" / safe
-    site_out = wiki_root / "site"
-
     max_file_pages = effective_wiki_max_file_pages()
     rows_per = effective_wiki_symbol_rows_per_file()
-
-    backend = str(effective_wiki_backend()).strip().lower()
-    if backend not in ("mkdocs", "starlight", "vitepress"):
-        logger.warning("未知 WIKI_BACKEND=%s，回退 mkdocs", backend)
-        backend = "mkdocs"
-
-    if work_dir.exists():
-        shutil.rmtree(work_dir, ignore_errors=True)
-
-    if backend == "starlight":
-        docs_dir = work_dir / "src" / "content" / "docs"
-    else:
-        docs_dir = work_dir / "docs"
-    docs_dir.mkdir(parents=True, exist_ok=True)
-
-    commit = _git_head(repo_path)
-    generated_at = datetime.now(timezone.utc).isoformat()
-    tree_text = _build_directory_tree(repo_path)
-
-    by_file: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for c in chunks:
-        p = _normalize_rel_path(str(c.get("path", "")))
-        if p:
-            by_file[p].append(c)
-
-    slug_map: dict[str, str] = {p: _file_slug(p) for p in by_file}
-
-    ext_counts: dict[str, int] = defaultdict(int)
-    for p in by_file:
-        ext_counts[_ext_of(p) or "none"] += 1
-
-    readme = _readme_excerpt(collected_files or [], limit=8000)
-
-    ws = wiki_i18n(effective_content_language())
-    raw_page_title = (
-        ws.page_title_pair.format(pname=pname, pid=project_id)
-        if pname
-        else ws.wiki_title_suffix.format(pid=project_id)
-    )
-    page_title = _safe_yaml_double_quoted_title(raw_page_title)
-    site_title = f"{pname} · {project_id}" if pname else f"Wiki — {project_id}"
-    h1_line = pname if pname else project_id
-
-    ctx = WikiDocContext(
+    backend = _normalize_wiki_backend()
+    safe, wiki_browse_base, wiki_root, work_dir, site_out, docs_dir = _prepare_wiki_workspace(project_id, backend)
+    ctx = _build_wiki_doc_context(
         project_id=project_id,
+        project_name=project_name,
         repo_path=repo_path,
-        project_name=pname,
-        commit=commit,
-        generated_at=generated_at,
         chunks=chunks,
-        by_file=dict(by_file),
-        slug_map=slug_map,
-        ext_counts=dict(ext_counts),
-        readme=readme,
-        tree_text=tree_text,
-        page_title=page_title,
-        site_title=site_title,
-        h1_line=h1_line,
+        collected_files=collected_files,
         max_file_pages=max_file_pages,
         rows_per=rows_per,
-        i18n=ws,
     )
+    ws = ctx.i18n
+    pname = ctx.project_name
+    site_title = ctx.site_title
+    commit = ctx.commit
+    generated_at = ctx.generated_at
 
     use_pymdownx = backend == "mkdocs"
     symbol_nav = _write_wiki_documentation(
@@ -978,98 +901,16 @@ def generate_project_wiki(
 
     site_out.parent.mkdir(parents=True, exist_ok=True)
 
-    if backend == "mkdocs":
-        nav = [
-            {ws.mkdocs_nav_home: "index.md"},
-            {ws.mkdocs_nav_arch: "architecture.md"},
-            {ws.mkdocs_nav_files: "file-index.md"},
-        ]
-        if len(symbol_nav) == 1:
-            nav.append({ws.mkdocs_nav_symbols: symbol_nav[0]})
-        else:
-            nested = [{ws.mkdocs_nav_part.format(n=i + 1): n} for i, n in enumerate(symbol_nav)]
-            nav.append({ws.mkdocs_nav_symbols_multi.format(n=len(symbol_nav)): nested})
-
-        mkdocs_path = work_dir / "mkdocs.yml"
-        mk_lang = "zh" if ws.lang == "zh" else "en"
-        search_lang = ["zh"] if ws.lang == "zh" else ["en"]
-        mkdocs_content: dict[str, Any] = {
-            "site_name": site_title,
-            "docs_dir": "docs",
-            "site_dir": str(site_out.resolve()),
-            "theme": {
-                "name": "material",
-                "language": mk_lang,
-                "features": [
-                    "navigation.indexes",
-                    "navigation.expand",
-                    "search.suggest",
-                    "search.highlight",
-                    "content.code.copy",
-                ],
-            },
-            "markdown_extensions": [
-                "attr_list",
-                "admonition",
-                "pymdownx.details",
-                "pymdownx.superfences",
-            ],
-            "plugins": [
-                {"search": {"lang": search_lang}},
-            ],
-            "nav": nav,
-        }
-        mkdocs_path.write_text(
-            yaml.safe_dump(mkdocs_content, allow_unicode=True, sort_keys=False),
-            encoding="utf-8",
-        )
-        logger.info(
-            "Running mkdocs build backend=%s project=%s work_dir=%s",
-            backend,
-            project_id,
-            work_dir,
-        )
-        proc = subprocess.run(
-            [sys.executable, "-m", "mkdocs", "build", "-f", str(mkdocs_path), "-q"],
-            cwd=str(work_dir),
-            capture_output=True,
-            text=True,
-            timeout=3600,
-        )
-        if proc.returncode != 0:
-            err = (proc.stderr or "") + (proc.stdout or "")
-            logger.error("mkdocs build failed: %s", err[-4000:])
-            raise RuntimeError(f"mkdocs build failed: {err[-2000:]}")
-    elif backend == "starlight":
-        logger.info(
-            "Running Starlight build backend=%s project=%s work_dir=%s",
-            backend,
-            project_id,
-            work_dir,
-        )
-        build_starlight_site(
-            work_dir,
-            site_out,
-            site_title,
-            symbol_nav,
-            public_base=wiki_browse_base,
-            wiki_ui=ws,
-        )
-    else:
-        logger.info(
-            "Running VitePress build backend=%s project=%s work_dir=%s",
-            backend,
-            project_id,
-            work_dir,
-        )
-        build_vitepress_site(
-            work_dir,
-            site_out,
-            site_title,
-            symbol_nav,
-            public_base=wiki_browse_base,
-            wiki_ui=ws,
-        )
+    build_wiki_site(
+        backend=backend,
+        project_id=project_id,
+        work_dir=work_dir,
+        site_out=site_out,
+        site_title=site_title,
+        symbol_nav=symbol_nav,
+        wiki_browse_base=wiki_browse_base,
+        ws=ws,
+    )
 
     manifest = {
         "project_id": project_id,
@@ -1078,7 +919,7 @@ def generate_project_wiki(
         "commit": commit,
         "generated_at": generated_at,
         "chunk_count": len(chunks),
-        "file_count_with_symbols": len(by_file),
+        "file_count_with_symbols": len(ctx.by_file),
         "wiki_backend": backend,
         "site_dir": str(site_out.resolve()),
         "browse_url_path": wiki_browse_base,

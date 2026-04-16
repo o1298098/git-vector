@@ -684,6 +684,100 @@ class IndexJobQueue:
         if self._worker and self._worker.is_alive():
             self._worker.join(timeout=5)
 
+    def _start_job_subprocess(self, job_id: str) -> mp.Process:
+        """启动索引子进程并登记当前进程句柄。"""
+        proc = _mp_spawn.Process(
+            target=_run_index_job_subprocess,
+            args=(job_id,),
+            name=f"index-job-{job_id[:8]}",
+            daemon=False,
+        )
+        self._current_process = proc
+        proc.start()
+        return proc
+
+    def _terminate_running_subprocess(self, proc: mp.Process, *, job_id: str) -> None:
+        """优雅终止子进程，必要时升级为 kill。"""
+        logger.warning("Stop requested, terminating index subprocess job_id=%s", job_id)
+        proc.terminate()
+        proc.join(timeout=120)
+        if proc.is_alive():
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            proc.join(timeout=15)
+
+    def _join_until_exit_or_stop(self, job_id: str, proc: mp.Process) -> int | None:
+        """循环等待子进程退出；收到 stop 信号时中断并终止子进程。"""
+        while proc.is_alive():
+            proc.join(timeout=0.5)
+            if self._stop.is_set():
+                self._terminate_running_subprocess(proc, job_id=job_id)
+                break
+        return proc.exitcode
+
+    def _handle_post_run_state(self, job_id: str, exit_code: int | None) -> None:
+        """按 stop/取消/退出码更新任务最终状态。"""
+        j = self.store.get_job(job_id)
+        if self._stop.is_set():
+            if j and j.status == "running":
+                self.store.update_job(
+                    job_id,
+                    status="cancelled",
+                    progress=j.progress,
+                    step="cancelled",
+                    message="服务关闭，任务已终止",
+                    finished_at=_utc_now_iso(),
+                )
+            return
+
+        if job_id in self._cancel_user_requested:
+            with self._ctl_lock:
+                self._cancel_user_requested.discard(job_id)
+            j2 = self.store.get_job(job_id)
+            if j2 and j2.status in ("succeeded", "cancelled"):
+                return
+            prog = int(j2.progress) if j2 and j2.progress is not None else 0
+            self.store.update_job(
+                job_id,
+                status="cancelled",
+                progress=max(0, min(100, prog)),
+                step="cancelled",
+                message="用户已取消",
+                finished_at=_utc_now_iso(),
+            )
+            return
+
+        if exit_code not in (0, None) and j and j.status == "running":
+            self.store.update_job(
+                job_id,
+                status="failed",
+                step="failed",
+                message=f"子进程异常退出 (code={exit_code})",
+                finished_at=_utc_now_iso(),
+                failure_reason=f"子进程异常退出 code={exit_code}",
+            )
+            self.store.append_job_log(job_id, f"worker: subprocess exited abnormally with code={exit_code}")
+            logger.error("Index subprocess exited abnormally job_id=%s exitcode=%s", job_id, exit_code)
+
+    def _handle_subprocess_failure(self, job_id: str, exc: Exception) -> None:
+        """处理 worker 级异常并写回失败状态与日志。"""
+        finished = _utc_now_iso()
+        err = sanitize_text(str(exc))
+        tb = sanitize_text(traceback.format_exc())
+        self.store.update_job(
+            job_id,
+            status="failed",
+            step="failed",
+            message=f"失败: {err}",
+            finished_at=finished,
+            failure_reason=err,
+        )
+        if tb:
+            self.store.append_job_log(job_id, tb)
+        logger.exception("Failed to start or run index subprocess (job_id=%s): %s", job_id, exc)
+
     def _run_loop(self) -> None:
         while not self._stop.is_set():
             try:
@@ -703,86 +797,12 @@ class IndexJobQueue:
 
             self._current_job_id = job_id
 
-            proc: Optional[mp.Process] = None
             try:
-                proc = _mp_spawn.Process(
-                    target=_run_index_job_subprocess,
-                    args=(job_id,),
-                    name=f"index-job-{job_id[:8]}",
-                    daemon=False,
-                )
-                self._current_process = proc
-                proc.start()
-                while proc.is_alive():
-                    proc.join(timeout=0.5)
-                    if self._stop.is_set():
-                        logger.warning("Stop requested, terminating index subprocess job_id=%s", job_id)
-                        proc.terminate()
-                        proc.join(timeout=120)
-                        if proc.is_alive():
-                            try:
-                                proc.kill()
-                            except Exception:
-                                pass
-                            proc.join(timeout=15)
-                        break
-
-                ec = proc.exitcode
-                j = self.store.get_job(job_id)
-                if self._stop.is_set():
-                    if j and j.status == "running":
-                        self.store.update_job(
-                            job_id,
-                            status="cancelled",
-                            progress=j.progress,
-                            step="cancelled",
-                            message="服务关闭，任务已终止",
-                            finished_at=_utc_now_iso(),
-                        )
-                elif job_id in self._cancel_user_requested:
-                    with self._ctl_lock:
-                        self._cancel_user_requested.discard(job_id)
-                    j2 = self.store.get_job(job_id)
-                    if j2 and j2.status == "succeeded":
-                        pass
-                    elif j2 and j2.status == "cancelled":
-                        pass
-                    else:
-                        prog = int(j2.progress) if j2 and j2.progress is not None else 0
-                        self.store.update_job(
-                            job_id,
-                            status="cancelled",
-                            progress=max(0, min(100, prog)),
-                            step="cancelled",
-                            message="用户已取消",
-                            finished_at=_utc_now_iso(),
-                        )
-                elif ec not in (0, None) and j and j.status == "running":
-                    self.store.update_job(
-                        job_id,
-                        status="failed",
-                        step="failed",
-                        message=f"子进程异常退出 (code={ec})",
-                        finished_at=_utc_now_iso(),
-                        failure_reason=f"子进程异常退出 code={ec}",
-                    )
-                    self.store.append_job_log(job_id, f"worker: subprocess exited abnormally with code={ec}")
-                    logger.error("Index subprocess exited abnormally job_id=%s exitcode=%s", job_id, ec)
+                proc = self._start_job_subprocess(job_id)
+                ec = self._join_until_exit_or_stop(job_id, proc)
+                self._handle_post_run_state(job_id, ec)
             except Exception as e:
-                finished = _utc_now_iso()
-                err = sanitize_text(str(e))
-                tb = sanitize_text(traceback.format_exc())
-                self.store.update_job(
-                    job_id,
-                    status="failed",
-                    step="failed",
-                    message=f"失败: {err}",
-                    finished_at=finished,
-                    failure_reason=err,
-                )
-                if tb:
-                    self.store.append_job_log(job_id, tb)
-                logger.exception("Failed to start or run index subprocess (job_id=%s): %s", job_id, e)
+                self._handle_subprocess_failure(job_id, e)
             finally:
                 self._current_process = None
                 self._current_job_id = ""

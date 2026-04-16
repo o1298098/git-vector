@@ -537,6 +537,285 @@ def _file_fallback_chunks(files: list[tuple[str, str]], max_files: int = 500) ->
     return out
 
 
+def _is_force_full_index() -> bool:
+    """读取环境变量，判断是否强制走全量索引。"""
+    return os.environ.get("FORCE_FULL_INDEX", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _resolve_incremental_context(
+    *,
+    project_id: str,
+    repo_path: Path,
+    head: str,
+) -> tuple[bool, str, str, set[str]]:
+    """计算本次索引上下文：是否增量、上次提交、当前 embedding 模型、delta 路径。"""
+    use_incremental = bool(settings.incremental_index) and not _is_force_full_index() and bool(head)
+    meta_row = get_project_index_meta(project_id)
+    last_commit = (meta_row or {}).get("last_indexed_commit") or ""
+    last_model = (meta_row or {}).get("last_embed_model") or ""
+    embed_model = effective_embed_model()
+
+    if use_incremental and last_commit and head == last_commit and last_model == embed_model:
+        logger.info("Index unchanged (HEAD and embed model match last index) for %s", project_id)
+        return use_incremental, last_commit, embed_model, set()
+
+    if use_incremental and last_commit:
+        _probe_store = get_vector_store()
+        if _probe_store.project_has_legacy_vector_ids(project_id):
+            logger.info("Legacy vector ids for %s — forcing full reindex", project_id)
+            use_incremental = False
+
+    if use_incremental and last_model and last_model != embed_model:
+        logger.info("Embed model changed (%s -> %s) for %s — forcing full reindex", last_model, embed_model, project_id)
+        use_incremental = False
+
+    paths_delta: set[str] = set()
+    if use_incremental and last_commit:
+        diff_list = _git_diff_name_only(repo_path, last_commit, head)
+        if diff_list is None:
+            logger.warning("Git diff failed for %s — forcing full reindex", project_id)
+            use_incremental = False
+        else:
+            paths_delta = set(diff_list)
+            if not paths_delta and last_commit != head:
+                logger.warning("Empty diff but commits differ for %s — forcing full reindex", project_id)
+                use_incremental = False
+
+    if use_incremental and not last_commit:
+        use_incremental = False
+
+    return use_incremental, last_commit, embed_model, paths_delta
+
+
+def _log_collected_file_extensions(project_id: str, files: list[tuple[str, str]]) -> None:
+    """记录本轮收集到的文件扩展分布，用于排障。"""
+    exts: dict[str, int] = {}
+    for path, _ in files:
+        ext = (path.rsplit(".", 1)[-1] if "." in path else "no_ext")
+        exts[ext] = exts.get(ext, 0) + 1
+    logger.info("Collected %s files for %s (extensions: %s)", len(files), project_id, exts)
+
+
+def _parse_function_chunks(
+    project_id: str,
+    files: list[tuple[str, str]],
+    report: Callable[..., None],
+) -> list[dict]:
+    """执行函数级解析，解析为空时回退文件级 chunk。"""
+    nfiles = len(files)
+
+    def _parse_progress(done: int, total: int) -> None:
+        pct = min(15 + int(20 * done / max(total, 1)), 35)
+        report("parse_functions", percent=pct, file_count=total, parsed=done)
+
+    _parse_progress(0, nfiles)
+    function_chunks = parse_files(files, on_progress=_parse_progress)
+    if not function_chunks:
+        logger.warning(
+            "No function-level chunks parsed for %s (collected %s files); using file-level fallback",
+            project_id,
+            len(files),
+        )
+        function_chunks = _file_fallback_chunks(files)
+    return function_chunks
+
+
+def _describe_chunks(
+    *,
+    project_id: str,
+    function_chunks: list[dict],
+    use_incremental: bool,
+    paths_delta: set[str],
+    report: Callable[..., None],
+) -> tuple[list[dict], set[str]]:
+    """执行 chunk 描述阶段（增量或全量），并返回需刷新的路径集合。"""
+    chunk_paths = {normalize_index_path(str(c.get("path") or "")) for c in function_chunks}
+    paths_refresh = {p for p in paths_delta if p in chunk_paths} if (use_incremental and paths_delta) else set()
+
+    if use_incremental and paths_delta:
+        if paths_refresh:
+            idxs: list[int] = []
+            sub_chunks: list[dict] = []
+            for i, c in enumerate(function_chunks):
+                p = normalize_index_path(str(c.get("path") or ""))
+                if p in paths_refresh:
+                    idxs.append(i)
+                    sub_chunks.append(c)
+            report("describe_chunks", percent=55, chunk_count=len(sub_chunks), mode="incremental")
+            logger.info(
+                "Incremental LLM describe for %s: files_changed=%s, chunks_described=%s",
+                project_id,
+                len(paths_refresh),
+                len(sub_chunks),
+            )
+            if sub_chunks:
+                described_sub = describe_functions_batch(sub_chunks)
+                for pos, dc in zip(idxs, described_sub):
+                    function_chunks[pos] = dc
+        else:
+            logger.info(
+                "Incremental LLM describe skipped for %s: no changed code chunks matched delta paths=%s",
+                project_id,
+                len(paths_delta),
+            )
+
+        # Wiki 依赖 chunk.description；未改动文件从历史向量回填，避免被占位文案覆盖。
+        restored_desc = 0
+        try:
+            old_desc_map = get_vector_store().get_project_llm_descriptions(project_id)
+        except Exception as e:  # noqa: S110
+            logger.warning("Load historical LLM descriptions failed for %s: %s", project_id, e)
+            old_desc_map = {}
+        if old_desc_map:
+            for c in function_chunks:
+                p = normalize_index_path(str(c.get("path") or ""))
+                if p in paths_refresh:
+                    continue
+                if str(c.get("description") or "").strip():
+                    continue
+                meta_k = {
+                    "path": p,
+                    "name": str(c.get("name") or ""),
+                    "kind": str(c.get("kind") or ""),
+                    "start_line": c.get("start_line"),
+                    "end_line": c.get("end_line"),
+                }
+                old_desc = (old_desc_map.get(stable_vector_id(project_id, meta_k)) or "").strip()
+                if not old_desc:
+                    continue
+                c["description"] = old_desc
+                restored_desc += 1
+        if restored_desc:
+            logger.info(
+                "Incremental LLM backfill for %s: restored_descriptions=%s",
+                project_id,
+                restored_desc,
+            )
+    else:
+        report("describe_chunks", percent=55, chunk_count=len(function_chunks))
+        function_chunks = describe_functions_batch(function_chunks)
+    return function_chunks, paths_refresh
+
+
+def _maybe_generate_wiki(
+    *,
+    project_id: str,
+    project_name: str,
+    repo_path: Path,
+    function_chunks: list[dict],
+    files: list[tuple[str, str]],
+    report: Callable[..., None],
+) -> None:
+    """在启用 wiki 且未跳过时生成静态文档（失败不阻断索引）。"""
+    skip_wiki = os.environ.get("SKIP_WIKI", "").strip().lower() in ("1", "true", "yes")
+    if not effective_wiki_enabled() or skip_wiki:
+        return
+    report("generate_wiki", percent=62, chunk_count=len(function_chunks))
+    try:
+        from app.wiki_generator import generate_project_wiki
+
+        wiki_info = generate_project_wiki(
+            project_id,
+            repo_path,
+            function_chunks,
+            files,
+            project_name=project_name,
+        )
+        logger.info("Wiki: %s", wiki_info.get("browse_url_path") or wiki_info)
+    except Exception as wiki_exc:
+        logger.warning("Wiki 生成失败（不影响向量索引）: %s", wiki_exc, exc_info=True)
+
+
+def _upsert_docs_to_store(
+    *,
+    project_id: str,
+    project_name: str,
+    docs: list[dict],
+    head: str,
+    embed_model: str,
+    use_incremental: bool,
+    last_commit: str,
+    paths_delta: set[str],
+    paths_refresh: set[str],
+    report: Callable[..., None],
+) -> None:
+    """将 embedding 文档写入向量库（支持全量/增量和 SKIP_VECTOR_STORE 分支）。"""
+    if os.environ.get("SKIP_VECTOR_STORE") == "1":
+        logger.info("Indexed project %s with %s chunks (SKIP_VECTOR_STORE=1, skip upsert)", project_id, len(docs))
+        prev = get_project_index_meta(project_id) or {}
+        dc = int(prev.get("doc_count") or 0)
+        _upsert_project_index_in_db(
+            project_id,
+            dc,
+            project_name,
+            last_indexed_commit=head,
+            last_embed_model=embed_model,
+        )
+        report("done", percent=100, status="done", skipped_vector_store=True, doc_count=len(docs))
+        return
+
+    report("upsert_vector_store", percent=80, doc_count=len(docs))
+    store = get_vector_store()
+    if use_incremental and last_commit and paths_delta:
+        store.delete_vectors_for_paths(project_id, paths_delta)
+        sub_docs = [
+            d
+            for d in docs
+            if normalize_index_path(str((d.get("metadata") or {}).get("path") or "")) in paths_refresh
+        ]
+        if sub_docs:
+            upsert_result = store.upsert_project_incremental(
+                project_id,
+                sub_docs,
+                project_name=project_name,
+                last_indexed_commit=head,
+                last_embed_model=embed_model,
+            )
+            if upsert_result.get("status") == "partial":
+                report(
+                    "upsert_vector_store",
+                    percent=92,
+                    mode="incremental",
+                    status="partial",
+                    embedded=upsert_result.get("embedded"),
+                    attempted=upsert_result.get("attempted"),
+                )
+        else:
+            dc = store.count_project_documents(project_id)
+            _upsert_project_index_in_db(
+                project_id,
+                dc,
+                project_name,
+                last_indexed_commit=head,
+                last_embed_model=embed_model,
+            )
+        logger.info(
+            "Incrementally indexed project %s (delta paths=%s, upserted_docs=%s)",
+            project_id,
+            len(paths_delta),
+            len(sub_docs),
+        )
+        return
+
+    upsert_result = store.upsert_project(
+        project_id,
+        docs,
+        project_name=project_name,
+        last_indexed_commit=head,
+        last_embed_model=embed_model,
+    )
+    if upsert_result.get("status") == "partial":
+        report(
+            "upsert_vector_store",
+            percent=92,
+            mode="full",
+            status="partial",
+            embedded=upsert_result.get("embedded"),
+            attempted=upsert_result.get("attempted"),
+        )
+    logger.info("Indexed project %s with %s chunks (full)", project_id, len(docs))
+
+
 def run_index_pipeline(
     repo_url: str,
     project_id: str,
@@ -556,42 +835,16 @@ def run_index_pipeline(
         _report("clone_or_pull", percent=5)
         repo_path = clone_or_pull(repo_url, project_id)
         head = _git_rev_parse(repo_path) or ""
-        force_full = os.environ.get("FORCE_FULL_INDEX", "").strip().lower() in ("1", "true", "yes", "on")
-        use_incremental = bool(settings.incremental_index) and not force_full and bool(head)
-        meta_row = get_project_index_meta(project_id)
-        last_commit = (meta_row or {}).get("last_indexed_commit") or ""
-        last_model = (meta_row or {}).get("last_embed_model") or ""
-        embed_model = effective_embed_model()
+        use_incremental, last_commit, embed_model, paths_delta = _resolve_incremental_context(
+            project_id=project_id,
+            repo_path=repo_path,
+            head=head,
+        )
 
-        if use_incremental and last_commit and head == last_commit and last_model == embed_model:
+        if use_incremental and last_commit and head == last_commit:
             logger.info("Index unchanged (HEAD and embed model match last index) for %s", project_id)
             _report("done", percent=100, status="skipped", reason="unchanged", head=head)
             return
-
-        if use_incremental and last_commit:
-            _probe_store = get_vector_store()
-            if _probe_store.project_has_legacy_vector_ids(project_id):
-                logger.info("Legacy vector ids for %s — forcing full reindex", project_id)
-                use_incremental = False
-
-        if use_incremental and last_model and last_model != embed_model:
-            logger.info("Embed model changed (%s -> %s) for %s — forcing full reindex", last_model, embed_model, project_id)
-            use_incremental = False
-
-        paths_delta: set[str] = set()
-        if use_incremental and last_commit:
-            diff_list = _git_diff_name_only(repo_path, last_commit, head)
-            if diff_list is None:
-                logger.warning("Git diff failed for %s — forcing full reindex", project_id)
-                use_incremental = False
-            else:
-                paths_delta = set(diff_list)
-                if not paths_delta and last_commit != head:
-                    logger.warning("Empty diff but commits differ for %s — forcing full reindex", project_id)
-                    use_incremental = False
-
-        if use_incremental and not last_commit:
-            use_incremental = False
 
         _report("collect_files", percent=15)
         files = collect_code_files(repo_path)
@@ -599,185 +852,43 @@ def run_index_pipeline(
             logger.warning("No code files found for %s", project_id)
             _report("done", percent=100, status="skipped", reason="no_files")
             return
-        # 统计扩展名，便于排查
-        exts: dict[str, int] = {}
-        for path, _ in files:
-            ext = (path.rsplit(".", 1)[-1] if "." in path else "no_ext")
-            exts[ext] = exts.get(ext, 0) + 1
-        logger.info("Collected %s files for %s (extensions: %s)", len(files), project_id, exts)
-        nfiles = len(files)
-
-        def _parse_progress(done: int, total: int) -> None:
-            pct = min(15 + int(20 * done / max(total, 1)), 35)
-            _report("parse_functions", percent=pct, file_count=total, parsed=done)
-
-        _parse_progress(0, nfiles)
-        function_chunks = parse_files(files, on_progress=_parse_progress)
-        if not function_chunks:
-            logger.warning(
-                "No function-level chunks parsed for %s (collected %s files); using file-level fallback",
-                project_id, len(files),
-            )
-            function_chunks = _file_fallback_chunks(files)
+        _log_collected_file_extensions(project_id, files)
+        function_chunks = _parse_function_chunks(project_id, files, _report)
         if not function_chunks:
             _report("done", percent=100, status="skipped", reason="no_chunks")
             return
-        chunk_paths = {normalize_index_path(str(c.get("path") or "")) for c in function_chunks}
-        paths_refresh = {p for p in paths_delta if p in chunk_paths} if (use_incremental and paths_delta) else set()
+        function_chunks, paths_refresh = _describe_chunks(
+            project_id=project_id,
+            function_chunks=function_chunks,
+            use_incremental=use_incremental,
+            paths_delta=paths_delta,
+            report=_report,
+        )
 
-        if use_incremental and paths_delta:
-            if paths_refresh:
-                idxs: list[int] = []
-                sub_chunks: list[dict] = []
-                for i, c in enumerate(function_chunks):
-                    p = normalize_index_path(str(c.get("path") or ""))
-                    if p in paths_refresh:
-                        idxs.append(i)
-                        sub_chunks.append(c)
-                _report("describe_chunks", percent=55, chunk_count=len(sub_chunks), mode="incremental")
-                logger.info(
-                    "Incremental LLM describe for %s: files_changed=%s, chunks_described=%s",
-                    project_id,
-                    len(paths_refresh),
-                    len(sub_chunks),
-                )
-                if sub_chunks:
-                    described_sub = describe_functions_batch(sub_chunks)
-                    for pos, dc in zip(idxs, described_sub):
-                        function_chunks[pos] = dc
-            else:
-                logger.info(
-                    "Incremental LLM describe skipped for %s: no changed code chunks matched delta paths=%s",
-                    project_id,
-                    len(paths_delta),
-                )
-
-            # Wiki 依赖 chunk.description；未改动文件从历史向量回填，避免被占位文案覆盖。
-            restored_desc = 0
-            try:
-                old_desc_map = get_vector_store().get_project_llm_descriptions(project_id)
-            except Exception as e:  # noqa: S110
-                logger.warning("Load historical LLM descriptions failed for %s: %s", project_id, e)
-                old_desc_map = {}
-            if old_desc_map:
-                for c in function_chunks:
-                    p = normalize_index_path(str(c.get("path") or ""))
-                    if p in paths_refresh:
-                        continue
-                    if str(c.get("description") or "").strip():
-                        continue
-                    meta_k = {
-                        "path": p,
-                        "name": str(c.get("name") or ""),
-                        "kind": str(c.get("kind") or ""),
-                        "start_line": c.get("start_line"),
-                        "end_line": c.get("end_line"),
-                    }
-                    old_desc = (old_desc_map.get(stable_vector_id(project_id, meta_k)) or "").strip()
-                    if not old_desc:
-                        continue
-                    c["description"] = old_desc
-                    restored_desc += 1
-            if restored_desc:
-                logger.info(
-                    "Incremental LLM backfill for %s: restored_descriptions=%s",
-                    project_id,
-                    restored_desc,
-                )
-        else:
-            _report("describe_chunks", percent=55, chunk_count=len(function_chunks))
-            function_chunks = describe_functions_batch(function_chunks)
-
-        skip_wiki = os.environ.get("SKIP_WIKI", "").strip().lower() in ("1", "true", "yes")
-        if effective_wiki_enabled() and not skip_wiki:
-            _report("generate_wiki", percent=62, chunk_count=len(function_chunks))
-            try:
-                from app.wiki_generator import generate_project_wiki
-
-                wiki_info = generate_project_wiki(
-                    project_id,
-                    repo_path,
-                    function_chunks,
-                    files,
-                    project_name=project_name,
-                )
-                logger.info("Wiki: %s", wiki_info.get("browse_url_path") or wiki_info)
-            except Exception as wiki_exc:
-                logger.warning("Wiki 生成失败（不影响向量索引）: %s", wiki_exc, exc_info=True)
+        _maybe_generate_wiki(
+            project_id=project_id,
+            project_name=project_name,
+            repo_path=repo_path,
+            function_chunks=function_chunks,
+            files=files,
+            report=_report,
+        )
 
         docs = _chunks_to_embedding_docs(project_id, function_chunks)
+        _upsert_docs_to_store(
+            project_id=project_id,
+            project_name=project_name,
+            docs=docs,
+            head=head,
+            embed_model=embed_model,
+            use_incremental=use_incremental,
+            last_commit=last_commit,
+            paths_delta=paths_delta,
+            paths_refresh=paths_refresh,
+            report=_report,
+        )
         if os.environ.get("SKIP_VECTOR_STORE") == "1":
-            logger.info("Indexed project %s with %s chunks (SKIP_VECTOR_STORE=1, skip upsert)", project_id, len(docs))
-            prev = get_project_index_meta(project_id) or {}
-            dc = int(prev.get("doc_count") or 0)
-            _upsert_project_index_in_db(
-                project_id,
-                dc,
-                project_name,
-                last_indexed_commit=head,
-                last_embed_model=embed_model,
-            )
-            _report("done", percent=100, status="done", skipped_vector_store=True, doc_count=len(docs))
             return
-        _report("upsert_vector_store", percent=80, doc_count=len(docs))
-        store = get_vector_store()
-        if use_incremental and last_commit and paths_delta:
-            store.delete_vectors_for_paths(project_id, paths_delta)
-            sub_docs = [
-                d
-                for d in docs
-                if normalize_index_path(str((d.get("metadata") or {}).get("path") or "")) in paths_refresh
-            ]
-            if sub_docs:
-                upsert_result = store.upsert_project_incremental(
-                    project_id,
-                    sub_docs,
-                    project_name=project_name,
-                    last_indexed_commit=head,
-                    last_embed_model=embed_model,
-                )
-                if upsert_result.get("status") == "partial":
-                    _report(
-                        "upsert_vector_store",
-                        percent=92,
-                        mode="incremental",
-                        status="partial",
-                        embedded=upsert_result.get("embedded"),
-                        attempted=upsert_result.get("attempted"),
-                    )
-            else:
-                dc = store.count_project_documents(project_id)
-                _upsert_project_index_in_db(
-                    project_id,
-                    dc,
-                    project_name,
-                    last_indexed_commit=head,
-                    last_embed_model=embed_model,
-                )
-            logger.info(
-                "Incrementally indexed project %s (delta paths=%s, upserted_docs=%s)",
-                project_id,
-                len(paths_delta),
-                len(sub_docs),
-            )
-        else:
-            upsert_result = store.upsert_project(
-                project_id,
-                docs,
-                project_name=project_name,
-                last_indexed_commit=head,
-                last_embed_model=embed_model,
-            )
-            if upsert_result.get("status") == "partial":
-                _report(
-                    "upsert_vector_store",
-                    percent=92,
-                    mode="full",
-                    status="partial",
-                    embedded=upsert_result.get("embedded"),
-                    attempted=upsert_result.get("attempted"),
-                )
-            logger.info("Indexed project %s with %s chunks (full)", project_id, len(docs))
         final_meta = get_project_index_meta(project_id) or {}
         final_dc = int(final_meta.get("doc_count") or 0)
         _report("done", percent=100, status="done", doc_count=final_dc)
