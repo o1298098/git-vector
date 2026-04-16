@@ -238,7 +238,7 @@ After `describe_chunks`, the worker runs a wiki build before vector upsert. Fail
 - **Browse**: `http://<host>:8000/wiki/<project_id>/site/` (same `project_id` rules as under `repos/`)
 - **Metadata**: `GET /api/wiki/{project_id}` → last `manifest.json` (includes `wiki_backend`, commit, timestamps, counts)
 
-Pages include overview, architecture (when an LLM is configured), file index (tree), per-file symbol pages, and a symbol table (split into parts when large). MkDocs uses Lunr search; Starlight/VitePress use built-in local search. On each symbol, **功能说明** shows only the **LLM-generated** one-line description from the indexing pipeline (same field as in the vector store); if the model is not configured or generation failed, a placeholder explains that. When a source docstring differs from that text, it appears separately under **源码文档**.
+Pages include overview, architecture (when an LLM is configured), file index (tree), per-file symbol pages, and a symbol table (split into parts when large). MkDocs uses Lunr search; Starlight/VitePress use built-in local search. On each symbol, **Functionality** shows only the **LLM-generated** one-line description from the indexing pipeline (same field as in the vector store); if the model is not configured or generation failed, a placeholder explains that. When a source docstring differs from that text, it appears separately under **Source Docstring**.
 
 ---
 
