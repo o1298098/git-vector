@@ -302,6 +302,7 @@ export function Vectors() {
             editMeta={editMeta}
             saveDisabled={saveDisabled}
             saving={saving}
+            loading={loading}
             resolvedDark={resolvedDark}
             editorTheme={editorTheme}
             contentEditorOptions={contentEditorOptions}

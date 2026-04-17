@@ -25,13 +25,17 @@ export function Calendar({ className, classNames, showOutsideDays = true, ...pro
         weekdays: "flex",
         weekday: "w-9 rounded-md text-[0.8rem] font-normal text-muted-foreground",
         week: "mt-2 flex w-full",
-        day: "inline-flex size-9 items-center justify-center rounded-md p-0 text-sm font-normal transition-colors aria-selected:opacity-100 hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        day: "relative inline-flex size-9 items-center justify-center rounded-md p-0 text-sm font-normal transition-colors aria-selected:opacity-100 hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        day_button: "inline-flex size-9 items-center justify-center rounded-md",
+        range_start: "rounded-l-md bg-primary text-primary-foreground",
+        range_end: "rounded-r-md bg-primary text-primary-foreground",
         selected:
           "bg-primary text-primary-foreground hover:bg-primary hover:text-primary-foreground focus:bg-primary focus:text-primary-foreground",
         today: "bg-accent text-accent-foreground",
         outside: "text-muted-foreground opacity-50",
         disabled: "text-muted-foreground opacity-50",
-        range_middle: "bg-accent text-accent-foreground",
+        range_middle:
+          "bg-accent/60 text-foreground rounded-none hover:bg-accent/60 hover:text-foreground [&>button]:bg-accent/60 [&>button]:text-foreground [&>button:hover]:bg-accent/60 [&>button:hover]:text-foreground",
         hidden: "invisible",
         ...classNames,
       }}

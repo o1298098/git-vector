@@ -146,8 +146,8 @@ class AuditRepo:
         where: list[str] = []
         params: list[Any] = []
         if event_type:
-            where.append("event_type=?")
-            params.append(event_type)
+            where.append("LOWER(event_type) LIKE LOWER(?)")
+            params.append(f"%{event_type}%")
         if actor:
             where.append("actor=?")
             params.append(actor)

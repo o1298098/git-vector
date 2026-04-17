@@ -90,7 +90,7 @@ export function VectorsListPanel({
       <CardContent className="flex min-h-0 flex-1 flex-col gap-4">
         <div className="relative min-h-0 flex-1 overflow-auto rounded-md border bg-background">
           {showInitialSkeleton ? (
-            <div role="status" aria-live="polite" aria-label={t("vectors.loading")} className="p-2">
+            <div className="p-2">
               <VectorsRowsSkeleton />
             </div>
           ) : rows.length === 0 ? (
@@ -112,12 +112,7 @@ export function VectorsListPanel({
             </ul>
           )}
           {showRefreshingOverlay ? (
-            <div
-              role="status"
-              aria-live="polite"
-              aria-label={t("vectors.loading")}
-              className="pointer-events-none absolute inset-0 bg-background/45 backdrop-blur-[1px]"
-            />
+            <div className="pointer-events-none absolute inset-0 bg-background/45 backdrop-blur-[1px]" />
           ) : null}
         </div>
         <div className="flex shrink-0 items-center justify-between">

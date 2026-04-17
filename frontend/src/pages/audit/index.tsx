@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import dayjs from "dayjs";
-import { CalendarDays, ChevronDown, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, X } from "lucide-react";
+import type { DateRange } from "react-day-picker";
+import { CalendarDays, ChevronDown, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight } from "lucide-react";
 import { apiJson } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -49,6 +50,8 @@ type AuditEventsResponse = {
   offset: number;
   events: AuditEvent[];
 };
+
+type AuditRangePreset = "15m" | "1h" | "4h" | "24h" | "7d" | "custom";
 
 const PAGE_SIZE_OPTIONS = [15, 30, 50, 100] as const;
 const DEFAULT_PAGE_SIZE = PAGE_SIZE_OPTIONS[0];
@@ -125,10 +128,9 @@ export function Audit() {
   const { t } = useI18n();
   const [eventType, setEventType] = useState("");
   const [status, setStatus] = useState("all");
-  const [dateFrom, setDateFrom] = useState<Date | undefined>(undefined);
-  const [dateTo, setDateTo] = useState<Date | undefined>(undefined);
-  const [fromOpen, setFromOpen] = useState(false);
-  const [toOpen, setToOpen] = useState(false);
+  const [rangePreset, setRangePreset] = useState<AuditRangePreset>("24h");
+  const [dateRange, setDateRange] = useState<DateRange | undefined>(undefined);
+  const [customRangeOpen, setCustomRangeOpen] = useState(false);
   const [filters, setFilters] = useState<{
     eventType: string;
     status: string;
@@ -137,12 +139,13 @@ export function Audit() {
   }>({
     eventType: "",
     status: "",
-    createdFrom: "",
-    createdTo: "",
+    createdFrom: dayjs().subtract(24, "hour").toISOString(),
+    createdTo: dayjs().toISOString(),
   });
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState<number>(DEFAULT_PAGE_SIZE);
   const [loading, setLoading] = useState(false);
+  const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [total, setTotal] = useState(0);
   const [rows, setRows] = useState<AuditEvent[]>([]);
@@ -160,6 +163,17 @@ export function Audit() {
     () => ["ok", "failed", "disabled", "cancelled", "error"],
     [],
   );
+  const rangeOptions = useMemo(
+    () => [
+      { value: "15m", label: t("audit.rangeLast15Minutes") },
+      { value: "1h", label: t("audit.rangeLastHour") },
+      { value: "4h", label: t("audit.rangeLast4Hours") },
+      { value: "24h", label: t("audit.rangeLast24Hours") },
+      { value: "7d", label: t("audit.rangeLast7Days") },
+      { value: "custom", label: t("audit.rangeCustom") },
+    ] satisfies { value: AuditRangePreset; label: string }[],
+    [t],
+  );
 
   function toIsoStartOfDay(d?: Date): string {
     if (!d) return "";
@@ -171,13 +185,63 @@ export function Audit() {
     return dayjs(d).endOf("day").toISOString();
   }
 
+  function getPresetRange(preset: Exclude<AuditRangePreset, "custom">): { createdFrom: string; createdTo: string } {
+    const now = dayjs();
+    switch (preset) {
+      case "15m":
+        return { createdFrom: now.subtract(15, "minute").toISOString(), createdTo: now.toISOString() };
+      case "1h":
+        return { createdFrom: now.subtract(1, "hour").toISOString(), createdTo: now.toISOString() };
+      case "4h":
+        return { createdFrom: now.subtract(4, "hour").toISOString(), createdTo: now.toISOString() };
+      case "7d":
+        return { createdFrom: now.subtract(7, "day").toISOString(), createdTo: now.toISOString() };
+      case "24h":
+      default:
+        return { createdFrom: now.subtract(24, "hour").toISOString(), createdTo: now.toISOString() };
+    }
+  }
+
+  function getRangeLabel(): string {
+    if (rangePreset !== "custom") {
+      return rangeOptions.find((option) => option.value === rangePreset)?.label ?? t("audit.rangeLast24Hours");
+    }
+    if (dateRange?.from && dateRange?.to) {
+      return `${dayjs(dateRange.from).format("YYYY/MM/DD")} - ${dayjs(dateRange.to).format("YYYY/MM/DD")}`;
+    }
+    if (dateRange?.from) {
+      return `${dayjs(dateRange.from).format("YYYY/MM/DD")} - ...`;
+    }
+    return t("audit.customDatePlaceholder");
+  }
+
+  function applyFilters() {
+    setPage(0);
+    const nextRange =
+      rangePreset === "custom"
+        ? {
+            createdFrom: toIsoStartOfDay(dateRange?.from),
+            createdTo: toIsoEndOfDay(dateRange?.to ?? dateRange?.from),
+          }
+        : getPresetRange(rangePreset);
+    setFilters({
+      eventType: eventType.trim(),
+      status: status.trim() === "all" ? "" : status.trim(),
+      createdFrom: nextRange.createdFrom,
+      createdTo: nextRange.createdTo,
+    });
+  }
+
   const load = useCallback(async () => {
     inflightControllerRef.current?.abort();
     const controller = new AbortController();
     inflightControllerRef.current = controller;
     const seq = requestSeqRef.current + 1;
     requestSeqRef.current = seq;
-    setLoading(true);
+    const showLoading = !hasLoadedOnce || rows.length === 0;
+    if (showLoading) {
+      setLoading(true);
+    }
     setError(null);
     try {
       const params = new URLSearchParams();
@@ -194,20 +258,22 @@ export function Audit() {
       const events = data.events || [];
       setRows(events);
       setTotal(typeof data.total === "number" ? data.total : 0);
+      setHasLoadedOnce(true);
       setSelectedEventId((current) => {
         if (!events.length) return null;
         if (current && events.some((item) => item.id === current)) return current;
-        const firstAbnormal = events.find((item) => isAbnormalStatus(item.status));
-        return firstAbnormal?.id ?? null;
+        return null;
       });
     } catch (err: unknown) {
       if (controller.signal.aborted || seq !== requestSeqRef.current) return;
       setError(err instanceof Error ? err.message : t("audit.loadFail"));
     } finally {
       if (controller.signal.aborted || seq !== requestSeqRef.current) return;
-      setLoading(false);
+      if (showLoading) {
+        setLoading(false);
+      }
     }
-  }, [filters.createdFrom, filters.createdTo, filters.eventType, filters.status, page, pageSize, t]);
+  }, [filters.createdFrom, filters.createdTo, filters.eventType, filters.status, hasLoadedOnce, page, pageSize, rows.length, t]);
 
   useEffect(() => {
     void load();
@@ -243,171 +309,119 @@ export function Audit() {
         </div>
       </div>
 
-      <section className="space-y-4 rounded-lg border border-border/70 bg-background/60 p-4 shadow-sm">
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-12">
-          <div className="space-y-2 xl:col-span-6">
-            <Label htmlFor="audit-event-type">{t("audit.eventType")}</Label>
-            <Input
-              id="audit-event-type"
-              value={eventType}
-              onChange={(e) => setEventType(e.target.value)}
-              placeholder={t("audit.eventTypePh")}
-              className="h-10 rounded-md"
-            />
-          </div>
-          <div className="space-y-2 xl:col-span-2">
-            <Label htmlFor="audit-status">{t("audit.status")}</Label>
-            <Select value={status} onValueChange={setStatus}>
-              <SelectTrigger id="audit-status" className="h-10 rounded-md">
-                <SelectValue placeholder={t("audit.statusAll")} />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">{t("audit.statusAll")}</SelectItem>
-                {statusOptions.map((v) => (
-                  <SelectItem key={v} value={v}>
-                    {v}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="space-y-2 xl:col-span-2">
-            <Label>{t("audit.timeFrom")}</Label>
-            <Popover open={fromOpen} onOpenChange={setFromOpen}>
-              <PopoverTrigger asChild>
-                <Button
-                  type="button"
-                  variant="outline"
-                  className={cn(
-                    "relative h-10 w-full justify-between rounded-lg pr-11 text-left font-normal",
-                    !dateFrom && "text-muted-foreground",
-                  )}
-                >
-                  <span className="inline-flex items-center gap-2">
-                    <CalendarDays className="size-4" aria-hidden />
-                    {dateFrom ? dayjs(dateFrom).format("YYYY-MM-DD") : t("audit.datePlaceholder")}
-                  </span>
-                  {dateFrom ? (
-                    <span
-                      role="button"
-                      tabIndex={0}
-                      aria-label={t("audit.clearFilter")}
-                      className="absolute right-2 inline-flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-                      onClick={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        setDateFrom(undefined);
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" || e.key === " ") {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          setDateFrom(undefined);
-                        }
-                      }}
+      <section className="rounded-lg border border-border/70 bg-background/60 p-4 shadow-sm">
+        <form
+          className="space-y-4"
+          onSubmit={(e) => {
+            e.preventDefault();
+            applyFilters();
+          }}
+        >
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_180px_220px_minmax(260px,320px)]">
+            <div className="space-y-2">
+              <Label htmlFor="audit-event-type">{t("audit.eventType")}</Label>
+              <Input
+                id="audit-event-type"
+                value={eventType}
+                onChange={(e) => setEventType(e.target.value)}
+                placeholder={t("audit.eventTypePh")}
+                className="h-10 rounded-md"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="audit-status">{t("audit.status")}</Label>
+              <Select value={status} onValueChange={setStatus}>
+                <SelectTrigger id="audit-status" className="h-10 rounded-md">
+                  <SelectValue placeholder={t("audit.statusAll")} />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">{t("audit.statusAll")}</SelectItem>
+                  {statusOptions.map((v) => (
+                    <SelectItem key={v} value={v}>
+                      {v}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2 xl:w-[220px]">
+              <Label htmlFor="audit-time-range">{t("audit.timeRange")}</Label>
+              <Select
+                value={rangePreset}
+                onValueChange={(value) => {
+                  setRangePreset(value as AuditRangePreset);
+                  if (value !== "custom") {
+                    setCustomRangeOpen(false);
+                  }
+                }}
+              >
+                <SelectTrigger id="audit-time-range" className="h-10 rounded-md">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {rangeOptions.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            {rangePreset === "custom" ? (
+              <div className="space-y-2 xl:w-full">
+                <Label>{t("audit.customDateRange")}</Label>
+                <Popover open={customRangeOpen} onOpenChange={setCustomRangeOpen}>
+                  <PopoverTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className={cn(
+                        "h-10 w-full justify-between rounded-lg px-3 text-left font-normal",
+                        !dateRange?.from && "text-muted-foreground",
+                      )}
                     >
-                      <X className="size-4" aria-hidden />
-                    </span>
-                  ) : null}
-                </Button>
-              </PopoverTrigger>
-              <PopoverContent className="w-auto rounded-xl p-0" align="start">
-                <Calendar
-                  mode="single"
-                  selected={dateFrom}
-                  onSelect={(date) => {
-                    setDateFrom(date);
-                    setFromOpen(false);
-                  }}
-                />
-              </PopoverContent>
-            </Popover>
+                      <span className="inline-flex min-w-0 items-center gap-2">
+                        <CalendarDays className="size-4 shrink-0" aria-hidden />
+                        <span className="truncate">{getRangeLabel()}</span>
+                      </span>
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="w-auto rounded-xl p-0" align="start">
+                    <Calendar
+                      mode="range"
+                      numberOfMonths={2}
+                      selected={dateRange}
+                      defaultMonth={dateRange?.from}
+                      onSelect={setDateRange}
+                    />
+                  </PopoverContent>
+                </Popover>
+              </div>
+            ) : null}
           </div>
-          <div className="space-y-2 xl:col-span-2">
-            <Label>{t("audit.timeTo")}</Label>
-            <Popover open={toOpen} onOpenChange={setToOpen}>
-              <PopoverTrigger asChild>
-                <Button
-                  type="button"
-                  variant="outline"
-                  className={cn(
-                    "relative h-10 w-full justify-between rounded-lg pr-11 text-left font-normal",
-                    !dateTo && "text-muted-foreground",
-                  )}
-                >
-                  <span className="inline-flex items-center gap-2">
-                    <CalendarDays className="size-4" aria-hidden />
-                    {dateTo ? dayjs(dateTo).format("YYYY-MM-DD") : t("audit.datePlaceholder")}
-                  </span>
-                  {dateTo ? (
-                    <span
-                      role="button"
-                      tabIndex={0}
-                      aria-label={t("audit.clearFilter")}
-                      className="absolute right-2 inline-flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-                      onClick={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        setDateTo(undefined);
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" || e.key === " ") {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          setDateTo(undefined);
-                        }
-                      }}
-                    >
-                      <X className="size-4" aria-hidden />
-                    </span>
-                  ) : null}
-                </Button>
-              </PopoverTrigger>
-              <PopoverContent className="w-auto rounded-xl p-0" align="start">
-                <Calendar
-                  mode="single"
-                  selected={dateTo}
-                  onSelect={(date) => {
-                    setDateTo(date);
-                    setToOpen(false);
-                  }}
-                />
-              </PopoverContent>
-            </Popover>
+          <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
+            <Button type="submit">{t("audit.applyFilter")}</Button>
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={() => {
+                setEventType("");
+                setStatus("all");
+                setRangePreset("24h");
+                setDateRange(undefined);
+                setCustomRangeOpen(false);
+                setFilters({
+                  eventType: "",
+                  status: "",
+                  ...getPresetRange("24h"),
+                });
+                setPage(0);
+              }}
+            >
+              {t("audit.clearFilter")}
+            </Button>
           </div>
-        </div>
-        <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
-          <Button
-            type="button"
-            onClick={() => {
-              setPage(0);
-              setFilters({
-                eventType: eventType.trim(),
-                status: status.trim() === "all" ? "" : status.trim(),
-                createdFrom: toIsoStartOfDay(dateFrom),
-                createdTo: toIsoEndOfDay(dateTo),
-              });
-            }}
-            disabled={loading}
-          >
-            {t("audit.applyFilter")}
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            onClick={() => {
-              setEventType("");
-              setStatus("all");
-              setDateFrom(undefined);
-              setDateTo(undefined);
-              setFilters({ eventType: "", status: "", createdFrom: "", createdTo: "" });
-              setPage(0);
-            }}
-            disabled={loading}
-          >
-            {t("audit.clearFilter")}
-          </Button>
-        </div>
+        </form>
       </section>
 
       {error ? <p className="text-sm text-destructive">{error}</p> : null}
@@ -506,7 +520,7 @@ export function Audit() {
         </div>
 
         <section className="overflow-hidden rounded-lg border border-border/70 bg-background/80 shadow-sm">
-          <div className={cn("transition-opacity duration-150", loading && rows.length > 0 && "opacity-75")}>
+          <div>
             <Table>
               <TableHeader>
                 <TableRow>
