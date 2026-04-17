@@ -1,0 +1,56 @@
+stages:
+  - verify
+  - publish
+
+variables:
+  DOCKER_HOST: tcp://docker:2375
+  DOCKER_TLS_CERTDIR: ""
+  DOCKER_DRIVER: overlay2
+  IMAGE_NAME: $CI_REGISTRY_IMAGE
+
+default:
+  image: docker:27.5.1
+  services:
+    - name: docker:27.5.1-dind
+      command:
+        - --tls=false
+  before_script:
+    - docker version
+    - docker info
+
+workflow:
+  rules:
+    - if: $CI_COMMIT_TAG
+    - if: $CI_PIPELINE_SOURCE == "push"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_PIPELINE_SOURCE == "web"
+    - when: never
+
+verify_docker_build:
+  stage: verify
+  script:
+    - docker build --pull -t "$IMAGE_NAME:verify-$CI_COMMIT_SHORT_SHA" .
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH
+
+publish_default_branch:
+  stage: publish
+  script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login "$CI_REGISTRY" -u "$CI_REGISTRY_USER" --password-stdin
+    - docker build --pull -t "$IMAGE_NAME:$CI_DEFAULT_BRANCH" -t "$IMAGE_NAME:$CI_COMMIT_SHORT_SHA" -t "$IMAGE_NAME:latest" .
+    - docker push "$IMAGE_NAME:$CI_DEFAULT_BRANCH"
+    - docker push "$IMAGE_NAME:$CI_COMMIT_SHORT_SHA"
+    - docker push "$IMAGE_NAME:latest"
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+publish_tag:
+  stage: publish
+  script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login "$CI_REGISTRY" -u "$CI_REGISTRY_USER" --password-stdin
+    - docker build --pull -t "$IMAGE_NAME:$CI_COMMIT_TAG" -t "$IMAGE_NAME:$CI_COMMIT_SHORT_SHA" .
+    - docker push "$IMAGE_NAME:$CI_COMMIT_TAG"
+    - docker push "$IMAGE_NAME:$CI_COMMIT_SHORT_SHA"
+  rules:
+    - if: $CI_COMMIT_TAG
