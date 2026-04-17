@@ -5,9 +5,11 @@ import shutil
 import subprocess
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
+from app.audit_helpers import actor_from_user, request_meta
+from app.audit_repo import append_audit_event
 from app.job_queue import JobStatus, build_repo_url_for_clone, get_job_queue, get_job_store, sanitize_text
 from app.llm_client import precheck_llm_connectivity
 from app.vector_store import precheck_embedding_connectivity
@@ -32,11 +34,28 @@ class PrecheckBody(BaseModel):
 
 
 @router.post("/index-jobs/enqueue")
-async def enqueue_index_job(body: EnqueueBody):
+async def enqueue_index_job(body: EnqueueBody, request: Request):
     pid = body.project_id or body.repo_url.split("/")[-1].replace(".git", "")
     pname = (body.project_name or "").strip()
     q = get_job_queue()
     job = await asyncio.to_thread(q.enqueue, str(pid), body.repo_url, pname)
+    meta = request_meta(request)
+    append_audit_event(
+        event_type="job.enqueue",
+        actor=actor_from_user(None),
+        route=meta["route"],
+        method=meta["method"],
+        resource_type="index_job",
+        resource_id=job.job_id,
+        status="ok",
+        payload={
+            "project_id": job.project_id,
+            "project_name": job.project_name or "",
+            "repo_url": sanitize_text(body.repo_url),
+        },
+        ip=meta["ip"],
+        user_agent=meta["user_agent"],
+    )
     return {
         "status": "queued",
         "job_id": job.job_id,
@@ -46,7 +65,7 @@ async def enqueue_index_job(body: EnqueueBody):
 
 
 @router.post("/index-jobs/{job_id}/retry")
-async def retry_index_job(job_id: str):
+async def retry_index_job(job_id: str, request: Request):
     """基于历史任务参数重试（保留 project_id / repo_url / project_name）。"""
     store = get_job_store()
     old = await asyncio.to_thread(store.get_job, job_id)
@@ -56,6 +75,19 @@ async def retry_index_job(job_id: str):
         raise HTTPException(status_code=409, detail="job is not finished yet")
     q = get_job_queue()
     job = await asyncio.to_thread(q.enqueue, old.project_id, old.repo_url, old.project_name or "")
+    meta = request_meta(request)
+    append_audit_event(
+        event_type="job.retry",
+        actor=actor_from_user(None),
+        route=meta["route"],
+        method=meta["method"],
+        resource_type="index_job",
+        resource_id=job.job_id,
+        status="ok",
+        payload={"retry_of": old.job_id, "project_id": old.project_id},
+        ip=meta["ip"],
+        user_agent=meta["user_agent"],
+    )
     return {
         "status": "queued",
         "retry_of": old.job_id,
@@ -66,7 +98,7 @@ async def retry_index_job(job_id: str):
 
 
 @router.post("/index-jobs/{job_id}/cancel")
-async def cancel_index_job(job_id: str):
+async def cancel_index_job(job_id: str, request: Request):
     """取消排队中或正在执行的索引任务（正在执行时会终止子进程）。"""
     q = get_job_queue()
     result = await asyncio.to_thread(q.request_cancel, job_id)
@@ -74,6 +106,19 @@ async def cancel_index_job(job_id: str):
         raise HTTPException(status_code=404, detail="job not found")
     if result == "already_done":
         raise HTTPException(status_code=409, detail="job already finished")
+    meta = request_meta(request)
+    append_audit_event(
+        event_type="job.cancel",
+        actor=actor_from_user(None),
+        route=meta["route"],
+        method=meta["method"],
+        resource_type="index_job",
+        resource_id=job_id,
+        status="ok",
+        payload={"result": result},
+        ip=meta["ip"],
+        user_agent=meta["user_agent"],
+    )
     return {"ok": True, "result": result}
 
 

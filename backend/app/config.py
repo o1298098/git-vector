@@ -82,6 +82,7 @@ class Settings(BaseSettings):
     repos_cache_max_count: int = 0
     # 索引时排除的仓库相对路径 glob（见 index_exclude 模块）；多行或逗号分隔；可在管理端「设置」覆盖
     index_exclude_patterns: str = ""
+    audit_retention_days: int = 90
 
     @field_validator("index_exclude_patterns", mode="before")
     @classmethod
@@ -168,6 +169,17 @@ class Settings(BaseSettings):
         except (TypeError, ValueError):
             return 30000
         return n if n > 0 else 30000
+
+    @field_validator("audit_retention_days", mode="before")
+    @classmethod
+    def _normalize_audit_retention_days(cls, v: object) -> int:
+        if v is None or v == "":
+            return 90
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return 90
+        return n if n > 0 else 90
 
     @property
     def data_path(self) -> Path:

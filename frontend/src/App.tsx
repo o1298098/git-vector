@@ -11,6 +11,7 @@ import { Search } from "@/pages/search";
 import { Settings } from "@/pages/settings";
 import { Vectors } from "@/pages/vectors";
 import { LlmUsage } from "@/pages/llm-usage";
+import { Audit } from "@/pages/audit";
 
 function RequireAuth() {
   const { ready, uiLoginRequired, username } = useAuth();
@@ -39,6 +40,7 @@ function AppRoutes() {
           <Route path="chat" element={<CodeChat />} />
           <Route path="jobs" element={<Jobs />} />
           <Route path="usage" element={<LlmUsage />} />
+          <Route path="audit" element={<Audit />} />
           <Route path="vectors" element={<Vectors />} />
           <Route path="enqueue" element={<Enqueue />} />
           <Route path="settings" element={<Settings />} />

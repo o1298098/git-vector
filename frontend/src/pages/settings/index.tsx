@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Settings as SettingsIcon } from "lucide-react";
+import { Link } from "react-router-dom";
 import { apiJson } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -260,10 +261,15 @@ export function Settings() {
   return (
     <div className="mx-auto max-w-6xl space-y-8">
       <header className="space-y-1">
-        <h1 className="flex items-center gap-2 text-2xl font-semibold tracking-tight">
-          <SettingsIcon className="size-7 text-muted-foreground" aria-hidden />
-          {t("settings.title")}
-        </h1>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h1 className="flex items-center gap-2 text-2xl font-semibold tracking-tight">
+            <SettingsIcon className="size-7 text-muted-foreground" aria-hidden />
+            {t("settings.title")}
+          </h1>
+          <Button asChild type="button" variant="outline" size="sm">
+            <Link to="/audit">{t("settings.auditEntry")}</Link>
+          </Button>
+        </div>
         <p className="text-sm text-muted-foreground sm:text-base">{t("settings.subtitle")}</p>
       </header>
 
@@ -379,6 +385,18 @@ export function Settings() {
                         </p>
                       ) : null}
                     </div>
+                  </CardContent>
+                </Card>
+              </section>
+
+              <section id="settings-audit" className="scroll-mt-24 space-y-0">
+                <Card className="border shadow-sm">
+                  <CardHeader className="border-b bg-muted/30 py-4">
+                    <CardTitle className="text-lg">{t("settings.auditRetentionTitle")}</CardTitle>
+                    <CardDescription>{t("settings.auditRetentionDesc")}</CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-5 p-4 pt-6 sm:p-6">
+                    {row("audit_retention_days", t("settings.auditRetentionLabel"), t("settings.auditRetentionHint"), { type: "number" })}
                   </CardContent>
                 </Card>
               </section>

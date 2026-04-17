@@ -12,10 +12,12 @@ from datetime import datetime, timedelta, timezone
 from typing import Annotated, Optional
 
 import jwt
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
+from app.audit_helpers import actor_from_user, request_meta
+from app.audit_repo import append_audit_event
 from app.config import settings
 
 router = APIRouter()
@@ -109,8 +111,21 @@ def auth_ui_status():
 
 
 @router.post("/auth/login", response_model=TokenResponse)
-def auth_ui_login(body: LoginBody):
+def auth_ui_login(body: LoginBody, request: Request):
+    meta = request_meta(request)
     if not ui_login_enabled():
+        append_audit_event(
+            event_type="auth.login",
+            actor=actor_from_user(None),
+            route=meta["route"],
+            method=meta["method"],
+            resource_type="auth",
+            resource_id=body.username.strip(),
+            status="disabled",
+            payload={"username": body.username.strip()},
+            ip=meta["ip"],
+            user_agent=meta["user_agent"],
+        )
         raise HTTPException(
             status_code=503,
             detail="未启用管理后台登录（请设置环境变量 ADMIN_PASSWORD）",
@@ -118,10 +133,46 @@ def auth_ui_login(body: LoginBody):
     expected_user = (settings.admin_username or "admin").strip()
     pwd = (settings.admin_password or "").strip()
     if not secrets.compare_digest(body.username.strip(), expected_user):
+        append_audit_event(
+            event_type="auth.login",
+            actor=actor_from_user(None),
+            route=meta["route"],
+            method=meta["method"],
+            resource_type="auth",
+            resource_id=body.username.strip(),
+            status="failed",
+            payload={"username": body.username.strip()},
+            ip=meta["ip"],
+            user_agent=meta["user_agent"],
+        )
         raise HTTPException(status_code=401, detail="用户名或密码错误")
     if not secrets.compare_digest(body.password, pwd):
+        append_audit_event(
+            event_type="auth.login",
+            actor=actor_from_user(None),
+            route=meta["route"],
+            method=meta["method"],
+            resource_type="auth",
+            resource_id=body.username.strip(),
+            status="failed",
+            payload={"username": body.username.strip()},
+            ip=meta["ip"],
+            user_agent=meta["user_agent"],
+        )
         raise HTTPException(status_code=401, detail="用户名或密码错误")
     token = create_ui_token(username=expected_user)
+    append_audit_event(
+        event_type="auth.login",
+        actor=expected_user,
+        route=meta["route"],
+        method=meta["method"],
+        resource_type="auth",
+        resource_id=expected_user,
+        status="ok",
+        payload={"username": expected_user},
+        ip=meta["ip"],
+        user_agent=meta["user_agent"],
+    )
     return TokenResponse(access_token=token)
 
 

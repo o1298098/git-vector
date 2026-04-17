@@ -10,6 +10,8 @@ from typing import Any
 import httpx
 from openai import AzureOpenAI
 
+from app.audit_helpers import build_provider_audit_payload
+from app.audit_repo import append_audit_event
 from app.effective_settings import (
     effective_azure_openai_api_key,
     effective_azure_openai_deployment,
@@ -25,6 +27,47 @@ from app.effective_settings import (
 from app.llm_usage import record_llm_usage
 
 logger = logging.getLogger(__name__)
+
+
+def _append_llm_audit_event(
+    *,
+    provider: str,
+    model: str,
+    endpoint: str,
+    feature: str,
+    http_status_code: int | None,
+    ok: bool,
+    latency_ms: int,
+    project_id: str = "",
+    error_type: str = "",
+    error_message: str = "",
+    extra: dict[str, Any] | None = None,
+) -> None:
+    payload_extra: dict[str, Any] = {"feature": str(feature or "").strip(), "project_id": str(project_id or "").strip()}
+    if extra:
+        payload_extra.update(extra)
+    append_audit_event(
+        event_type="provider.llm.call",
+        actor="system",
+        route=endpoint,
+        method="POST",
+        resource_type="llm_provider",
+        resource_id=str(model or provider or ""),
+        status="ok" if ok else "error",
+        payload=build_provider_audit_payload(
+            provider=provider,
+            model=model,
+            endpoint=endpoint,
+            http_status_code=http_status_code,
+            ok=ok,
+            latency_ms=latency_ms,
+            error_type=error_type,
+            error_message=error_message,
+            extra=payload_extra,
+        ),
+        ip="",
+        user_agent="",
+    )
 
 
 class LLMClient(ABC):
@@ -96,6 +139,16 @@ class DifyChatClient(LLMClient):
                 r.raise_for_status()
                 data = r.json()
                 answer = (data.get("answer") or "").strip()
+                _append_llm_audit_event(
+                    provider="dify",
+                    model="dify-chat",
+                    endpoint="/chat-messages",
+                    feature=feature,
+                    http_status_code=r.status_code,
+                    ok=True,
+                    latency_ms=int((time.perf_counter() - started) * 1000),
+                    project_id=project_id,
+                )
                 usage = ((data.get("metadata") or {}).get("usage") or {}) if isinstance(data, dict) else {}
                 prompt_tokens = usage.get("prompt_tokens") if isinstance(usage, dict) else None
                 completion_tokens = usage.get("completion_tokens") if isinstance(usage, dict) else None
@@ -122,7 +175,19 @@ class DifyChatClient(LLMClient):
                     project_id=project_id,
                 )
                 return answer
-        except Exception:
+        except Exception as e:
+            _append_llm_audit_event(
+                provider="dify",
+                model="dify-chat",
+                endpoint="/chat-messages",
+                feature=feature,
+                http_status_code=r.status_code if "r" in locals() and r is not None else None,
+                ok=False,
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                project_id=project_id,
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
             record_llm_usage(
                 provider="dify",
                 model="dify-chat",
@@ -205,6 +270,17 @@ class DifyChatClient(LLMClient):
             completion_tokens = (usage_info or {}).get("completion_tokens") if usage_info else None
             total_tokens = (usage_info or {}).get("total_tokens") if usage_info else None
             latency_ms = int((time.perf_counter() - started) * 1000)
+            _append_llm_audit_event(
+                provider="dify",
+                model="dify-chat",
+                endpoint="/chat-messages",
+                feature=feature,
+                http_status_code=r.status_code if "r" in locals() and r is not None else None,
+                ok=True,
+                latency_ms=latency_ms,
+                project_id=project_id,
+                extra={"stream": True},
+            )
             record_llm_usage(
                 provider="dify",
                 model="dify-chat",
@@ -225,7 +301,20 @@ class DifyChatClient(LLMClient):
                 ),
                 project_id=project_id,
             )
-        except Exception:
+        except Exception as e:
+            _append_llm_audit_event(
+                provider="dify",
+                model="dify-chat",
+                endpoint="/chat-messages",
+                feature=feature,
+                http_status_code=r.status_code if "r" in locals() and r is not None else None,
+                ok=False,
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                project_id=project_id,
+                error_type=type(e).__name__,
+                error_message=str(e),
+                extra={"stream": True},
+            )
             record_llm_usage(
                 provider="dify",
                 model="dify-chat",
@@ -297,6 +386,17 @@ class OpenAICompatibleClient(LLMClient):
                 data = r.json()
                 choice = (data.get("choices") or [None])[0]
                 if not choice:
+                    latency_ms = int((time.perf_counter() - started) * 1000)
+                    _append_llm_audit_event(
+                        provider="openai_compatible",
+                        model=self.model,
+                        endpoint="/chat/completions",
+                        feature=feature,
+                        http_status_code=r.status_code,
+                        ok=True,
+                        latency_ms=latency_ms,
+                        project_id=project_id,
+                    )
                     record_llm_usage(
                         provider="openai_compatible",
                         model=self.model,
@@ -304,7 +404,7 @@ class OpenAICompatibleClient(LLMClient):
                         prompt_text=prompt_text,
                         completion_text="",
                         success=True,
-                        latency_ms=int((time.perf_counter() - started) * 1000),
+                        latency_ms=latency_ms,
                         project_id=project_id,
                     )
                     return ""
@@ -315,6 +415,16 @@ class OpenAICompatibleClient(LLMClient):
                 completion_tokens = usage.get("completion_tokens") if isinstance(usage, dict) else None
                 total_tokens = usage.get("total_tokens") if isinstance(usage, dict) else None
                 latency_ms = int((time.perf_counter() - started) * 1000)
+                _append_llm_audit_event(
+                    provider="openai_compatible",
+                    model=self.model,
+                    endpoint="/chat/completions",
+                    feature=feature,
+                    http_status_code=r.status_code,
+                    ok=True,
+                    latency_ms=latency_ms,
+                    project_id=project_id,
+                )
                 record_llm_usage(
                     provider="openai_compatible",
                     model=self.model,
@@ -336,7 +446,19 @@ class OpenAICompatibleClient(LLMClient):
                     project_id=project_id,
                 )
                 return answer
-        except Exception:
+        except Exception as e:
+            _append_llm_audit_event(
+                provider="openai_compatible",
+                model=self.model,
+                endpoint="/chat/completions",
+                feature=feature,
+                http_status_code=r.status_code if "r" in locals() and r is not None else None,
+                ok=False,
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                project_id=project_id,
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
             record_llm_usage(
                 provider="openai_compatible",
                 model=self.model,
@@ -411,6 +533,17 @@ class OpenAICompatibleClient(LLMClient):
             completion_tokens = (usage or {}).get("completion_tokens") if usage else None
             total_tokens = (usage or {}).get("total_tokens") if usage else None
             latency_ms = int((time.perf_counter() - started) * 1000)
+            _append_llm_audit_event(
+                provider="openai_compatible",
+                model=self.model,
+                endpoint="/chat/completions",
+                feature=feature,
+                http_status_code=r.status_code if "r" in locals() and r is not None else None,
+                ok=True,
+                latency_ms=latency_ms,
+                project_id=project_id,
+                extra={"stream": True},
+            )
             record_llm_usage(
                 provider="openai_compatible",
                 model=self.model,
@@ -431,7 +564,20 @@ class OpenAICompatibleClient(LLMClient):
                 ),
                 project_id=project_id,
             )
-        except Exception:
+        except Exception as e:
+            _append_llm_audit_event(
+                provider="openai_compatible",
+                model=self.model,
+                endpoint="/chat/completions",
+                feature=feature,
+                http_status_code=r.status_code if "r" in locals() and r is not None else None,
+                ok=False,
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                project_id=project_id,
+                error_type=type(e).__name__,
+                error_message=str(e),
+                extra={"stream": True},
+            )
             record_llm_usage(
                 provider="openai_compatible",
                 model=self.model,
@@ -494,6 +640,17 @@ class AzureOpenAISDKClient(LLMClient):
                 return ""
             answer = (choice.message.content or "").strip()
             u = getattr(resp, "usage", None)
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            _append_llm_audit_event(
+                provider="azure_openai",
+                model=self.deployment,
+                endpoint="azure.chat.completions",
+                feature=feature,
+                http_status_code=200,
+                ok=True,
+                latency_ms=latency_ms,
+                project_id=project_id,
+            )
             prompt_tokens = int(getattr(u, "prompt_tokens", 0)) if u is not None and getattr(u, "prompt_tokens", None) is not None else None
             completion_tokens = int(getattr(u, "completion_tokens", 0)) if u is not None and getattr(u, "completion_tokens", None) is not None else None
             total_tokens = int(getattr(u, "total_tokens", 0)) if u is not None and getattr(u, "total_tokens", None) is not None else None
@@ -507,8 +664,8 @@ class AzureOpenAISDKClient(LLMClient):
                 prompt_text=prompt_text,
                 completion_text=answer,
                 success=True,
-                latency_ms=int((time.perf_counter() - started) * 1000),
-                ttfb_ms=int((time.perf_counter() - started) * 1000),
+                latency_ms=latency_ms,
+                ttfb_ms=latency_ms,
                 estimated_cost_usd=_estimate_cost_usd(
                     self.deployment,
                     int(prompt_tokens or 0),
@@ -518,7 +675,19 @@ class AzureOpenAISDKClient(LLMClient):
                 project_id=project_id,
             )
             return answer
-        except Exception:
+        except Exception as e:
+            _append_llm_audit_event(
+                provider="azure_openai",
+                model=self.deployment,
+                endpoint="azure.chat.completions",
+                feature=feature,
+                http_status_code=None,
+                ok=False,
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                project_id=project_id,
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
             record_llm_usage(
                 provider="azure_openai",
                 model=self.deployment,
@@ -567,6 +736,18 @@ class AzureOpenAISDKClient(LLMClient):
                         first_piece_ms = int((time.perf_counter() - started) * 1000)
                     acc_answer += text
                     yield text
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            _append_llm_audit_event(
+                provider="azure_openai",
+                model=self.deployment,
+                endpoint="azure.chat.completions",
+                feature=feature,
+                http_status_code=200,
+                ok=True,
+                latency_ms=latency_ms,
+                project_id=project_id,
+                extra={"stream": True},
+            )
             record_llm_usage(
                 provider="azure_openai",
                 model=self.deployment,
@@ -574,11 +755,24 @@ class AzureOpenAISDKClient(LLMClient):
                 prompt_text=prompt_text,
                 completion_text=acc_answer,
                 success=True,
-                latency_ms=int((time.perf_counter() - started) * 1000),
+                latency_ms=latency_ms,
                 ttfb_ms=first_piece_ms,
                 project_id=project_id,
             )
-        except Exception:
+        except Exception as e:
+            _append_llm_audit_event(
+                provider="azure_openai",
+                model=self.deployment,
+                endpoint="azure.chat.completions",
+                feature=feature,
+                http_status_code=None,
+                ok=False,
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                project_id=project_id,
+                error_type=type(e).__name__,
+                error_message=str(e),
+                extra={"stream": True},
+            )
             record_llm_usage(
                 provider="azure_openai",
                 model=self.deployment,

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import logging
+import time
 
 import httpx
 
+from app.audit_helpers import build_provider_audit_payload
+from app.audit_repo import append_audit_event
 from app.config import settings
 from app.effective_settings import (
     effective_embed_model,
@@ -15,6 +18,42 @@ from app.effective_settings import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _append_embedding_audit_event(
+    *,
+    provider: str,
+    model: str,
+    endpoint: str,
+    http_status_code: int | None,
+    ok: bool,
+    latency_ms: int,
+    error_type: str = "",
+    error_message: str = "",
+    extra: dict[str, object] | None = None,
+) -> None:
+    append_audit_event(
+        event_type="provider.embedding.call",
+        actor="system",
+        route=endpoint,
+        method="POST",
+        resource_type="embedding_provider",
+        resource_id=str(model or provider or ""),
+        status="ok" if ok else "error",
+        payload=build_provider_audit_payload(
+            provider=provider,
+            model=model,
+            endpoint=endpoint,
+            http_status_code=http_status_code,
+            ok=ok,
+            latency_ms=latency_ms,
+            error_type=error_type,
+            error_message=error_message,
+            extra=extra,
+        ),
+        ip="",
+        user_agent="",
+    )
 
 
 def _embed_ollama(texts: list[str], max_chars: int) -> list[tuple[int, list[float]]]:
@@ -35,6 +74,7 @@ def _embed_ollama(texts: list[str], max_chars: int) -> list[tuple[int, list[floa
                 )
                 text = text[:max_chars]
 
+            started = time.perf_counter()
             try:
                 resp = client.post(
                     "/api/embeddings",
@@ -44,6 +84,7 @@ def _embed_ollama(texts: list[str], max_chars: int) -> list[tuple[int, list[floa
                         "prompt": text,
                     },
                 )
+                latency_ms = int((time.perf_counter() - started) * 1000)
                 resp.raise_for_status()
                 data = resp.json()
 
@@ -70,8 +111,30 @@ def _embed_ollama(texts: list[str], max_chars: int) -> list[tuple[int, list[floa
                 else:
                     for emb in emb_list:  # type: ignore[assignment]
                         embeddings.append((idx, emb))
+                _append_embedding_audit_event(
+                    provider="ollama",
+                    model=model_name,
+                    endpoint="/api/embeddings",
+                    http_status_code=resp.status_code,
+                    ok=True,
+                    latency_ms=latency_ms,
+                    extra={"request_index": idx, "response_items": len(emb_list)},
+                )
             except Exception as e:  # noqa: S110
+                latency_ms = int((time.perf_counter() - started) * 1000)
+                status_code = resp.status_code if "resp" in locals() and resp is not None else None
                 logger.error("Ollama embedding request failed for index %s: %s", idx, e)
+                _append_embedding_audit_event(
+                    provider="ollama",
+                    model=model_name,
+                    endpoint="/api/embeddings",
+                    http_status_code=status_code,
+                    ok=False,
+                    latency_ms=latency_ms,
+                    error_type=type(e).__name__,
+                    error_message=str(e),
+                    extra={"request_index": idx},
+                )
                 continue
 
     return embeddings
@@ -98,6 +161,7 @@ def _embed_openai(texts: list[str], max_chars: int) -> list[tuple[int, list[floa
                 )
                 text = text[:max_chars]
 
+            started = time.perf_counter()
             try:
                 resp = client.post(
                     "/embeddings",
@@ -107,6 +171,7 @@ def _embed_openai(texts: list[str], max_chars: int) -> list[tuple[int, list[floa
                     },
                     json={"model": model_name, "input": text},
                 )
+                latency_ms = int((time.perf_counter() - started) * 1000)
                 resp.raise_for_status()
                 data = resp.json()
                 if not isinstance(data, dict):
@@ -118,8 +183,30 @@ def _embed_openai(texts: list[str], max_chars: int) -> list[tuple[int, list[floa
                 if not emb or not isinstance(emb, list):
                     raise RuntimeError("OpenAI returned empty embedding")
                 embeddings.append((idx, emb))
+                _append_embedding_audit_event(
+                    provider="openai",
+                    model=model_name,
+                    endpoint="/embeddings",
+                    http_status_code=resp.status_code,
+                    ok=True,
+                    latency_ms=latency_ms,
+                    extra={"request_index": idx},
+                )
             except Exception as e:  # noqa: S110
+                latency_ms = int((time.perf_counter() - started) * 1000)
+                status_code = resp.status_code if "resp" in locals() and resp is not None else None
                 logger.error("OpenAI embedding request failed for index %s: %s", idx, e)
+                _append_embedding_audit_event(
+                    provider="openai",
+                    model=model_name,
+                    endpoint="/embeddings",
+                    http_status_code=status_code,
+                    ok=False,
+                    latency_ms=latency_ms,
+                    error_type=type(e).__name__,
+                    error_message=str(e),
+                    extra={"request_index": idx},
+                )
                 continue
 
     return embeddings

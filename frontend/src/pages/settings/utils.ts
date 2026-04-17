@@ -48,6 +48,7 @@ export function respToForm(response: SettingsResponse): FormState {
       return value === "en" ? "en" : "zh";
     })(),
     index_exclude_patterns: str("index_exclude_patterns"),
+    audit_retention_days: str("audit_retention_days") || "90",
     llm_provider: (() => {
       const v = str("llm_provider").toLowerCase().replace(/-/g, "_");
       if (v === "dify") return "dify";
@@ -113,6 +114,11 @@ export function buildPatch(
   }
   if (initial.index_exclude_patterns !== form.index_exclude_patterns) {
     patch.index_exclude_patterns = form.index_exclude_patterns;
+  }
+  if (initial.audit_retention_days !== form.audit_retention_days) {
+    const days = parseInt(form.audit_retention_days, 10);
+    if (!Number.isFinite(days)) throw new Error(t("settings.errAuditRetentionDays"));
+    patch.audit_retention_days = days;
   }
   return patch;
 }

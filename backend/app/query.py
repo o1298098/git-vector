@@ -7,9 +7,11 @@ from pathlib import Path
 from typing import Annotated, Any, Optional
 from urllib.parse import quote, urlparse
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
+from app.audit_helpers import actor_from_user, mask_query_payload, request_meta
+from app.audit_repo import append_audit_event
 from app.auth_ui import require_ui_session
 from app.config import settings
 
@@ -49,12 +51,31 @@ class UpdateProjectDisplayNameBody(BaseModel):
 
 
 @router.post("/query")
-def query(body: QueryBody):
+def query(body: QueryBody, request: Request):
     """语义检索：根据问题在已索引的项目功能说明中检索，供 Dify 或前端调用。"""
     from app.vector_store import get_vector_store
     store = get_vector_store()
     results = store.query(text=body.query, project_id=body.project_id, top_k=body.top_k)
-    return {"results": _enrich_search_results(results)}
+    enriched = _enrich_search_results(results)
+    meta = request_meta(request)
+    append_audit_event(
+        event_type="query.search",
+        actor=actor_from_user(None),
+        route=meta["route"],
+        method=meta["method"],
+        resource_type="search",
+        resource_id=str(body.project_id or ""),
+        status="ok",
+        payload={
+            **mask_query_payload(body.query),
+            "project_id": body.project_id,
+            "top_k": body.top_k,
+            "result_count": len(enriched),
+        },
+        ip=meta["ip"],
+        user_agent=meta["user_agent"],
+    )
+    return {"results": enriched}
 
 
 def _repo_url_for_browser(raw: str, project_id: str) -> str | None:
@@ -296,6 +317,7 @@ def list_projects(
 async def update_project_display_name(
     project_id: str,
     body: UpdateProjectDisplayNameBody,
+    request: Request,
     _user: Annotated[Optional[str], Depends(require_ui_session)],
 ):
     """
@@ -319,12 +341,26 @@ async def update_project_display_name(
     idx_ok = await asyncio.to_thread(vstore.set_project_display_name, pid, pname)
     if jobs_n == 0 and not idx_ok:
         raise HTTPException(status_code=404, detail="未找到该项目")
+    meta = request_meta(request)
+    append_audit_event(
+        event_type="project.display_name.update",
+        actor=actor_from_user(_user),
+        route=meta["route"],
+        method=meta["method"],
+        resource_type="project",
+        resource_id=pid,
+        status="ok",
+        payload={"project_name": pname or None, "jobs_updated": jobs_n, "index_updated": bool(idx_ok)},
+        ip=meta["ip"],
+        user_agent=meta["user_agent"],
+    )
     return {"ok": True, "project_id": pid, "project_name": pname or None}
 
 
 @router.delete("/projects/{project_id:path}")
 def delete_project(
     project_id: str,
+    request: Request,
     _user: Annotated[Optional[str], Depends(require_ui_session)],
 ):
     """
@@ -346,6 +382,19 @@ def delete_project(
     wiki_removed = remove_project_wiki_artifacts(r["project_id"])
     if not r["had_vectors_or_cache"] and not wiki_removed:
         raise HTTPException(status_code=404, detail="未找到该项目或未建立索引")
+    meta = request_meta(request)
+    append_audit_event(
+        event_type="project.delete",
+        actor=actor_from_user(_user),
+        route=meta["route"],
+        method=meta["method"],
+        resource_type="project",
+        resource_id=r["project_id"],
+        status="ok",
+        payload={"removed_docs": r["removed_docs"], "wiki_removed": wiki_removed},
+        ip=meta["ip"],
+        user_agent=meta["user_agent"],
+    )
     return {
         "ok": True,
         "project_id": r["project_id"],
@@ -357,6 +406,7 @@ def delete_project(
 @router.post("/projects/{project_id:path}/reindex")
 async def reindex_project(
     project_id: str,
+    request: Request,
     _user: Annotated[Optional[str], Depends(require_ui_session)],
 ):
     """
@@ -377,6 +427,19 @@ async def reindex_project(
 
     q = get_job_queue()
     job = await asyncio.to_thread(q.enqueue, latest.project_id, latest.repo_url, latest.project_name or "")
+    meta = request_meta(request)
+    append_audit_event(
+        event_type="project.reindex",
+        actor=actor_from_user(_user),
+        route=meta["route"],
+        method=meta["method"],
+        resource_type="project",
+        resource_id=latest.project_id,
+        status="ok",
+        payload={"job_id": job.job_id, "project_name": latest.project_name or None},
+        ip=meta["ip"],
+        user_agent=meta["user_agent"],
+    )
     return {
         "status": "queued",
         "job_id": job.job_id,
@@ -432,6 +495,7 @@ def update_project_vector(
 
 @router.get("/search")
 def search(
+    request: Request,
     q: str = Query(..., description="检索问题"),
     project_id: Optional[str] = Query(None),
     top_k: int = Query(10, ge=1, le=50),
@@ -440,7 +504,26 @@ def search(
     from app.vector_store import get_vector_store
     store = get_vector_store()
     results = store.query(text=q, project_id=project_id, top_k=top_k)
-    return {"results": _enrich_search_results(results)}
+    enriched = _enrich_search_results(results)
+    meta = request_meta(request)
+    append_audit_event(
+        event_type="query.search",
+        actor=actor_from_user(None),
+        route=meta["route"],
+        method=meta["method"],
+        resource_type="search",
+        resource_id=str(project_id or ""),
+        status="ok",
+        payload={
+            **mask_query_payload(q),
+            "project_id": project_id,
+            "top_k": top_k,
+            "result_count": len(enriched),
+        },
+        ip=meta["ip"],
+        user_agent=meta["user_agent"],
+    )
+    return {"results": enriched}
 
 
 @router.get("/project/index-status")

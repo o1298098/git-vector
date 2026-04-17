@@ -46,6 +46,7 @@ ALLOWED_OVERRIDE_KEYS: frozenset[str] = frozenset({
     "npm_registry",
     "content_language",
     "index_exclude_patterns",
+    "audit_retention_days",
 })
 
 SECRET_KEYS: frozenset[str] = frozenset({

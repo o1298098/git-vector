@@ -7,9 +7,11 @@ from __future__ import annotations
 import logging
 from typing import Annotated, Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
+from app.audit_helpers import actor_from_user, request_meta
+from app.audit_repo import append_audit_event
 from app.auth_ui import require_ui_session
 from app.effective_settings import env_defaults_for_api, snapshot_for_api
 from app.llm_client import reset_llm_client_cache
@@ -34,7 +36,7 @@ def _normalize_patch_item(key: str, raw: Any) -> Any:
         if isinstance(raw, str):
             return raw.strip().lower() in ("1", "true", "yes", "on")
         raise ValueError("wiki_enabled 须为布尔值")
-    if key in ("wiki_max_file_pages", "wiki_symbol_rows_per_file"):
+    if key in ("wiki_max_file_pages", "wiki_symbol_rows_per_file", "audit_retention_days"):
         try:
             n = int(raw)
         except (TypeError, ValueError) as e:
@@ -127,6 +129,7 @@ def get_admin_settings(_user: Annotated[Optional[str], Depends(require_ui_sessio
 @router.patch("/admin/settings", response_model=AdminSettingsResponse)
 def patch_admin_settings(
     body: dict[str, Any],
+    request: Request,
     _user: Annotated[Optional[str], Depends(require_ui_session)],
 ):
     if not isinstance(body, dict):
@@ -144,5 +147,17 @@ def patch_admin_settings(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     reset_llm_client_cache()
+    meta = request_meta(request)
+    append_audit_event(
+        event_type="admin.settings.patch",
+        actor=actor_from_user(_user),
+        route=meta["route"],
+        method=meta["method"],
+        resource_type="admin_settings",
+        status="ok",
+        payload={"changed_keys": sorted(normalized.keys())},
+        ip=meta["ip"],
+        user_agent=meta["user_agent"],
+    )
     logger.info("admin settings updated: %s", ", ".join(sorted(normalized.keys())) or "(no-op)")
     return AdminSettingsResponse(fields=snapshot_for_api(), env_defaults=env_defaults_for_api())

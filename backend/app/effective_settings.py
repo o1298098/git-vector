@@ -181,6 +181,15 @@ def effective_index_exclude_patterns() -> str:
     return _str_from_override("index_exclude_patterns", settings.index_exclude_patterns or "")
 
 
+def effective_audit_retention_days() -> int:
+    if "audit_retention_days" not in _overrides():
+        return int(settings.audit_retention_days)
+    try:
+        return int(_overrides()["audit_retention_days"])
+    except (TypeError, ValueError):
+        return int(settings.audit_retention_days)
+
+
 def field_source(key: str) -> str:
     """\"override\" 或 \"env\"（env 表示沿用 Settings / 环境变量）。"""
     return "override" if _has_override(key) else "env"
@@ -243,6 +252,7 @@ def snapshot_for_api() -> dict[str, Any]:
         "npm_registry": {"value": effective_npm_registry(), "source": field_source("npm_registry")},
         "content_language": {"value": effective_content_language(), "source": field_source("content_language")},
         "index_exclude_patterns": {"value": effective_index_exclude_patterns(), "source": field_source("index_exclude_patterns")},
+        "audit_retention_days": {"value": effective_audit_retention_days(), "source": field_source("audit_retention_days")},
     }
 
 
@@ -282,4 +292,5 @@ def env_defaults_for_api() -> dict[str, Any]:
         "npm_registry": s.npm_registry or "",
         "content_language": str(s.content_language or "zh"),
         "index_exclude_patterns": str(s.index_exclude_patterns or ""),
+        "audit_retention_days": int(s.audit_retention_days),
     }
