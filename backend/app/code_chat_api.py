@@ -42,27 +42,17 @@ _PRODUCT_HELP_KEYWORDS = (
     "what can you do",
     "what do you do",
     "what can this system do",
-    "features",
-    "capabilities",
 )
 _ADMIN_OPS_KEYWORDS = (
-    "审计",
-    "日志",
-    "设置",
-    "任务",
-    "索引",
-    "向量",
-    "用量",
-    "后台",
     "页面在哪",
     "怎么查看",
+    "在哪看",
+    "在哪管理",
     "where is",
     "how to view",
-    "settings",
-    "audit",
-    "jobs",
-    "vectors",
-    "usage",
+    "how to manage",
+    "open the",
+    "go to the",
 )
 _CHITCHAT_EXACT = {
     "你好",
@@ -94,6 +84,15 @@ _CODE_HINT_KEYWORDS = (
     "调用",
     "逻辑",
     "源码",
+    "功能",
+    "feature",
+    "有没有",
+    "是否有",
+    "支持",
+    "存在",
+    "项目中",
+    "仓库里",
+    "这个项目",
     "file",
     "function",
     "class",
@@ -270,12 +269,12 @@ def _detect_chat_intent_by_rules(message: str) -> ChatIntent | None:
         return "unknown"
     if text in _CHITCHAT_EXACT:
         return "chitchat"
-    if _contains_any(text, _PRODUCT_HELP_KEYWORDS):
-        return "product_help"
-    if _contains_any(text, _ADMIN_OPS_KEYWORDS):
-        return "admin_ops"
     if _contains_any(text, _CODE_HINT_KEYWORDS):
         return "code_qa"
+    if _contains_any(text, _ADMIN_OPS_KEYWORDS):
+        return "admin_ops"
+    if _contains_any(text, _PRODUCT_HELP_KEYWORDS):
+        return "product_help"
     return None
 
 
