@@ -12,6 +12,7 @@ default:
   image: docker:27.5.1
   services:
     - name: docker:27.5.1-dind
+      alias: docker
       command:
         - --tls=false
   before_script:
