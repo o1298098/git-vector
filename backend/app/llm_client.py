@@ -39,11 +39,20 @@ def _append_llm_audit_event(
     ok: bool,
     latency_ms: int,
     project_id: str = "",
+    prompt_tokens: int | None = None,
+    completion_tokens: int | None = None,
+    total_tokens: int | None = None,
     error_type: str = "",
     error_message: str = "",
     extra: dict[str, Any] | None = None,
 ) -> None:
     payload_extra: dict[str, Any] = {"feature": str(feature or "").strip(), "project_id": str(project_id or "").strip()}
+    if prompt_tokens is not None:
+        payload_extra["prompt_tokens"] = int(prompt_tokens)
+    if completion_tokens is not None:
+        payload_extra["completion_tokens"] = int(completion_tokens)
+    if total_tokens is not None:
+        payload_extra["total_tokens"] = int(total_tokens)
     if extra:
         payload_extra.update(extra)
     append_audit_event(
@@ -139,6 +148,10 @@ class DifyChatClient(LLMClient):
                 r.raise_for_status()
                 data = r.json()
                 answer = (data.get("answer") or "").strip()
+                usage = ((data.get("metadata") or {}).get("usage") or {}) if isinstance(data, dict) else {}
+                prompt_tokens = usage.get("prompt_tokens") if isinstance(usage, dict) else None
+                completion_tokens = usage.get("completion_tokens") if isinstance(usage, dict) else None
+                total_tokens = usage.get("total_tokens") if isinstance(usage, dict) else None
                 _append_llm_audit_event(
                     provider="dify",
                     model="dify-chat",
@@ -148,11 +161,10 @@ class DifyChatClient(LLMClient):
                     ok=True,
                     latency_ms=int((time.perf_counter() - started) * 1000),
                     project_id=project_id,
+                    prompt_tokens=int(prompt_tokens) if prompt_tokens is not None else None,
+                    completion_tokens=int(completion_tokens) if completion_tokens is not None else None,
+                    total_tokens=int(total_tokens) if total_tokens is not None else None,
                 )
-                usage = ((data.get("metadata") or {}).get("usage") or {}) if isinstance(data, dict) else {}
-                prompt_tokens = usage.get("prompt_tokens") if isinstance(usage, dict) else None
-                completion_tokens = usage.get("completion_tokens") if isinstance(usage, dict) else None
-                total_tokens = usage.get("total_tokens") if isinstance(usage, dict) else None
                 latency_ms = int((time.perf_counter() - started) * 1000)
                 record_llm_usage(
                     provider="dify",
@@ -279,6 +291,9 @@ class DifyChatClient(LLMClient):
                 ok=True,
                 latency_ms=latency_ms,
                 project_id=project_id,
+                prompt_tokens=int(prompt_tokens) if prompt_tokens is not None else None,
+                completion_tokens=int(completion_tokens) if completion_tokens is not None else None,
+                total_tokens=int(total_tokens) if total_tokens is not None else None,
                 extra={"stream": True},
             )
             record_llm_usage(
@@ -424,6 +439,9 @@ class OpenAICompatibleClient(LLMClient):
                     ok=True,
                     latency_ms=latency_ms,
                     project_id=project_id,
+                    prompt_tokens=int(prompt_tokens) if prompt_tokens is not None else None,
+                    completion_tokens=int(completion_tokens) if completion_tokens is not None else None,
+                    total_tokens=int(total_tokens) if total_tokens is not None else None,
                 )
                 record_llm_usage(
                     provider="openai_compatible",
@@ -542,6 +560,9 @@ class OpenAICompatibleClient(LLMClient):
                 ok=True,
                 latency_ms=latency_ms,
                 project_id=project_id,
+                prompt_tokens=int(prompt_tokens) if prompt_tokens is not None else None,
+                completion_tokens=int(completion_tokens) if completion_tokens is not None else None,
+                total_tokens=int(total_tokens) if total_tokens is not None else None,
                 extra={"stream": True},
             )
             record_llm_usage(
@@ -650,6 +671,9 @@ class AzureOpenAISDKClient(LLMClient):
                 ok=True,
                 latency_ms=latency_ms,
                 project_id=project_id,
+                prompt_tokens=int(getattr(u, "prompt_tokens", 0)) if u is not None and getattr(u, "prompt_tokens", None) is not None else None,
+                completion_tokens=int(getattr(u, "completion_tokens", 0)) if u is not None and getattr(u, "completion_tokens", None) is not None else None,
+                total_tokens=int(getattr(u, "total_tokens", 0)) if u is not None and getattr(u, "total_tokens", None) is not None else None,
             )
             prompt_tokens = int(getattr(u, "prompt_tokens", 0)) if u is not None and getattr(u, "prompt_tokens", None) is not None else None
             completion_tokens = int(getattr(u, "completion_tokens", 0)) if u is not None and getattr(u, "completion_tokens", None) is not None else None

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { StoredChatTurn as ChatTurn } from "@/lib/codeChatStorage";
 import { useI18n } from "@/i18n/I18nContext";
 
@@ -26,6 +26,9 @@ export function CodeChatQuickNav({ turns }: CodeChatQuickNavProps) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const [activeId, setActiveId] = useState("");
+  const [showTopFade, setShowTopFade] = useState(false);
+  const [showBottomFade, setShowBottomFade] = useState(false);
+  const listRef = useRef<HTMLUListElement | null>(null);
   const items = useMemo(() => toQuickNavItems(turns), [turns]);
 
   useEffect(() => {
@@ -86,6 +89,35 @@ export function CodeChatQuickNav({ turns }: CodeChatQuickNavProps) {
     };
   }, [items]);
 
+  useEffect(() => {
+    if (!open) {
+      setShowTopFade(false);
+      setShowBottomFade(false);
+      return;
+    }
+    const list = listRef.current;
+    if (!list) return;
+
+    const updateFade = () => {
+      const maxScrollTop = Math.max(0, list.scrollHeight - list.clientHeight);
+      if (maxScrollTop <= 1) {
+        setShowTopFade(false);
+        setShowBottomFade(false);
+        return;
+      }
+      setShowTopFade(list.scrollTop > 2);
+      setShowBottomFade(list.scrollTop < maxScrollTop - 2);
+    };
+
+    updateFade();
+    list.addEventListener("scroll", updateFade, { passive: true });
+    window.addEventListener("resize", updateFade);
+    return () => {
+      list.removeEventListener("scroll", updateFade);
+      window.removeEventListener("resize", updateFade);
+    };
+  }, [open, items]);
+
   const scrollToTurn = (turnId: string) => {
     const escaped = typeof CSS !== "undefined" && typeof CSS.escape === "function" ? CSS.escape(turnId) : turnId;
     const el = document.querySelector(`.gv-code-chat-turn-${escaped}`);
@@ -118,25 +150,29 @@ export function CodeChatQuickNav({ turns }: CodeChatQuickNavProps) {
         </div>
         {open ? (
           <div className="fixed right-0 top-1/2 z-50 w-72 -translate-y-1/2 rounded-xl bg-background/96 p-2 shadow-2xl backdrop-blur-md">
-            <ul className="max-h-[60vh] space-y-1 overflow-auto px-1 py-1">
-              {items.map((item) => (
-                <li key={item.id}>
-                  <button
-                    type="button"
-                    className={`w-full rounded-md px-2 py-1.5 text-left text-sm transition-colors ${
-                      item.id === activeId ? "bg-primary/12 text-foreground" : "text-muted-foreground hover:bg-muted/70 hover:text-foreground"
-                    }`}
-                    onClick={() => scrollToTurn(item.id)}
-                    title={item.label}
-                  >
-                    <span className="inline-flex w-full min-w-0 items-center gap-1">
-                      <span className="shrink-0 text-xs text-muted-foreground/80">#{item.seq}</span>
-                      <span className="min-w-0 truncate align-middle">{item.label}</span>
-                    </span>
-                  </button>
-                </li>
-              ))}
-            </ul>
+            <div className="relative">
+              {showTopFade ? <div className="pointer-events-none absolute inset-x-0 top-0 z-10 h-6 rounded-t-xl bg-gradient-to-b from-background/95 via-background/70 to-transparent" /> : null}
+              {showBottomFade ? <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 h-6 rounded-b-xl bg-gradient-to-t from-background/95 via-background/70 to-transparent" /> : null}
+              <ul ref={listRef} className="max-h-[60vh] space-y-1 overflow-y-auto overflow-x-hidden px-1 py-1 [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
+                {items.map((item) => (
+                  <li key={item.id}>
+                    <button
+                      type="button"
+                      className={`w-full rounded-md px-2 py-1.5 text-left text-sm transition-colors ${
+                        item.id === activeId ? "bg-primary/12 text-foreground" : "text-muted-foreground hover:bg-muted/70 hover:text-foreground"
+                      }`}
+                      onClick={() => scrollToTurn(item.id)}
+                      title={item.label}
+                    >
+                      <span className="inline-flex w-full min-w-0 items-center gap-1">
+                        <span className="shrink-0 text-xs text-muted-foreground/80">#{item.seq}</span>
+                        <span className="min-w-0 truncate align-middle">{item.label}</span>
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
           </div>
         ) : null}
       </div>

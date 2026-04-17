@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { apiJson } from "@/lib/api";
 import { Button } from "@/components/ui/button";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useI18n } from "@/i18n/I18nContext";
 import { cn } from "@/lib/utils";
 import { UsageBreakdownCards } from "./components/UsageBreakdownCards";
@@ -146,24 +147,28 @@ export function LlmUsage() {
           </div>
           <p className="text-muted-foreground">{t("usage.subtitle")}</p>
         </div>
-        <label className="text-sm text-muted-foreground">
-          {t("usage.range")}
-          <select
-            className="ml-2 h-9 rounded-md border border-input bg-background px-2 text-sm shadow-sm"
-            value={days}
-            onChange={(event) => {
-              const next = Number(event.target.value);
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <span>{t("usage.range")}</span>
+          <Select
+            value={String(days)}
+            onValueChange={(value) => {
+              const next = Number(value);
               setDays(DAY_OPTIONS.some((v) => v === next) ? next : 30);
             }}
             disabled={blockControls}
           >
-            {DAY_OPTIONS.map((option) => (
-              <option key={option} value={option}>
-                {option === 1 ? t("usage.today") : t("usage.days", { n: String(option) })}
-              </option>
-            ))}
-          </select>
-        </label>
+            <SelectTrigger className="h-9 w-[112px] bg-background text-sm">
+              <SelectValue placeholder={t("usage.range")} />
+            </SelectTrigger>
+            <SelectContent>
+              {DAY_OPTIONS.map((option) => (
+                <SelectItem key={option} value={String(option)}>
+                  {option === 1 ? t("usage.today") : t("usage.days", { n: String(option) })}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
       </div>
 
       {error ? <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">{t("usage.loadFail")}</div> : null}
