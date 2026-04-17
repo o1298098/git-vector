@@ -30,6 +30,7 @@ export function useCodeChat() {
   const [activeId, setActiveId] = useState<string>(() => readInitialCodeChatState().activeId);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [typingBusy, setTypingBusy] = useState(false);
   const [editingUserId, setEditingUserId] = useState<string | null>(null);
   const [projects, setProjects] = useState<CodeChatProjectOption[]>([]);
   const [projectsLoading, setProjectsLoading] = useState(true);
@@ -139,6 +140,7 @@ export function useCodeChat() {
         if (len >= target.length) {
           if (streamTypeRef.current.done && streamTypeRef.current.assistantId === assistantId) {
             clearStreamTyping();
+            setTypingBusy(false);
             setTurns((prev) =>
               prev.map((x) =>
                 x.id === assistantId ? { ...x, content: target, streaming: false } : x,
@@ -168,6 +170,7 @@ export function useCodeChat() {
         );
         if (finishNow) {
           clearStreamTyping();
+          setTypingBusy(false);
         }
       }, STREAM_TYPING_TICK_MS);
     },
@@ -195,6 +198,7 @@ export function useCodeChat() {
   const snapStreamToTarget = useCallback(
     (assistantId: string, patch: { streaming: boolean; contentOverride?: string }) => {
       clearStreamTyping();
+      setTypingBusy(false);
       const content = patch.contentOverride ?? streamTypeRef.current.target;
       streamTypeRef.current.target = content;
       streamTypeRef.current.displayLen = content.length;
@@ -226,25 +230,25 @@ export function useCodeChat() {
   );
 
   const newChat = useCallback(() => {
-    if (loading) return;
+    if (loading || typingBusy) return;
     setEditingUserId(null);
     const s = createChatSession();
     setSessions((prev) => [s, ...prev]);
     setActiveId(s.id);
-  }, [loading]);
+  }, [loading, typingBusy]);
 
   const selectSession = useCallback(
     (id: string) => {
-      if (loading || id === activeId) return;
+      if (loading || typingBusy || id === activeId) return;
       setEditingUserId(null);
       setActiveId(id);
     },
-    [loading, activeId],
+    [loading, typingBusy, activeId],
   );
 
   const deleteSession = useCallback(
     (id: string) => {
-      if (loading) return;
+      if (loading || typingBusy) return;
       setSessions((prev) => {
         const filtered = prev.filter((s) => s.id !== id);
         const next = filtered.length === 0 ? [createChatSession()] : filtered;
@@ -259,7 +263,7 @@ export function useCodeChat() {
         return next;
       });
     },
-    [loading],
+    [loading, typingBusy],
   );
 
   useEffect(() => {
@@ -287,6 +291,7 @@ export function useCodeChat() {
       const controller = new AbortController();
       streamAbortRef.current = controller;
       setLoading(true);
+      setTypingBusy(true);
       const body = JSON.stringify({
         message: trimmed,
         project_id: projectId.trim() || null,
@@ -301,6 +306,7 @@ export function useCodeChat() {
           signal: controller.signal,
         });
         if (!res.ok) {
+          setTypingBusy(false);
           let detail = res.statusText;
           try {
             const j = await res.json();
@@ -320,6 +326,7 @@ export function useCodeChat() {
         }
         const reader = res.body?.getReader();
         if (!reader) {
+          setTypingBusy(false);
           setTurns((prev) => [
             ...prev,
             {
@@ -351,6 +358,7 @@ export function useCodeChat() {
               retrieval_query?: string;
               sources?: Hit[];
               message?: string;
+              intent?: string;
             };
             try {
               data = JSON.parse(raw) as typeof data;
@@ -361,7 +369,6 @@ export function useCodeChat() {
             if (ev === "meta") {
               if (!metaReceived) {
                 metaReceived = true;
-                setLoading(false);
                 streamTypeRef.current.target = "";
                 streamTypeRef.current.displayLen = 0;
                 setTurns((prev) => [
@@ -380,7 +387,6 @@ export function useCodeChat() {
             } else if (ev === "delta" && data.text) {
               if (!metaReceived) {
                 metaReceived = true;
-                setLoading(false);
                 streamTypeRef.current.target = data.text ?? "";
                 streamTypeRef.current.displayLen = 0;
                 setTurns((prev) => [
@@ -400,9 +406,9 @@ export function useCodeChat() {
               markStreamDone(aid);
             } else if (ev === "error") {
               const errText = data.message ?? t("chat.sendFail");
-              setLoading(false);
               if (!metaReceived) {
                 metaReceived = true;
+                setTypingBusy(false);
                 resetStreamTyping();
                 setTurns((prev) => [
                   ...prev,
@@ -421,6 +427,7 @@ export function useCodeChat() {
           }
         }
         if (!metaReceived) {
+          setTypingBusy(false);
           setTurns((prev) => [
             ...prev,
             {
@@ -443,6 +450,7 @@ export function useCodeChat() {
           return;
         }
         clearStreamTyping();
+        setTypingBusy(false);
         setTurns((prev) => [
           ...prev,
           {
@@ -479,7 +487,7 @@ export function useCodeChat() {
   const doSend = useCallback(
     async (text: string) => {
       const trimmed = text.trim();
-      if (!trimmed || loading) return;
+      if (!trimmed || loading || typingBusy) return;
       setEditingUserId(null);
       const uid = randomId();
       const aid = randomId();
@@ -487,14 +495,14 @@ export function useCodeChat() {
       setTurns((prev) => [...prev, { id: uid, role: "user", content: trimmed }]);
       await streamAssistant(trimmed, aid, historyBeforeSend);
     },
-    [loading, streamAssistant, setTurns, turns],
+    [loading, typingBusy, streamAssistant, setTurns, turns],
   );
 
   const handleUserEditConfirm = useCallback(
     (userTurnId: string, nextRaw: string) => {
       const trimmed = (nextRaw || "").trim();
       setEditingUserId(null);
-      if (!trimmed || loading) return;
+      if (!trimmed || loading || typingBusy) return;
       let historyBeforeEditedMessage: ChatTurn[] = [];
       setTurns((prev) => {
         const i = prev.findIndex((x) => x.id === userTurnId);
@@ -504,12 +512,12 @@ export function useCodeChat() {
       });
       void streamAssistant(trimmed, randomId(), historyBeforeEditedMessage);
     },
-    [loading, streamAssistant, setTurns],
+    [loading, typingBusy, streamAssistant, setTurns],
   );
 
   const handleRetryAssistant = useCallback(
     (assistantTurnId: string) => {
-      if (loading) return;
+      if (loading || typingBusy) return;
       setEditingUserId(null);
       let userMsg = "";
       let historyBeforeUserMessage: ChatTurn[] = [];
@@ -525,7 +533,7 @@ export function useCodeChat() {
       if (!userMsg) return;
       void streamAssistant(userMsg, randomId(), historyBeforeUserMessage);
     },
-    [loading, streamAssistant, setTurns],
+    [loading, typingBusy, streamAssistant, setTurns],
   );
 
   const submitFeedback = useCallback(
@@ -575,7 +583,7 @@ export function useCodeChat() {
   return {
     input,
     setInput,
-    loading,
+    loading: loading || typingBusy,
     editingUserId,
     setEditingUserId,
     turns,

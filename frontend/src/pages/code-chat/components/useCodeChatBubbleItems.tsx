@@ -173,9 +173,6 @@ export function useCodeChatBubbleItems({
         ),
       };
     });
-    if (loading) {
-      items.push({ key: "__loading__", role: "ai", loading: true, content: "" });
-    }
     return items;
   }, [
     turns,
