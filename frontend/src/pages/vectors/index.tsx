@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useParams, useSearchParams } from "react-router-dom";
 import { apiJson } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { useI18n } from "@/i18n/I18nContext";
@@ -12,8 +12,9 @@ import { prettyMeta, stableJson } from "./utils";
 export function Vectors() {
   const { t } = useI18n();
   const { resolvedDark } = useTheme();
+  const { projectId: routeProjectId = "" } = useParams();
   const [searchParams, setSearchParams] = useSearchParams();
-  const initialProjectId = (searchParams.get("project_id") || "").trim();
+  const initialProjectId = (routeProjectId || searchParams.get("project_id") || "").trim();
   const initialQ = (searchParams.get("q") || "").trim();
   const [projects, setProjects] = useState<ProjectOption[]>([]);
   const [projectsLoading, setProjectsLoading] = useState(true);
@@ -44,7 +45,7 @@ export function Vectors() {
         if (cancelled) return;
         const list = data.projects ?? [];
         setProjects(list);
-        if (!projectId && list.length > 0) {
+        if (!projectId && !routeProjectId && list.length > 0) {
           const firstProjectId = list[0].project_id;
           setProjectId(firstProjectId);
           setSearchParams({ project_id: firstProjectId }, { replace: true });
@@ -58,15 +59,15 @@ export function Vectors() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [projectId, routeProjectId, setSearchParams]);
 
   useEffect(() => {
-    const queryProjectId = (searchParams.get("project_id") || "").trim();
-    if (queryProjectId && queryProjectId !== projectId) {
-      setProjectId(queryProjectId);
+    const nextProjectId = (routeProjectId || searchParams.get("project_id") || "").trim();
+    if (nextProjectId && nextProjectId !== projectId) {
+      setProjectId(nextProjectId);
       setPage(0);
     }
-  }, [searchParams, projectId]);
+  }, [routeProjectId, searchParams, projectId]);
 
   const qFromUrl = (searchParams.get("q") || "").trim();
   useEffect(() => {
@@ -235,7 +236,7 @@ export function Vectors() {
   }, [saveDisabled, projectId, selected, editContent, editMeta]);
 
   return (
-    <div className="mx-auto max-w-[1600px] space-y-4">
+    <div className="space-y-4">
       {error ? (
         <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">{error}</div>
       ) : null}
@@ -265,6 +266,7 @@ export function Vectors() {
             projectId={projectId}
             projects={projects}
             projectsLoading={projectsLoading}
+            hideProjectSelect={Boolean(routeProjectId)}
             searchInput={searchInput}
             rows={rows}
             selectedId={selectedId}

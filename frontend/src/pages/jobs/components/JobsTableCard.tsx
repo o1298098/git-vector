@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
+import { apiJson } from "@/lib/api";
 import { useI18n } from "@/i18n/I18nContext";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
-import { PAGE_SIZES, type Job } from "../types";
+import { PAGE_SIZES, type Job, type JobLogsResponse } from "../types";
 
 type JobsTableCardProps = {
   jobs: Job[];
@@ -52,6 +53,26 @@ function getJobDuration(job: Job): string {
   return formatDuration(end - start);
 }
 
+function formatLogTimestamp(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  const hh = String(date.getHours()).padStart(2, "0");
+  const mm = String(date.getMinutes()).padStart(2, "0");
+  const ss = String(date.getSeconds()).padStart(2, "0");
+  return `${y}-${m}-${d} ${hh}:${mm}:${ss}`;
+}
+
+function stripRepeatedStepPrefix(message: string, step?: string | null): string {
+  const text = String(message || "");
+  const stepText = String(step || "").trim();
+  if (!stepText) return text;
+  const prefix = `${stepText}: `;
+  return text.startsWith(prefix) ? text.slice(prefix.length) : text;
+}
+
 export function JobsTableCard({
   jobs,
   loading,
@@ -70,9 +91,19 @@ export function JobsTableCard({
 }: JobsTableCardProps) {
   const { t } = useI18n();
   const [detailJobId, setDetailJobId] = useState<string | null>(null);
+  const [detailLogs, setDetailLogs] = useState<JobLogsResponse["logs"]>([]);
+  const [detailLogsLoading, setDetailLogsLoading] = useState(false);
+  const [detailLogsError, setDetailLogsError] = useState<string | null>(null);
   const closeDetailBtnRef = useRef<HTMLButtonElement | null>(null);
   const detailDialogRef = useRef<HTMLDivElement | null>(null);
+  const detailLogViewportRef = useRef<HTMLPreElement | null>(null);
+  const lastDetailLogCountRef = useRef(0);
   const detailJob = useMemo(() => jobs.find((j) => j.job_id === detailJobId) ?? null, [jobs, detailJobId]);
+  const detailTitle = useMemo(() => {
+    if (!detailJob) return "";
+    return detailJob.project_name?.trim() || detailJob.project_id?.trim() || detailJob.job_id;
+  }, [detailJob]);
+  const detailJobRunning = detailJob?.status === "running";
   const showInitialSkeleton = loading && jobs.length === 0 && !initialFetchDone;
   const showSoftRefresh = loading && jobs.length > 0;
 
@@ -110,6 +141,67 @@ export function JobsTableCard({
     };
   }, [detailJob]);
 
+  useEffect(() => {
+    if (!detailJobId) {
+      setDetailLogs([]);
+      setDetailLogsError(null);
+      setDetailLogsLoading(false);
+      lastDetailLogCountRef.current = 0;
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadLogs = (isInitialLoad: boolean) => {
+      if (isInitialLoad) {
+        setDetailLogsLoading(true);
+      }
+      setDetailLogsError(null);
+      void apiJson<JobLogsResponse>(`/api/index-jobs/${encodeURIComponent(detailJobId)}/logs?limit=1000&offset=0`)
+        .then((response) => {
+          if (cancelled) return;
+          setDetailLogs(response.logs ?? []);
+        })
+        .catch((error: unknown) => {
+          if (cancelled) return;
+          setDetailLogs([]);
+          setDetailLogsError(error instanceof Error ? error.message : "Failed to load logs");
+        })
+        .finally(() => {
+          if (cancelled || !isInitialLoad) return;
+          setDetailLogsLoading(false);
+        });
+    };
+
+    loadLogs(true);
+    const timer =
+      detailJobRunning
+        ? window.setInterval(() => {
+            loadLogs(false);
+          }, 2000)
+        : null;
+
+    return () => {
+      cancelled = true;
+      if (timer != null) {
+        window.clearInterval(timer);
+      }
+    };
+  }, [detailJobId, detailJobRunning]);
+
+  useEffect(() => {
+    const currentCount = detailLogs.length;
+    const previousCount = lastDetailLogCountRef.current;
+    lastDetailLogCountRef.current = currentCount;
+
+    if (!detailJob || detailJob.status !== "running") return;
+    if (currentCount <= previousCount) return;
+
+    const viewport = detailLogViewportRef.current;
+    if (!viewport) return;
+    viewport.scrollTop = viewport.scrollHeight;
+  }, [detailJob, detailLogs]);
+
   return (
     <Card>
       <CardContent className="space-y-3 p-4">
@@ -123,9 +215,10 @@ export function JobsTableCard({
           >
             <Table className="!w-full min-w-[75.5rem] table-fixed text-xs">
               <colgroup>
-                <col style={{ width: "19rem" }} />
-                <col style={{ width: "20rem" }} />
-                <col style={{ width: "8.5rem" }} />
+                <col style={{ width: "13rem" }} />
+                <col style={{ width: "17rem" }} />
+                <col style={{ width: "8rem" }} />
+                <col style={{ width: "9rem" }} />
                 <col style={{ width: "5rem" }} />
                 <col style={{ width: "7.5rem" }} />
                 <col style={{ width: "6.5rem" }} />
@@ -141,6 +234,9 @@ export function JobsTableCard({
                   </TableHead>
                   <TableHead className="h-8 whitespace-nowrap px-2 py-1.5 align-bottom text-[11px]">
                     {t("jobs.colStatus")}
+                  </TableHead>
+                  <TableHead className="h-8 whitespace-nowrap px-2 py-1.5 align-bottom text-[11px]">
+                    {t("jobs.colType")}
                   </TableHead>
                   <TableHead className="h-8 whitespace-nowrap px-2 py-1.5 align-bottom text-right text-[11px]">
                     {t("jobs.colProgress")}
@@ -171,6 +267,9 @@ export function JobsTableCard({
                         <div className="h-5 w-20 animate-pulse rounded-full bg-muted" />
                       </TableCell>
                       <TableCell className="px-2 py-1.5">
+                        <div className="h-5 w-16 animate-pulse rounded-full bg-muted" />
+                      </TableCell>
+                      <TableCell className="px-2 py-1.5">
                         <div className="ml-auto h-3 w-10 animate-pulse rounded bg-muted" />
                       </TableCell>
                       <TableCell className="px-2 py-1.5">
@@ -186,7 +285,7 @@ export function JobsTableCard({
                   ))
                 ) : jobs.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={7} className="py-2 text-muted-foreground">
+                    <TableCell colSpan={8} className="py-2 text-muted-foreground">
                       {t("jobs.empty")}
                     </TableCell>
                   </TableRow>
@@ -206,7 +305,7 @@ export function JobsTableCard({
                           </div>
                         ) : null}
                       </TableCell>
-                      <TableCell className="align-top px-2 py-1.5 whitespace-nowrap [width:8.5rem]">
+                      <TableCell className="align-top px-2 py-1.5 whitespace-nowrap [width:8rem]">
                         <span
                           className={cn(
                             "inline-flex rounded-full px-2 py-1 text-[10px] font-medium",
@@ -225,6 +324,11 @@ export function JobsTableCard({
                             {t("jobs.current")}
                           </span>
                         ) : null}
+                      </TableCell>
+                      <TableCell className="align-top px-2 py-1.5 whitespace-nowrap [width:9rem]">
+                        <span className="inline-flex rounded-full bg-muted px-2 py-1 text-[10px] font-medium text-muted-foreground">
+                          {job.job_type || "index"}
+                        </span>
                       </TableCell>
                       <TableCell className="align-top px-2 py-1.5 text-right tabular-nums text-xs [width:5rem]">
                         {job.progress}%
@@ -266,23 +370,15 @@ export function JobsTableCard({
                               {retryingJobId === job.job_id ? t("jobs.retrying") : t("jobs.retry")}
                             </Button>
                           )}
-                          {job.status === "failed" ? (
-                            <Button
-                              type="button"
-                              variant="outline"
-                              size="sm"
-                              className="h-7 px-2 text-xs"
-                              onClick={() => setDetailJobId(job.job_id)}
-                            >
-                              {t("jobs.detail")}
-                            </Button>
-                          ) : null}
-                          {job.status !== "queued" &&
-                          job.status !== "running" &&
-                          job.status !== "failed" &&
-                          job.status !== "cancelled" ? (
-                            <span className="text-[11px] text-muted-foreground">—</span>
-                          ) : null}
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="h-7 px-2 text-xs"
+                            onClick={() => setDetailJobId(job.job_id)}
+                          >
+                            {t("jobs.detail")}
+                          </Button>
                         </div>
                       </TableCell>
                     </TableRow>
@@ -346,7 +442,7 @@ export function JobsTableCard({
             <div ref={detailDialogRef} className="w-full max-w-3xl rounded-lg border bg-background shadow-xl">
               <div className="flex items-center justify-between border-b px-4 py-3">
                 <h3 id="job-detail-title" className="text-sm font-semibold">
-                  {t("jobs.detail")} · {detailJob.job_id}
+                  {t("jobs.detail")} · {detailTitle}
                 </h3>
                 <Button
                   ref={closeDetailBtnRef}
@@ -363,14 +459,54 @@ export function JobsTableCard({
                   <p className="whitespace-pre-wrap break-words rounded border border-destructive/40 bg-destructive/5 p-3 text-destructive">
                     {detailJob.failure_reason}
                   </p>
-                ) : (
-                  <p className="text-muted-foreground">—</p>
-                )}
-                {detailJob.log_excerpt ? (
-                  <pre className="max-h-[50vh] overflow-auto rounded border bg-muted/30 p-3 font-mono text-xs text-muted-foreground">
+                ) : null}
+
+                <div className="grid gap-2 rounded-md border bg-muted/10 p-3 text-xs sm:grid-cols-2">
+                  <div>
+                    <div className="text-muted-foreground">{t("jobs.detailType")}</div>
+                    <div className="font-medium text-foreground">{detailJob.job_type || "index"}</div>
+                  </div>
+                  <div>
+                    <div className="text-muted-foreground">{t("jobs.detailStatus")}</div>
+                    <div className="font-medium text-foreground">{detailJob.status}</div>
+                  </div>
+                  {detailJob.result && Object.keys(detailJob.result).length > 0 ? (
+                    <div className="sm:col-span-2">
+                      <div className="text-muted-foreground">{t("jobs.detailResult")}</div>
+                      <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded border bg-background p-2 font-mono text-[11px] text-muted-foreground">
+                        {JSON.stringify(detailJob.result, null, 2)}
+                      </pre>
+                    </div>
+                  ) : null}
+                </div>
+
+                <div className="text-xs font-medium text-foreground">Execution Logs</div>
+                {detailLogsLoading ? (
+                  <p className="text-xs text-muted-foreground">Loading logs...</p>
+                ) : detailLogsError ? (
+                  <p className="whitespace-pre-wrap break-words text-xs text-destructive">{detailLogsError}</p>
+                ) : detailLogs.length > 0 ? (
+                  <pre
+                    ref={detailLogViewportRef}
+                    className="max-h-[56vh] overflow-auto whitespace-pre-wrap break-words rounded border bg-muted/20 p-3 font-mono text-xs text-muted-foreground"
+                  >
+                    {detailLogs
+                      .map((log) => {
+                        const timePart = `[${formatLogTimestamp(log.created_at)}]`;
+                        const levelPart = `[${log.level}]`;
+                        const stepPart = log.step ? `[${log.step}]` : "";
+                        const message = stripRepeatedStepPrefix(log.message, log.step);
+                        return `${timePart}${levelPart}${stepPart} ${message}`.trim();
+                      })
+                      .join("\n")}
+                  </pre>
+                ) : detailJob.log_excerpt ? (
+                  <pre className="max-h-[56vh] overflow-auto whitespace-pre-wrap break-words rounded border bg-muted/20 p-3 font-mono text-xs text-muted-foreground">
                     {detailJob.log_excerpt}
                   </pre>
-                ) : null}
+                ) : (
+                  <p className="text-xs text-muted-foreground">No logs yet.</p>
+                )}
               </div>
             </div>
           </div>

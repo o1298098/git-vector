@@ -9,6 +9,7 @@ import { useI18n } from "@/i18n/I18nContext";
 import { cn } from "@/lib/utils";
 import { PAGE_SIZES, type ProjectRow } from "../types";
 import { formatProjectCreatedAt } from "../utils";
+import { RepoProviderBadge } from "./RepoProviderBadge";
 
 type DashboardProjectsCardProps = {
   projects: ProjectRow[];
@@ -147,19 +148,22 @@ export function DashboardProjectsCard({
                     return (
                       <TableRow key={project.project_id}>
                         <TableCell className="font-mono text-sm">
-                          <Link
-                            to={`/vectors?project_id=${encodeURIComponent(project.project_id)}`}
-                            className="block truncate text-primary hover:underline"
-                            title={`${t("nav.vectors")}: ${project.project_id}`}
-                          >
-                            {project.project_id}
-                          </Link>
+                          <div className="flex min-w-0 items-center gap-2">
+                            <RepoProviderBadge provider={project.repo_provider} />
+                            <Link
+                              to={`/projects/${encodeURIComponent(project.project_id)}`}
+                              className="block min-w-0 truncate text-primary hover:underline"
+                              title={`${t("projectDetail.title")}: ${project.project_id}`}
+                            >
+                              {project.project_id}
+                            </Link>
+                          </div>
                         </TableCell>
                         <TableCell className="min-w-0 text-sm text-muted-foreground">
                           <Link
-                            to={`/vectors?project_id=${encodeURIComponent(project.project_id)}`}
+                            to={`/projects/${encodeURIComponent(project.project_id)}`}
                             className="block truncate hover:text-foreground hover:underline"
-                            title={displayName === t("dashboard.dash") ? undefined : `${t("nav.vectors")}: ${displayName}`}
+                            title={displayName === t("dashboard.dash") ? undefined : `${t("projectDetail.title")}: ${displayName}`}
                           >
                             {displayName}
                           </Link>

@@ -12,6 +12,9 @@ import { Settings } from "@/pages/settings";
 import { Vectors } from "@/pages/vectors";
 import { LlmUsage } from "@/pages/llm-usage";
 import { Audit } from "@/pages/audit";
+import { ProjectDetailLayout } from "@/pages/project-detail";
+import { ProjectImpactTab } from "@/pages/project-detail/ProjectImpactTab";
+import { ProjectIssueTab } from "@/pages/project-detail/ProjectIssueTab";
 
 function RequireAuth() {
   const { ready, uiLoginRequired, username } = useAuth();
@@ -42,6 +45,12 @@ function AppRoutes() {
           <Route path="usage" element={<LlmUsage />} />
           <Route path="audit" element={<Audit />} />
           <Route path="vectors" element={<Vectors />} />
+          <Route path="projects/:projectId" element={<ProjectDetailLayout />}>
+            <Route index element={<Navigate to="vectors" replace />} />
+            <Route path="vectors" element={<Vectors />} />
+            <Route path="issue" element={<ProjectIssueTab />} />
+            <Route path="impact" element={<ProjectImpactTab />} />
+          </Route>
           <Route path="enqueue" element={<Enqueue />} />
           <Route path="settings" element={<Settings />} />
         </Route>

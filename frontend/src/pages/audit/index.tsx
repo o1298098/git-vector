@@ -446,7 +446,7 @@ export function Audit() {
                   setPage(0);
                 }}
               >
-                <SelectTrigger id="audit-page-size" className="h-8 w-[84px]">
+                <SelectTrigger id="audit-page-size" className="h-8 w-[124px]">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>

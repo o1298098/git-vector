@@ -14,6 +14,7 @@ type VectorsListPanelProps = {
   projectId: string;
   projects: ProjectOption[];
   projectsLoading: boolean;
+  hideProjectSelect?: boolean;
   searchInput: string;
   rows: VectorRow[];
   selectedId: string;
@@ -46,6 +47,7 @@ export function VectorsListPanel({
   projectId,
   projects,
   projectsLoading,
+  hideProjectSelect = false,
   searchInput,
   rows,
   selectedId,
@@ -68,16 +70,18 @@ export function VectorsListPanel({
           <CardTitle className="text-base">{t("vectors.title")}</CardTitle>
           <CardDescription className="text-xs">{t("vectors.listDesc", { total: String(total) })}</CardDescription>
         </div>
-        <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-          <SearchableProjectSelect
-            id="vectors-project"
-            value={projectId}
-            onChange={onProjectChange}
-            projects={projects}
-            loading={projectsLoading}
-            disabled={saving}
-            compact
-          />
+        <div className={`grid gap-2 ${hideProjectSelect ? "md:grid-cols-1" : "md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]"}`}>
+          {hideProjectSelect ? null : (
+            <SearchableProjectSelect
+              id="vectors-project"
+              value={projectId}
+              onChange={onProjectChange}
+              projects={projects}
+              loading={projectsLoading}
+              disabled={saving}
+              compact
+            />
+          )}
           <Input
             id="vectors-search"
             value={searchInput}

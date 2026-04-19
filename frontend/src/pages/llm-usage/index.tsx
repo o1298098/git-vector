@@ -127,7 +127,7 @@ export function LlmUsage() {
   const blockControls = loading && data === null;
 
   return (
-    <div className="mx-auto max-w-6xl space-y-5">
+    <div className="mx-auto max-w-8xl space-y-5">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <div className="flex flex-wrap items-center gap-1.5">
@@ -157,7 +157,7 @@ export function LlmUsage() {
             }}
             disabled={blockControls}
           >
-            <SelectTrigger className="h-9 w-[112px] bg-background text-sm">
+            <SelectTrigger className="h-9 w-[124px] bg-background text-sm">
               <SelectValue placeholder={t("usage.range")} />
             </SelectTrigger>
             <SelectContent>

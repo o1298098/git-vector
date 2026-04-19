@@ -1,9 +1,31 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useI18n } from "@/i18n/I18nContext";
 import { apiFetch } from "@/lib/api";
 import { EnqueueFormCard } from "./components/EnqueueFormCard";
 import { EnqueuePageHeader } from "./components/EnqueuePageHeader";
+
+function detectRepoProvider(repoUrl: string): "gitlab" | "github" | "gitee" | "generic" {
+  const raw = repoUrl.trim().toLowerCase();
+  if (!raw) return "generic";
+  if (raw.startsWith("git@")) {
+    const host = raw.split(":", 1)[0]?.split("@", 2)[1] ?? "";
+    if (host.includes("github")) return "github";
+    if (host.includes("gitee")) return "gitee";
+    if (host.includes("gitlab")) return "gitlab";
+    return "generic";
+  }
+  try {
+    const parsed = new URL(raw);
+    const host = parsed.hostname.toLowerCase();
+    if (host.includes("github")) return "github";
+    if (host.includes("gitee")) return "gitee";
+    if (host.includes("gitlab")) return "gitlab";
+  } catch {
+    return "generic";
+  }
+  return "generic";
+}
 
 export function Enqueue() {
   const { t } = useI18n();
@@ -16,8 +38,10 @@ export function Enqueue() {
   const [precheckLoading, setPrecheckLoading] = useState(false);
   const [precheckResult, setPrecheckResult] = useState<{
     ok: boolean;
+    repo_provider?: string;
     checks: Array<{ key: string; label: string; ok: boolean; detail: string }>;
   } | null>(null);
+  const repoProvider = useMemo(() => detectRepoProvider(repoUrl), [repoUrl]);
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -75,6 +99,7 @@ export function Enqueue() {
       }
       const data = JSON.parse(text) as {
         ok: boolean;
+        repo_provider?: string;
         checks: Array<{ key: string; label: string; ok: boolean; detail: string }>;
       };
       setPrecheckResult(data);
@@ -90,6 +115,16 @@ export function Enqueue() {
   return (
     <div className="mx-auto max-w-lg space-y-6">
       <EnqueuePageHeader title={t("enqueue.title")} subtitle={t("enqueue.subtitle")} />
+      <div className="rounded-lg border bg-card px-4 py-3 text-sm text-muted-foreground shadow-sm">
+        <span className="font-medium text-foreground">仓库类型识别：</span>{" "}
+        {repoProvider === "generic"
+          ? "未识别，将使用通用逻辑"
+          : repoProvider === "gitlab"
+            ? "GitLab"
+            : repoProvider === "github"
+              ? "GitHub"
+              : "Gitee"}
+      </div>
       <EnqueueFormCard
         repoUrl={repoUrl}
         projectId={projectId}

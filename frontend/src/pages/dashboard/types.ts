@@ -4,6 +4,7 @@ export type ProjectRow = {
   project_name?: string | null;
   created_at?: string | null;
   repo_url?: string | null;
+  repo_provider?: string | null;
 };
 
 export const PAGE_SIZES = [10, 20, 50] as const;
