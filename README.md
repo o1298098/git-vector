@@ -17,6 +17,9 @@ Admin UI (`/admin/`): **Overview** with indexed projects, quick links, and **Sem
 ## What you get
 
 - **Auto indexing**: webhooks for **GitLab**, **GitHub**, and **Gitea** on `main`/`master` push (serial worker avoids concurrent write failures); other hosts can use **manual trigger** or CI calling the same enqueue API
+- **Commit impact analysis**: push webhooks can also enqueue a project-wide impact analysis job that evaluates changed files, changed modules, affected areas, cross-system impact, risks, validation focus, and suggested reviewers
+- **Issue automation**: GitLab, GitHub, and Gitea/Gitee issue events can be stored as a project issue stream, analyzed with retrieved code context, and optionally auto-replied to through the provider API
+- **Project detail workspace**: the admin UI includes repository summary, issue management, chat-like issue detail history, impact analysis history, and repository-specific automation settings
 - **Progress tracking**: returns a `job_id` on enqueue; query job status/progress anytime
 - **Semantic search**: results include `path`, `name`, `start_line`, `end_line`, etc. for quick navigation
 - **Code Q&A** (optional LLM): `POST /api/code-chat` and streaming variant (see OpenAPI at `/docs`)
@@ -77,6 +80,12 @@ generate_wiki: static wiki (MkDocs / Starlight / VitePress) under DATA_DIR/wiki_
 upsert_vector_store: embeddings (`EMBED_PROVIDER`: Ollama or OpenAI-compatible) → Chroma upsert
   ↓
 query/search: semantic retrieval (for Dify/frontend)
+
+Additional webhook-driven automation
+  ↓
+Push webhook → enqueue `impact_analysis` → project-wide commit impact analysis → persist impact run history
+  ↓
+Issue / comment webhook → store project issue stream → retrieve related code context → decide whether to auto-reply → optionally post back to Git provider
 ```
 
 ---
@@ -107,11 +116,17 @@ docker compose up -d
 
 ---
 
-## Webhooks (auto-index on push)
+## Webhooks (indexing, impact analysis, issue automation)
 
-All webhook routes only enqueue on **`main` or `master`** pushes. Successful enqueue returns `job_id` in the JSON body.
+Push webhook routes only enqueue indexing / impact-analysis jobs on **`main` or `master`**. Successful enqueue returns a `job_id` in the JSON body.
 
 If the corresponding **secret env var is unset**, signature verification is **skipped** (convenient for LAN testing; **not recommended** on the public internet).
+
+What webhooks can do now:
+
+- **Push events**: enqueue repository indexing and project-wide commit impact analysis
+- **Issue events**: store issue metadata and issue message history for the project detail page
+- **Issue/comment events**: analyze the latest user message with retrieved code context and optionally auto-post a reply through the provider API
 
 ### GitLab
 
@@ -119,8 +134,9 @@ In the project **Settings → Webhooks**:
 
 - **URL**: `http://<host>:8000/webhook/gitlab`
 - **Secret**: same as `GITLAB_WEBHOOK_SECRET` (sent/verified per your GitLab setup)
-- **Events**: **Push events**
-- Handler accepts `object_kind=push` only.
+- **Events**: enable **Push events** and **Issue events**; if your GitLab version emits issue changes as work items, enable the matching work item event as well
+- Push events can enqueue indexing and commit impact analysis
+- Issue / note events can update the project issue stream and trigger auto-reply analysis
 
 ### GitHub
 
@@ -129,15 +145,19 @@ In the repo **Settings → Webhooks → Add webhook**:
 - **Payload URL**: `http://<host>:8000/webhook/github`
 - **Content type**: `application/json`
 - **Secret**: same as `GITHUB_WEBHOOK_SECRET` (HMAC SHA-256, header `X-Hub-Signature-256`)
-- **Events**: **Just the push event** (ping events are ignored with `200`)
+- **Events**: enable **Push**, **Issues**, and **Issue comment** (ping events are ignored with `200`)
+- Push events can enqueue indexing and commit impact analysis
+- Issue creation and follow-up comments can trigger issue analysis and optional auto-replies
 
-### Gitea
+### Gitea / Gitee
 
 In the repo **Settings → Webhooks**:
 
 - **URL**: `http://<host>:8000/webhook/gitea`
 - **Secret**: same as `GITEA_WEBHOOK_SECRET` (header `X-Gitea-Signature`, HMAC-SHA256 hex of raw body)
-- **Events**: **Push**
+- **Events**: enable **Push** and issue-related events supported by your provider
+- Push events can enqueue indexing and commit impact analysis
+- Issue / comment events can update the issue stream and trigger optional auto-replies
 
 ---
 
@@ -174,6 +194,41 @@ curl -X POST "http://localhost:8000/api/index-jobs/enqueue" \
   -H "Content-Type: application/json" \
   -d '{"repo_url":"https://github.com/acme/backend.git","project_id":"acme/backend","project_name":"Display name"}'
 ```
+
+---
+
+## Commit impact analysis
+
+Commit impact analysis can be triggered by push webhooks or internal job retries. The analyzer works against the project mirror on the server, recalls vector context, and produces a project-wide assessment instead of only describing the changed files.
+
+Typical output includes:
+
+- `changed_files`
+- `changed_modules`
+- `affected_areas`
+- `cross_system_impact`
+- `risk_level` (`high` / `medium` / `low`)
+- `verification_focus`
+- LLM-generated `summary`, `impact_scope`, `risks`, `tests`, and `reviewers`
+
+The project detail page exposes this through the **Impact** tab with run history, compact summaries, searchable changed files, and expandable risk / validation sections.
+
+---
+
+## Issue automation
+
+Issue automation is provider-aware and currently supports GitLab, GitHub, and Gitea/Gitee style webhooks.
+
+What it does:
+
+- stores project-scoped issue metadata and message history
+- keeps a chat-like issue detail timeline in the admin UI
+- applies project-level auto-reply rules, reply templates, and human-review keywords
+- retrieves related code context from the vector index before generating a reply
+- can automatically post replies back to the Git provider when policy allows it
+- avoids obvious self-trigger loops and keeps issue status in sync when issues are closed
+
+The project detail page exposes this through the **Issue** tab, including issue list, issue detail conversation, rule editing, and issue job history.
 
 ---
 
@@ -230,6 +285,12 @@ Response shape:
 - **Storage insight**: `GET /api/admin/storage`
 - **LLM usage metrics**: `GET /api/admin/llm-usage`
 - **Code chat feedback**: `POST /api/code-chat/feedback`
+- **Project summary**: `GET /api/projects/{project_id}/summary`
+- **Project repo config**: `PUT /api/projects/{project_id}/repo-config`
+- **Project issue rules**: `GET/PUT /api/projects/{project_id}/issue-rules`
+- **Project issues list/detail**: `GET /api/projects/{project_id}/issues`, `GET /api/projects/{project_id}/issues/{provider}/{issue_number}`
+- **Project impact history**: `GET /api/projects/{project_id}/impact-runs`
+- **Project issue jobs**: `GET /api/projects/{project_id}/issue-jobs`
 
 ### Static Wiki (MkDocs / Starlight / VitePress)
 
@@ -244,7 +305,7 @@ Pages include overview, architecture (when an LLM is configured), file index (tr
 
 ## Index queue & job progress
 
-Indexing runs through a **serial queue** (avoids concurrent writes to Chroma / local repo dirs). Job state is persisted in SQLite so you can still query history after restarts.
+Indexing, commit impact analysis, and issue auto-reply jobs run through a **serial queue** (avoids concurrent writes to Chroma / local repo dirs and keeps local repo state predictable). Job state is persisted in SQLite so you can still query history after restarts.
 
 - **List jobs**: `GET /api/index-jobs?limit=50&offset=0` (optional `status` / `project_id` filters; response `total` is the full match count, `jobs` is the current page, `limit`/`offset` echo the request)
 - **Get one job**: `GET /api/index-jobs/{job_id}`
@@ -263,75 +324,54 @@ Key fields:
 
 ## Environment variables
 
-Most values can also be changed from the admin UI (**`/admin/` → Settings**); overrides are stored in `DATA_DIR/ui_overrides.json` and take precedence over `.env` for supported keys.
+Most supported settings can also be changed from **`/admin/` → Settings**. UI overrides are stored in `DATA_DIR/ui_overrides.json` and take precedence over `.env`.
 
-### Required for baseline indexing
+### Minimum useful config
 
 | Variable | Description |
 |------|------|
-| `DATA_DIR` | Data directory (default `./data`; commonly `/data` in containers) |
+| `DATA_DIR` | Data directory (default `./data`) |
+| `EMBED_PROVIDER` | `ollama` (default) or `openai` |
+| `EMBED_MODEL` | Embedding model name / id |
+| `OLLAMA_BASE_URL` | Required when `EMBED_PROVIDER=ollama` |
+| `OPENAI_EMBED_BASE_URL` | Required when `EMBED_PROVIDER=openai` |
+| `OPENAI_EMBED_API_KEY` | Required when `EMBED_PROVIDER=openai` |
 
-**Embeddings** — set **`EMBED_PROVIDER`** to `ollama` (default) or `openai`:
-
-| Variable | When | Description |
-|------|------|------|
-| `EMBED_PROVIDER` | Always | `ollama` (default) or `openai`. |
-| `OLLAMA_BASE_URL` | `EMBED_PROVIDER=ollama` | Ollama base URL (default `http://localhost:11434`; Docker often `http://host.docker.internal:11434`). |
-| `OLLAMA_API_KEY` | Optional | Bearer token if Ollama sits behind a gateway. |
-| `EMBED_MODEL` | Always | With **Ollama**: Ollama embeddings model name. With **OpenAI**: embeddings model id (e.g. `text-embedding-3-small`). **If you change provider/model/dimension, clear `DATA_DIR/chroma` and re-index.** |
-| `OPENAI_EMBED_BASE_URL` | `EMBED_PROVIDER=openai` | OpenAI-compatible **embeddings** API base (usually ends with `/v1`). **Independent** of `OPENAI_BASE_URL` used for chat. |
-| `OPENAI_EMBED_API_KEY` | `EMBED_PROVIDER=openai` | API key for embeddings only. **Independent** of `OPENAI_API_KEY`. |
+If you change embedding provider, model, or vector dimension, clear `DATA_DIR/chroma` and re-index.
 
 ### Common optional settings
 
 | Variable | Description |
 |------|------|
-| `GITLAB_WEBHOOK_SECRET` | GitLab webhook secret (if unset, verification skipped) |
-| `GITHUB_WEBHOOK_SECRET` | GitHub webhook secret for `X-Hub-Signature-256` (if unset, skipped) |
-| `GITEA_WEBHOOK_SECRET` | Gitea webhook secret for `X-Gitea-Signature` (if unset, skipped) |
-| `GITLAB_ACCESS_TOKEN` | HTTPS clone token (private repos); still used if `GIT_HTTPS_TOKEN` is empty |
-| `GIT_HTTPS_TOKEN` | HTTPS clone token; **overrides** `GITLAB_ACCESS_TOKEN` when set |
-| `GIT_HTTPS_USERNAME` | HTTPS basic username for clone (`oauth2` default; GitHub: `x-access-token`) |
-| `GITLAB_EXTERNAL_URL` | Optional base URL for “open repo” links when no `repo_url` is stored (GitLab-style paths) |
-| `WIKI_BACKEND` | `mkdocs` (default) / `starlight` / `vitepress` (last two need Node.js + npm; Docker image includes them). |
-| `WIKI_ENABLED` | `false` / `0` disables wiki generation after describe (default: on). |
-| `SKIP_WIKI` | `1` skips wiki for a run without changing `WIKI_ENABLED`. |
-| `EMBED_MAX_CHARS` | Max characters sent per embedding request before truncation (default `30000`). |
-| `CONTENT_LANGUAGE` | `zh` or `en`; LLM/wiki output language (default `zh`). |
-| `INDEX_EXCLUDE_PATTERNS` | Comma- or newline-separated path globs to skip during indexing. |
+| `GITLAB_WEBHOOK_SECRET` / `GITHUB_WEBHOOK_SECRET` / `GITEA_WEBHOOK_SECRET` | Webhook signature secrets |
+| `GITLAB_ACCESS_TOKEN` / `GIT_HTTPS_TOKEN` | HTTPS clone token for private repositories |
+| `GIT_HTTPS_USERNAME` | HTTPS basic username (`oauth2` default; GitHub: `x-access-token`) |
+| `CONTENT_LANGUAGE` | `zh` or `en`; controls generated content language |
+| `INDEX_EXCLUDE_PATTERNS` | Extra glob patterns to skip during indexing |
+| `WIKI_BACKEND` | `mkdocs` / `starlight` / `vitepress` |
+| `WIKI_ENABLED` | Disable wiki generation when set to `false` / `0` |
 
-### LLM provider
+### LLM config
 
-Chunk descriptions and **code Q&A** use **exactly one** backend, chosen by **`LLM_PROVIDER`**: `dify`, `azure_openai`, or **`openai`** (default). Configure **only** the variables for the selected provider.
+`LLM_PROVIDER` supports `openai` (default), `azure_openai`, or `dify`. Configure only the variables for the selected provider.
 
 | Variable | Description |
 |------|------|
-| `LLM_PROVIDER` | `dify` \| `azure_openai` \| `openai` (default `openai`). |
-| `DIFY_API_KEY` | Dify API key (when `LLM_PROVIDER=dify`). |
-| `DIFY_BASE_URL` | Dify API base URL (default `https://api.dify.ai/v1`). |
-| `AZURE_OPENAI_API_KEY` | Azure OpenAI key (when `LLM_PROVIDER=azure_openai`). |
-| `AZURE_OPENAI_ENDPOINT` | Azure endpoint (e.g. `https://xxx.cognitiveservices.azure.com`). |
-| `AZURE_OPENAI_VERSION` | Azure API version. |
-| `AZURE_OPENAI_DEPLOYMENT` | Azure deployment name. |
-| `OPENAI_API_KEY` | OpenAI (or compatible) key for **chat** (when `LLM_PROVIDER=openai`). |
-| `OPENAI_BASE_URL` | Chat/completions base URL (default `https://api.openai.com/v1`). |
-| `OPENAI_MODEL` | Chat model or deployment name. |
-
-If no LLM is configured for the selected provider, indexing and retrieval still work; chunk descriptions may be missing or placeholders, and code Q&A will not call a model.
+| `LLM_PROVIDER` | `openai` / `azure_openai` / `dify` |
+| `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL` | OpenAI-compatible chat config |
+| `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_VERSION`, `AZURE_OPENAI_DEPLOYMENT` | Azure OpenAI config |
+| `DIFY_API_KEY`, `DIFY_BASE_URL` | Dify config |
 
 ### Advanced controls
 
 | Variable | Description |
 |------|------|
-| `REPOS_CACHE_MAX_GB` | Soft cap on total size (GiB) of `DATA_DIR/repos` mirrors; evicts **other** projects’ dirs LRU-style before clone/pull; `0` disables |
-| `REPOS_CACHE_MAX_COUNT` | Max number of cached repo dirs under `DATA_DIR/repos` (including the current job); evicts **other** projects LRU-style; `0` disables |
-| `SKIP_VECTOR_STORE` | If `1`, runs clone/parse/(optional LLM) but skips Chroma upsert (useful for local validation). |
-| `INCREMENTAL_INDEX` | Set to `1` / `true` to enable incremental vector indexing (default off). Requires `project_index.sqlite3` to already have `last_indexed_commit` and vectors to use stable `gv2_` IDs; otherwise it automatically falls back to full indexing. |
-| `FORCE_FULL_INDEX` | Force a full vector reindex for a run (overrides incremental mode). |
-| `WIKI_KEEP_WORK` | `1` keeps intermediate `wiki_work/<project_id>` for debugging. |
-| `WIKI_MAX_FILE_PAGES` | Max per-path file pages (default `5000`). |
-| `WIKI_SYMBOL_ROWS_PER_FILE` | Max symbol table rows per Markdown file (default `4000`). |
-| `NPM_REGISTRY` | Optional. When using `starlight` / `vitepress`, sets `npm_config_registry` for npm if non-empty. Or set **`npm_config_registry`** / **`NPM_CONFIG_REGISTRY`** in the environment (the uppercase form is mapped to `npm_config_registry` for subprocesses). |
+| `REPOS_CACHE_MAX_GB` / `REPOS_CACHE_MAX_COUNT` | Repo mirror cache limits |
+| `SKIP_VECTOR_STORE` | Skip Chroma upsert for a run |
+| `INCREMENTAL_INDEX` / `FORCE_FULL_INDEX` | Control incremental vs full indexing |
+| `WIKI_KEEP_WORK` | Keep wiki build work directory |
+| `WIKI_MAX_FILE_PAGES` / `WIKI_SYMBOL_ROWS_PER_FILE` | Wiki build limits |
+| `NPM_REGISTRY` | Optional npm registry override for wiki builds |
 
 ---
 
@@ -343,11 +383,15 @@ By default under `DATA_DIR`:
 - **Vector store**: `DATA_DIR/chroma/`
 - **Jobs DB**: `DATA_DIR/index_jobs.sqlite3`
 - **Project vector index metadata**: `DATA_DIR/project_index.sqlite3` (`doc_count`, display name, plus incremental fields `last_indexed_commit` / `last_embed_model`)
+- **Impact analysis history**: `DATA_DIR/impact_analysis.sqlite3`
+- **Issue automation state**: `DATA_DIR/project_issues.sqlite3`, `DATA_DIR/issue_reply_job_payloads.sqlite3`, and related UI override / audit files
 - **Static wiki**: `DATA_DIR/wiki_sites/<project_id>/site/` plus `manifest.json` (intermediate `wiki_work/` removed unless `WIKI_KEEP_WORK=1`)
 
 ---
 
 ## Development (local)
+
+### Backend
 
 ```bash
 python3 -m venv .venv
@@ -357,17 +401,19 @@ cp .env.example .env
 cd backend && uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-Admin UI local dev (optional, second terminal; set `CORS_ORIGINS=http://localhost:5173`):
+### Frontend
 
 ```bash
 cd frontend && npm install && npm run dev
 ```
 
-Notes:
+Set `CORS_ORIGINS=http://localhost:5173` when running the frontend separately.
 
-- When started from `backend/`, the default `DATA_DIR=./data` resolves to `backend/data/`; set `DATA_DIR=../data` in `.env` if you want data at the repository root.
-- On startup the service attempts to start the indexing queue worker; vector store/embedding objects are typically loaded on first index or first query.
-- If you see `No function-level chunks parsed ...; using file-level fallback`, parsing produced zero function chunks and the service fell back to file-level chunks (retrieval still works, but granularity is coarser).
+### Notes
+
+- If you start from `backend/`, default `DATA_DIR=./data` resolves to `backend/data/`.
+- The queue worker starts automatically with the API service.
+- If function parsing returns zero hits, the indexer falls back to file-level chunks.
 
 ---
 
