@@ -417,16 +417,6 @@ Set `CORS_ORIGINS=http://localhost:5173` when running the frontend separately.
 
 ---
 
-## README maintenance rule
-
-When adding or changing any public API, queue behavior, environment variable, or admin page:
-
-- Update **both** `README.md` and `README.zh-CN.md` in the same PR.
-- Keep the same section order and endpoint coverage in both files.
-- Ensure at least one runnable curl example still works after the change.
-
----
-
 ## License
 
 [MIT](LICENSE)

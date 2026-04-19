@@ -417,16 +417,6 @@ cd frontend && npm install && npm run dev
 
 ---
 
-## README 维护规则
-
-当你新增或修改任何公开 API、队列行为、环境变量或管理页面时：
-
-- 在同一个 PR 中同时更新 `README.md` 与 `README.zh-CN.md`。
-- 保持两个文件的章节顺序和接口覆盖范围一致。
-- 至少确保一个可运行的 curl 示例在变更后仍然有效。
-
----
-
 ## 许可证
 
 [MIT](LICENSE)
