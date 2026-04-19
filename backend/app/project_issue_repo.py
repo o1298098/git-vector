@@ -382,6 +382,66 @@ def upsert_project_issue(*, payload: dict[str, Any]) -> dict[str, Any]:
     return _row_to_issue(row)
 
 
+def update_issue_labels(
+    *,
+    project_id: str,
+    provider: str,
+    issue_number: str,
+    labels: list[str],
+    status: str = "",
+) -> bool:
+    pid = str(project_id or "").strip()
+    prov = str(provider or "generic").strip().lower() or "generic"
+    num = str(issue_number or "").strip()
+    if not pid or not num:
+        return False
+    normalized_labels: list[str] = []
+    seen: set[str] = set()
+    for item in labels:
+        text = str(item or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        normalized_labels.append(text)
+    requested_status = str(status or "").strip()
+    normalized_status = _normalize_status("updated", requested_status) if requested_status else ""
+    now = _utc_now_iso()
+    with _lock:
+        conn = _conn()
+        try:
+            _init(conn)
+            existing = conn.execute(
+                "SELECT status FROM project_issues WHERE project_id=? AND provider=? AND issue_number=?",
+                (pid, prov, num),
+            ).fetchone()
+            if not existing:
+                return False
+            existing_status = str(existing["status"] or "").strip()
+            next_status = normalized_status or existing_status
+            if next_status:
+                cur = conn.execute(
+                    """
+                    UPDATE project_issues
+                    SET labels_json=?, status=?, updated_at=?
+                    WHERE project_id=? AND provider=? AND issue_number=?
+                    """,
+                    (json.dumps(normalized_labels, ensure_ascii=False), next_status, now, pid, prov, num),
+                )
+            else:
+                cur = conn.execute(
+                    """
+                    UPDATE project_issues
+                    SET labels_json=?, updated_at=?
+                    WHERE project_id=? AND provider=? AND issue_number=?
+                    """,
+                    (json.dumps(normalized_labels, ensure_ascii=False), now, pid, prov, num),
+                )
+            conn.commit()
+            return int(cur.rowcount or 0) > 0
+        finally:
+            conn.close()
+
+
 def append_issue_message(
     *,
     project_id: str,

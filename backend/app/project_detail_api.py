@@ -11,9 +11,10 @@ from app.audit_repo import append_audit_event
 from app.auth_ui import require_ui_session
 from app.effective_settings import detect_git_provider
 from app.impact_repo import get_impact_analysis_run, list_impact_analysis_runs
+from app.issue_poster import list_issue_label_options, set_issue_labels
 from app.issue_rules_repo import get_issue_reply_rules, save_issue_reply_rules
 from app.job_queue import get_job_queue, get_job_store
-from app.project_issue_repo import get_project_issue, list_project_issues
+from app.project_issue_repo import get_project_issue, list_project_issues, update_issue_labels
 from app.query import _repo_url_for_browser
 from app.vector_project_index_repo import get_project_index_meta, set_project_repo_overrides
 
@@ -31,6 +32,10 @@ class IssueRulesBody(BaseModel):
 class ProjectRepoOverridesBody(BaseModel):
     repo_provider_override: str = Field(default="", max_length=64)
     repo_web_base_url: str = Field(default="", max_length=2000)
+
+
+class IssueLabelsBody(BaseModel):
+    labels: list[str] = Field(default_factory=list)
 
 
 @router.get("/projects/{project_id:path}/summary")
@@ -265,6 +270,96 @@ async def get_project_issue_api(
         }
         if latest_job
         else None,
+    }
+
+
+@router.get("/projects/{project_id:path}/issues/{provider}/{issue_number}/labels/options")
+async def get_project_issue_label_options_api(
+    project_id: str,
+    provider: str,
+    issue_number: str,
+    _user: Annotated[Optional[str], Depends(require_ui_session)] = None,
+):
+    issue = await asyncio.to_thread(get_project_issue, project_id, provider, issue_number)
+    if not issue:
+        raise HTTPException(status_code=404, detail="issue not found")
+    options = await asyncio.to_thread(
+        list_issue_label_options,
+        provider=provider,
+        project_id=project_id,
+        repo_url=str(issue.get("repo_url") or ""),
+    )
+    labels = sorted({*list(issue.get("labels") or []), *options})
+    return {
+        "project_id": str(project_id or "").strip(),
+        "provider": str(provider or "").strip().lower(),
+        "issue_number": str(issue_number or "").strip(),
+        "current_labels": list(issue.get("labels") or []),
+        "available_labels": labels,
+        "supports_update": str(provider or "").strip().lower() in {"github", "gitlab"},
+    }
+
+
+@router.put("/projects/{project_id:path}/issues/{provider}/{issue_number}/labels")
+async def update_project_issue_labels_api(
+    project_id: str,
+    provider: str,
+    issue_number: str,
+    body: IssueLabelsBody,
+    request: Request,
+    _user: Annotated[Optional[str], Depends(require_ui_session)],
+):
+    issue = await asyncio.to_thread(get_project_issue, project_id, provider, issue_number)
+    if not issue:
+        raise HTTPException(status_code=404, detail="issue not found")
+    result = await asyncio.to_thread(
+        set_issue_labels,
+        provider=provider,
+        project_id=project_id,
+        repo_url=str(issue.get("repo_url") or ""),
+        issue_number=issue_number,
+        labels=body.labels,
+    )
+    if not result.updated:
+        detail = result.error or "failed to update issue labels"
+        if "unsupported provider" in detail:
+            raise HTTPException(status_code=400, detail=detail)
+        if "not configured" in detail:
+            raise HTTPException(status_code=503, detail=detail)
+        raise HTTPException(status_code=502, detail=detail)
+    saved = await asyncio.to_thread(
+        update_issue_labels,
+        project_id=project_id,
+        provider=provider,
+        issue_number=issue_number,
+        labels=result.labels,
+        status=result.issue_state or str(issue.get("status") or ""),
+    )
+    updated_issue = await asyncio.to_thread(get_project_issue, project_id, provider, issue_number)
+    meta = request_meta(request)
+    append_audit_event(
+        event_type="issue.labels.update",
+        actor=actor_from_user(_user),
+        route=meta["route"],
+        method=meta["method"],
+        resource_type="issue",
+        resource_id=f"{str(project_id or '').strip()}:{str(provider or '').strip().lower()}:{str(issue_number or '').strip()}",
+        status="ok" if saved else "partial",
+        payload={
+            "labels": result.labels,
+            "provider": str(provider or "").strip().lower(),
+            "issue_number": str(issue_number or "").strip(),
+        },
+        ip=meta["ip"],
+        user_agent=meta["user_agent"],
+    )
+    return {
+        "project_id": str(project_id or "").strip(),
+        "provider": str(provider or "").strip().lower(),
+        "issue_number": str(issue_number or "").strip(),
+        "labels": result.labels,
+        "issue": updated_issue,
+        "saved_locally": bool(saved),
     }
 
 

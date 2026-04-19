@@ -1,13 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
-import { MessageSquareMore, RefreshCw } from "lucide-react";
+import { MessageSquareMore, RefreshCw, Tags } from "lucide-react";
 import { apiJson } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { useI18n } from "@/i18n/I18nContext";
-import type { IssueRules, ProjectIssueDetail, ProjectIssueItem, ProjectIssueMessage, ProjectIssuesResponse } from "./types";
+import type {
+  IssueLabelOptionsResponse,
+  IssueRules,
+  ProjectIssueDetail,
+  ProjectIssueItem,
+  ProjectIssueMessage,
+  ProjectIssuesResponse,
+  UpdateIssueLabelsResponse,
+} from "./types";
 
 function formatKeywords(value: string[]): string {
   return value.join(", ");
@@ -20,23 +28,23 @@ function parseKeywords(value: string): string[] {
     .filter(Boolean);
 }
 
-function getIssueStateLabel(issue: ProjectIssueItem | ProjectIssueDetail | null): string {
+function getIssueStateLabel(issue: ProjectIssueItem | ProjectIssueDetail | null, t: (key: string, vars?: Record<string, string | number>) => string): string {
   if (!issue) return "—";
-  if (issue.status === "closed") return "已关闭";
-  if (issue.status === "open") return "进行中";
+  if (issue.status === "closed") return t("projectIssue.stateClosed");
+  if (issue.status === "open") return t("projectIssue.stateOpen");
   return issue.status || "—";
 }
 
-function getReplyStatusLabel(issue: ProjectIssueItem | ProjectIssueDetail | null, t: (key: string) => string): string {
+function getReplyStatusLabel(issue: ProjectIssueItem | ProjectIssueDetail | null, t: (key: string, vars?: Record<string, string | number>) => string): string {
   if (!issue) return "—";
-  if (issue.latest_reply_status === "posted") return "已发布";
-  if (issue.latest_reply_status === "post_failed") return "发布失败";
+  if (issue.latest_reply_status === "posted") return t("projectIssue.replyPosted");
+  if (issue.latest_reply_status === "post_failed") return t("projectIssue.replyPostFailed");
   if (issue.latest_reply_status === "blocked") return t("projectIssue.blocked");
   if (issue.latest_reply_status === "needs_human") return t("projectIssue.needsHuman");
   if (issue.latest_reply_status === "generated") return t("projectIssue.generated");
   if (issue.latest_reply_status === "queued") return t("projectIssue.queued");
-  if (issue.latest_reply_status === "skipped") return "无需回复";
-  return "未触发";
+  if (issue.latest_reply_status === "skipped") return t("projectIssue.replySkipped");
+  return t("projectIssue.replyNotTriggered");
 }
 
 function formatBubbleTime(value?: string): string {
@@ -71,6 +79,18 @@ function isAfterTime(left?: string, right?: string): boolean {
   return leftTime > rightTime;
 }
 
+function normalizeLabels(labels: string[]): string[] {
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const item of labels) {
+    const text = item.trim();
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    normalized.push(text);
+  }
+  return normalized;
+}
+
 export function ProjectIssueTab() {
   const { t } = useI18n();
   const { projectId = "" } = useParams();
@@ -83,6 +103,11 @@ export function ProjectIssueTab() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [selectedIssue, setSelectedIssue] = useState<ProjectIssueDetail | null>(null);
+  const [labelOptions, setLabelOptions] = useState<string[]>([]);
+  const [labelEditorOpen, setLabelEditorOpen] = useState(false);
+  const [draftLabels, setDraftLabels] = useState<string[]>([]);
+  const [labelInput, setLabelInput] = useState("");
+  const [labelSaving, setLabelSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const selectedIssueRef = useRef<ProjectIssueDetail | null>(null);
   const initializedRulesRef = useRef(false);
@@ -96,12 +121,25 @@ export function ProjectIssueTab() {
     async (issue: ProjectIssueItem | null) => {
       if (!projectId || !issue) {
         setSelectedIssue(null);
+        setLabelOptions([]);
+        setDraftLabels([]);
+        setLabelEditorOpen(false);
         return;
       }
-      const detail = await apiJson<ProjectIssueDetail>(
-        `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issue.provider)}/${encodeURIComponent(issue.issue_number)}`,
-      );
+      const [detail, options] = await Promise.all([
+        apiJson<ProjectIssueDetail>(
+          `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issue.provider)}/${encodeURIComponent(issue.issue_number)}`,
+        ),
+        apiJson<IssueLabelOptionsResponse>(
+          `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issue.provider)}/${encodeURIComponent(issue.issue_number)}/labels/options`,
+        ).catch(() => null),
+      ]);
       setSelectedIssue(detail);
+      const normalizedCurrentLabels = normalizeLabels(detail.labels ?? []);
+      setDraftLabels(normalizedCurrentLabels);
+      setLabelOptions(normalizeLabels([...(options?.available_labels ?? []), ...normalizedCurrentLabels]));
+      setLabelEditorOpen(false);
+      setLabelInput("");
     },
     [projectId],
   );
@@ -282,6 +320,56 @@ export function ProjectIssueTab() {
     }
   }
 
+  function toggleDraftLabel(label: string) {
+    setDraftLabels((prev) => {
+      const exists = prev.includes(label);
+      return exists ? prev.filter((item) => item !== label) : normalizeLabels([...prev, label]);
+    });
+  }
+
+  function addCustomLabel() {
+    const normalized = labelInput.trim();
+    if (!normalized) return;
+    setDraftLabels((prev) => normalizeLabels([...prev, normalized]));
+    setLabelOptions((prev) => normalizeLabels([...prev, normalized]));
+    setLabelInput("");
+  }
+
+  async function onSaveLabels() {
+    if (!projectId || !selectedIssue) return;
+    setLabelSaving(true);
+    setError(null);
+    try {
+      const response = await apiJson<UpdateIssueLabelsResponse>(
+        `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(selectedIssue.provider)}/${encodeURIComponent(selectedIssue.issue_number)}/labels`,
+        {
+          method: "PUT",
+          body: JSON.stringify({ labels: normalizeLabels(draftLabels) }),
+        },
+      );
+      const updatedIssue = response.issue;
+      if (updatedIssue) {
+        setSelectedIssue(updatedIssue);
+      } else {
+        setSelectedIssue((prev) => (prev ? { ...prev, labels: response.labels } : prev));
+      }
+      setIssues((prev) =>
+        prev.map((item) =>
+          item.provider === response.provider && item.issue_number === response.issue_number
+            ? { ...item, labels: response.labels, updated_at: updatedIssue?.updated_at ?? item.updated_at }
+            : item,
+        ),
+      );
+      setDraftLabels(response.labels);
+      setLabelOptions((prev) => normalizeLabels([...prev, ...response.labels]));
+      setLabelEditorOpen(false);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "保存标签失败");
+    } finally {
+      setLabelSaving(false);
+    }
+  }
+
   useEffect(() => {
     if (!initializedRulesRef.current || !projectId || !rules) return;
     const timer = window.setTimeout(() => {
@@ -372,7 +460,7 @@ export function ProjectIssueTab() {
                     <div className="mt-2 text-[11px] text-muted-foreground">{t("projectIssue.author")}: {issue.author || "—"}</div>
                     {issue.latest_reply_error ? <div className="mt-1 line-clamp-2 text-[11px] text-destructive">{issue.latest_reply_error}</div> : null}
                   </div>
-                  <div className="shrink-0 rounded-full border px-2 py-0.5 text-[11px] text-muted-foreground">{getIssueStateLabel(issue)}</div>
+                  <div className="shrink-0 rounded-full border px-2 py-0.5 text-[11px] text-muted-foreground">{getIssueStateLabel(issue, t)}</div>
                 </div>
               </button>
             ))
@@ -382,38 +470,130 @@ export function ProjectIssueTab() {
 
       <Card className="flex h-[calc(100vh-96px)] min-w-0 min-h-0 flex-col shadow-sm">
         <CardHeader className="space-y-3 px-5">
-          <div>
-            <CardTitle className="text-base">{t("projectIssue.detailTitle")}</CardTitle>
-            <CardDescription>
-              {selectedIssue ? `#${selectedIssue.issue_number} · ${selectedIssue.title || "—"}` : t("projectIssue.detailEmpty")}
-            </CardDescription>
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <CardTitle className="text-base">{t("projectIssue.detailTitle")}</CardTitle>
+              <CardDescription>
+                {selectedIssue ? `#${selectedIssue.issue_number} · ${selectedIssue.title || "—"}` : t("projectIssue.detailEmpty")}
+              </CardDescription>
+            </div>
+            {selectedIssue ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                onClick={() => {
+                  setDraftLabels(normalizeLabels(selectedIssue.labels ?? []));
+                  setLabelEditorOpen((prev) => !prev);
+                  setLabelInput("");
+                }}
+                        disabled={labelSaving}
+                        aria-label={labelEditorOpen ? t("projectIssue.editLabelsCancelAria") : t("projectIssue.editLabelsAria")}
+                        title={labelEditorOpen ? t("projectIssue.editLabelsCancelAria") : t("projectIssue.editLabelsAria")}
+                      >
+                <Tags className="size-4" aria-hidden />
+              </Button>
+            ) : null}
           </div>
           {selectedIssue ? (
-            <div className="flex flex-wrap gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <span className="rounded-full border px-2.5 py-1 text-xs text-muted-foreground">
                 {t("projectIssue.author")}: {selectedIssue.messages?.find((message) => message.role !== "assistant")?.author || selectedIssue.author || "—"}
               </span>
-              <span className="rounded-full border px-2.5 py-1 text-xs text-muted-foreground">Issue 状态: {getIssueStateLabel(selectedIssue)}</span>
-              <span className="rounded-full border px-2.5 py-1 text-xs text-muted-foreground">自动发布: {String(selectedIssue.latest_reply_job?.result?.should_auto_post ?? false)}</span>
-              <span className="rounded-full border px-2.5 py-1 text-xs text-muted-foreground">人工介入: {String(selectedIssue.latest_reply_job?.result?.needs_human ?? false)}</span>
+              <span className="rounded-full border px-2.5 py-1 text-xs text-muted-foreground">{t("projectIssue.metaIssueStatus")}: {getIssueStateLabel(selectedIssue, t)}</span>
+              <span className="rounded-full border px-2.5 py-1 text-xs text-muted-foreground">{t("projectIssue.metaAutoPost")}: {String(selectedIssue.latest_reply_job?.result?.should_auto_post ?? false)}</span>
+              <span className="rounded-full border px-2.5 py-1 text-xs text-muted-foreground">{t("projectIssue.metaNeedsHuman")}: {String(selectedIssue.latest_reply_job?.result?.needs_human ?? false)}</span>
               {selectedIssue.latest_reply_status === "skipped" && selectedIssue.latest_reply_job?.result?.skip_reason ? (
                 <span className="rounded-full border px-2.5 py-1 text-xs text-muted-foreground">
-                  跳过原因: {String(selectedIssue.latest_reply_job.result.skip_reason)}
+                  {t("projectIssue.metaSkipReason")}: {String(selectedIssue.latest_reply_job.result.skip_reason)}
                 </span>
               ) : null}
+              {selectedIssue.labels.map((label) => (
+                <span key={label} className="rounded-full border bg-muted/30 px-2 py-1 text-xs text-muted-foreground">
+                  {label}
+                </span>
+              ))}
             </div>
           ) : null}
         </CardHeader>
         <CardContent className="min-h-0 flex flex-1 flex-col space-y-4 overflow-hidden px-5 pb-5 text-sm">
           {selectedIssue ? (
             <div className="flex min-h-0 flex-1 flex-col space-y-4">
-              {selectedIssue.labels.length > 0 ? (
-                <div className="flex flex-wrap gap-2">
-                  {selectedIssue.labels.map((label) => (
-                    <span key={label} className="rounded-full border bg-muted/30 px-2 py-1 text-xs text-muted-foreground">
-                      {label}
-                    </span>
-                  ))}
+              {labelEditorOpen ? (
+                <div className="space-y-3 rounded-lg border bg-background p-3">
+                  <div className="text-xs text-muted-foreground">{t("projectIssue.labelEditorHint")}</div>
+                  <div className="flex flex-wrap gap-2">
+                    {labelOptions.length > 0 ? (
+                      labelOptions.map((label) => {
+                        const active = draftLabels.includes(label);
+                        return (
+                          <button
+                            key={label}
+                            type="button"
+                            onClick={() => toggleDraftLabel(label)}
+                            className={`rounded-full border px-2.5 py-1 text-xs transition-colors ${active ? "border-primary bg-primary/10 text-primary" : "bg-muted/20 text-muted-foreground hover:bg-muted/40"}`}
+                          >
+                            {label}
+                          </button>
+                        );
+                      })
+                    ) : (
+                      <div className="text-xs text-muted-foreground">{t("projectIssue.labelOptionsEmpty")}</div>
+                    )}
+                  </div>
+                  <div className="flex gap-2">
+                    <Input
+                      value={labelInput}
+                      onChange={(e) => setLabelInput(e.target.value)}
+                      placeholder={t("projectIssue.labelInputPlaceholder")}
+                      disabled={labelSaving}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          addCustomLabel();
+                        }
+                      }}
+                    />
+                    <Button type="button" variant="secondary" onClick={addCustomLabel} disabled={labelSaving || !labelInput.trim()}>
+                      {t("projectIssue.labelAdd")}
+                    </Button>
+                  </div>
+                  <div className="space-y-2">
+                    <div className="text-xs text-muted-foreground">{t("projectIssue.labelDraftTitle")}</div>
+                    <div className="flex flex-wrap gap-2">
+                      {draftLabels.length > 0 ? (
+                        draftLabels.map((label) => (
+                          <button
+                            key={label}
+                            type="button"
+                            onClick={() => toggleDraftLabel(label)}
+                            className="rounded-full border border-primary/30 bg-primary/10 px-2.5 py-1 text-xs text-primary"
+                          >
+                            {label}
+                          </button>
+                        ))
+                      ) : (
+                        <div className="text-xs text-muted-foreground">{t("projectIssue.labelDraftEmpty")}</div>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex justify-end gap-2">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      onClick={() => {
+                        setDraftLabels(normalizeLabels(selectedIssue.labels ?? []));
+                        setLabelEditorOpen(false);
+                        setLabelInput("");
+                      }}
+                      disabled={labelSaving}
+                    >
+                      {t("projectIssue.labelCancel")}
+                    </Button>
+                    <Button type="button" onClick={() => void onSaveLabels()} disabled={labelSaving}>
+                      {labelSaving ? t("projectIssue.labelSaving") : t("projectIssue.labelSave")}
+                    </Button>
+                  </div>
                 </div>
               ) : null}
 
@@ -426,9 +606,9 @@ export function ProjectIssueTab() {
               <div className="flex min-h-0 flex-1 flex-col rounded-2xl border bg-muted/10 p-4">
                 <div className="mb-4 flex items-center justify-between gap-3">
                   <div>
-                    <div className="text-sm font-medium">对话记录</div>
+                    <div className="text-sm font-medium">{t("projectIssue.timelineTitle")}</div>
                   </div>
-                  <div className="text-xs text-muted-foreground">{timelineMessages.length} 条消息</div>
+                  <div className="text-xs text-muted-foreground">{t("projectIssue.timelineCount", { count: timelineMessages.length })}</div>
                 </div>
 
                 <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
@@ -463,7 +643,7 @@ export function ProjectIssueTab() {
                       );
                     })
                   ) : (
-                    <div className="rounded-xl border border-dashed px-4 py-6 text-center text-muted-foreground">暂无可展示的对话内容</div>
+                    <div className="rounded-xl border border-dashed px-4 py-6 text-center text-muted-foreground">{t("projectIssue.timelineEmpty")}</div>
                   )}
                 </div>
               </div>

@@ -89,6 +89,28 @@ export type ProjectIssuesResponse = {
   issues: ProjectIssueItem[];
 };
 
+export type IssueLabelOptionsResponse = {
+  project_id: string;
+  provider: string;
+  issue_number: string;
+  current_labels: string[];
+  available_labels: string[];
+  supports_update: boolean;
+};
+
+export type UpdateIssueLabelsRequest = {
+  labels: string[];
+};
+
+export type UpdateIssueLabelsResponse = {
+  project_id: string;
+  provider: string;
+  issue_number: string;
+  labels: string[];
+  issue: ProjectIssueDetail | null;
+  saved_locally: boolean;
+};
+
 export type IssueJobsResponse = {
   total: number;
   limit: number;
