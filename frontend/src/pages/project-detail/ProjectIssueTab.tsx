@@ -82,7 +82,6 @@ export function ProjectIssueTab() {
   const [issues, setIssues] = useState<ProjectIssueItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [retryingJobId, setRetryingJobId] = useState<string | null>(null);
   const [selectedIssue, setSelectedIssue] = useState<ProjectIssueDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const selectedIssueRef = useRef<ProjectIssueDetail | null>(null);
@@ -290,19 +289,6 @@ export function ProjectIssueTab() {
     }, 700);
     return () => window.clearTimeout(timer);
   }, [projectId, rules, blockedInput, humanInput, templateInput, requirementsInput]);
-
-  async function onRetry(jobId: string) {
-    setRetryingJobId(jobId);
-    setError(null);
-    try {
-      await apiJson(`/api/index-jobs/${encodeURIComponent(jobId)}/retry`, { method: "POST" });
-      await load();
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : t("projectIssue.retryFail"));
-    } finally {
-      setRetryingJobId(null);
-    }
-  }
 
   return (
     <div className="grid min-w-0 gap-4 xl:grid-cols-[360px_minmax(0,380px)_minmax(0,1fr)]">

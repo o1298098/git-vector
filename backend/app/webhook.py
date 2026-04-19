@@ -309,6 +309,7 @@ def _github_issue_payload(data: dict[str, Any]) -> dict[str, Any] | None:
     issue_number = str(issue.get("number") or "").strip()
     if not project_id or not issue_number:
         return None
+    issue_title = str(issue.get("title") or "").strip()
     comment_body = str(comment.get("body") or "").strip()
     issue_body = str(issue.get("body") or "")
     action = str(data.get("action") or issue.get("state") or "opened").strip().lower() or "opened"
@@ -317,6 +318,18 @@ def _github_issue_payload(data: dict[str, Any]) -> dict[str, Any] | None:
     comment_author = str((comment.get("user") or {}).get("login") or sender.get("login") or issue_author).strip()
     issue_created_at = str(issue.get("created_at") or "").strip()
     event_created_at = str(comment.get("created_at") or comment.get("updated_at") or issue_created_at).strip() if is_comment_event else issue_created_at
+    if not comment_body and not is_comment_event:
+        comment_body = str(issue_body or issue_title).strip()
+    logger.info(
+        "github issue payload parsed issue=%s action=%s event_kind=%s status=%s has_comment=%s has_issue_body=%s project_id=%s",
+        issue_number,
+        action,
+        "comment" if is_comment_event else "issue",
+        str(issue.get("state") or "").strip().lower(),
+        bool(comment_body),
+        bool(str(issue_body or issue_title).strip()),
+        project_id,
+    )
     return {
         "provider": "github",
         "project_id": project_id,
@@ -325,7 +338,7 @@ def _github_issue_payload(data: dict[str, Any]) -> dict[str, Any] | None:
         "issue_number": issue_number,
         "issue_url": str(issue.get("html_url") or "").strip(),
         "title": str(issue.get("title") or "").strip(),
-        "body": comment_body or issue_body,
+        "body": comment_body or issue_body or issue_title,
         "issue_body": issue_body,
         "comment_body": comment_body,
         "event_kind": "comment" if is_comment_event else "issue",
