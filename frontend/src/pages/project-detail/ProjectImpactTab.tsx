@@ -7,6 +7,18 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { useI18n } from "@/i18n/I18nContext";
 import type { ImpactRun, ImpactRunsResponse } from "./types";
 
+type ImpactFileFact = {
+  path: string;
+  status: string;
+  previous_path?: string;
+  added: number;
+  deleted: number;
+  changes: number;
+  matched_categories: string[];
+  facts: string[];
+  risk_score: number;
+};
+
 function shortSha(value: string | null | undefined) {
   const text = String(value || "").trim();
   if (!text) return "—";
@@ -80,6 +92,43 @@ function TagList({ items }: { items: string[] }) {
   );
 }
 
+function asFileFacts(value: unknown): ImpactFileFact[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const row = item as Record<string, unknown>;
+      const path = String(row.path ?? "").trim();
+      if (!path) return null;
+      return {
+        path,
+        status: String(row.status ?? "M").trim() || "M",
+        previous_path: String(row.previous_path ?? "").trim(),
+        added: Number(row.added ?? 0) || 0,
+        deleted: Number(row.deleted ?? 0) || 0,
+        changes: Number(row.changes ?? 0) || 0,
+        matched_categories: asList(row.matched_categories),
+        facts: asList(row.facts),
+        risk_score: Number(row.risk_score ?? 0) || 0,
+      } satisfies ImpactFileFact;
+    })
+    .filter((item): item is ImpactFileFact => item !== null);
+}
+
+function fileStatusTone(status: string) {
+  const normalized = String(status || "").trim().toUpperCase();
+  if (normalized.startsWith("A")) return "border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900/60 dark:bg-emerald-950/20 dark:text-emerald-300";
+  if (normalized.startsWith("D")) return "border-red-200 bg-red-50 text-red-700 dark:border-red-900/60 dark:bg-red-950/20 dark:text-red-300";
+  if (normalized.startsWith("R")) return "border-sky-200 bg-sky-50 text-sky-700 dark:border-sky-900/60 dark:bg-sky-950/20 dark:text-sky-300";
+  return "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-900/60 dark:bg-amber-950/20 dark:text-amber-300";
+}
+
+function fileRiskTone(score: number) {
+  if (score >= 6) return "text-red-600 dark:text-red-300";
+  if (score >= 3) return "text-amber-600 dark:text-amber-300";
+  return "text-emerald-600 dark:text-emerald-300";
+}
+
 function summarizeTopDirectories(paths: string[], limit = 6) {
   const counts = new Map<string, number>();
   for (const raw of paths) {
@@ -97,6 +146,7 @@ function summarizeTopDirectories(paths: string[], limit = 6) {
 }
 
 const DEFAULT_VISIBLE_FILES = 20;
+const DEFAULT_VISIBLE_FILE_FACTS = 6;
 const DEFAULT_VISIBLE_RISKS = 5;
 const DEFAULT_VISIBLE_VALIDATION_ITEMS = 3;
 
@@ -108,6 +158,9 @@ export function ProjectImpactTab() {
   const [loading, setLoading] = useState(true);
   const [retryingJobId, setRetryingJobId] = useState<string | null>(null);
   const [showAllFiles, setShowAllFiles] = useState(false);
+  const [showAllFileFacts, setShowAllFileFacts] = useState(false);
+  const [showAllChangeFacts, setShowAllChangeFacts] = useState(false);
+  const [showAllDirectImpacts, setShowAllDirectImpacts] = useState(false);
   const [showAllRisks, setShowAllRisks] = useState(false);
   const [showAllCrossSystemImpact, setShowAllCrossSystemImpact] = useState(false);
   const [showAllVerificationFocus, setShowAllVerificationFocus] = useState(false);
@@ -134,6 +187,28 @@ export function ProjectImpactTab() {
   const topDirectories = useMemo(() => summarizeTopDirectories(filteredChangedFiles.length ? filteredChangedFiles : changedFiles), [changedFiles, filteredChangedFiles]);
   const changedModules = useMemo(() => asList(selectedRun?.summary?.changed_modules), [selectedRun]);
   const affectedAreas = useMemo(() => asList(selectedRun?.summary?.affected_areas), [selectedRun]);
+  const fileFacts = useMemo(
+    () => asFileFacts((selectedRun?.summary?.diff_analysis as Record<string, unknown> | undefined)?.file_facts),
+    [selectedRun],
+  );
+  const visibleFileFacts = useMemo(
+    () => (showAllFileFacts ? fileFacts : fileFacts.slice(0, DEFAULT_VISIBLE_FILE_FACTS)),
+    [fileFacts, showAllFileFacts],
+  );
+  const hiddenFileFactsCount = Math.max(0, fileFacts.length - visibleFileFacts.length);
+  const changeFacts = useMemo(() => asList(selectedRun?.summary?.change_facts), [selectedRun]);
+  const visibleChangeFacts = useMemo(
+    () => (showAllChangeFacts ? changeFacts : changeFacts.slice(0, DEFAULT_VISIBLE_VALIDATION_ITEMS)),
+    [changeFacts, showAllChangeFacts],
+  );
+  const hiddenChangeFactsCount = Math.max(0, changeFacts.length - visibleChangeFacts.length);
+  const directImpacts = useMemo(() => asList(selectedRun?.summary?.direct_impacts), [selectedRun]);
+  const visibleDirectImpacts = useMemo(
+    () => (showAllDirectImpacts ? directImpacts : directImpacts.slice(0, DEFAULT_VISIBLE_RISKS)),
+    [directImpacts, showAllDirectImpacts],
+  );
+  const hiddenDirectImpactsCount = Math.max(0, directImpacts.length - visibleDirectImpacts.length);
+  const diffRiskReasons = useMemo(() => asList(selectedRun?.summary?.risk_reasons), [selectedRun]);
   const crossSystemImpact = useMemo(() => asList(selectedRun?.summary?.cross_system_impact), [selectedRun]);
   const visibleCrossSystemImpact = useMemo(
     () => (showAllCrossSystemImpact ? crossSystemImpact : crossSystemImpact.slice(0, DEFAULT_VISIBLE_VALIDATION_ITEMS)),
@@ -153,7 +228,10 @@ export function ProjectImpactTab() {
   }, [selectedRun]);
   const impactScope = useMemo(() => asList(llmSummary?.impact_scope), [llmSummary]);
   const risks = useMemo(() => asList(llmSummary?.risks), [llmSummary]);
-  const riskItems = useMemo(() => [...impactScope, ...risks], [impactScope, risks]);
+  const riskItems = useMemo(() => {
+    const preferred = diffRiskReasons.length ? diffRiskReasons : [...impactScope, ...risks];
+    return preferred;
+  }, [diffRiskReasons, impactScope, risks]);
   const visibleRiskItems = useMemo(() => (showAllRisks ? riskItems : riskItems.slice(0, DEFAULT_VISIBLE_RISKS)), [riskItems, showAllRisks]);
   const hiddenRiskCount = Math.max(0, riskItems.length - visibleRiskItems.length);
   const tests = useMemo(() => asList(llmSummary?.tests), [llmSummary]);
@@ -185,6 +263,9 @@ export function ProjectImpactTab() {
 
   useEffect(() => {
     setShowAllFiles(false);
+    setShowAllFileFacts(false);
+    setShowAllChangeFacts(false);
+    setShowAllDirectImpacts(false);
     setShowAllRisks(false);
     setShowAllCrossSystemImpact(false);
     setShowAllVerificationFocus(false);
@@ -386,9 +467,99 @@ export function ProjectImpactTab() {
                       <div className="text-sm font-semibold text-foreground">{t("projectImpact.affectedAreas")}</div>
                       <TagList items={affectedAreas} />
                     </section>
+
+                    <section className="space-y-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="text-sm font-semibold text-foreground">{t("projectImpact.fileFactsTitle")}</div>
+                        <div className="text-xs text-muted-foreground">
+                          {t("projectImpact.validationItemsCount", { count: String(fileFacts.length) })}
+                        </div>
+                      </div>
+                      {fileFacts.length ? (
+                        <div className="space-y-3">
+                          {visibleFileFacts.map((item) => (
+                            <div key={`${item.path}-${item.status}`} className="rounded-xl border bg-muted/10 p-3">
+                              <div className="flex flex-wrap items-start justify-between gap-3">
+                                <div className="min-w-0 space-y-1">
+                                  <div className="break-all font-mono text-xs text-foreground">{item.path}</div>
+                                  {item.previous_path ? <div className="text-[11px] text-muted-foreground">from {item.previous_path}</div> : null}
+                                </div>
+                                <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                                  <span className={`rounded-full border px-2 py-0.5 font-medium ${fileStatusTone(item.status)}`}>{item.status}</span>
+                                  <span className="text-muted-foreground">+{item.added}/-{item.deleted}</span>
+                                  <span className={`font-semibold ${fileRiskTone(item.risk_score)}`}>risk {item.risk_score}</span>
+                                </div>
+                              </div>
+                              <div className="mt-3 space-y-3">
+                                <TagList items={item.matched_categories} />
+                                <SectionList items={item.facts} />
+                              </div>
+                            </div>
+                          ))}
+                          {fileFacts.length > DEFAULT_VISIBLE_FILE_FACTS ? (
+                            <div className="flex items-center justify-between gap-3 rounded-lg border border-dashed px-3 py-2 text-xs text-muted-foreground">
+                              <span>
+                                {showAllFileFacts
+                                  ? t("projectImpact.showingAllValidationItems")
+                                  : t("projectImpact.hiddenValidationItemsCount", { count: String(hiddenFileFactsCount) })}
+                              </span>
+                              <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => setShowAllFileFacts((prev) => !prev)}>
+                                {showAllFileFacts ? t("projectImpact.collapseValidationItems") : t("projectImpact.showAllValidationItems")}
+                              </Button>
+                            </div>
+                          ) : null}
+                        </div>
+                      ) : (
+                        <div className="rounded-lg border border-dashed px-3 py-4 text-sm text-muted-foreground">—</div>
+                      )}
+                    </section>
+
+                    <section className="space-y-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="text-sm font-semibold text-foreground">{t("projectImpact.changeFacts")}</div>
+                        <div className="text-xs text-muted-foreground">
+                          {t("projectImpact.validationItemsCount", { count: String(changeFacts.length) })}
+                        </div>
+                      </div>
+                      <SectionList items={visibleChangeFacts} />
+                      {changeFacts.length > DEFAULT_VISIBLE_VALIDATION_ITEMS ? (
+                        <div className="flex items-center justify-between gap-3 rounded-lg border border-dashed px-3 py-2 text-xs text-muted-foreground">
+                          <span>
+                            {showAllChangeFacts
+                              ? t("projectImpact.showingAllValidationItems")
+                              : t("projectImpact.hiddenValidationItemsCount", { count: String(hiddenChangeFactsCount) })}
+                          </span>
+                          <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => setShowAllChangeFacts((prev) => !prev)}>
+                            {showAllChangeFacts ? t("projectImpact.collapseValidationItems") : t("projectImpact.showAllValidationItems")}
+                          </Button>
+                        </div>
+                      ) : null}
+                    </section>
                   </div>
 
                   <div className="space-y-5">
+                    <section className="space-y-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="text-sm font-semibold text-foreground">{t("projectImpact.directImpacts")}</div>
+                        <div className="text-xs text-muted-foreground">
+                          {t("projectImpact.risksCount", { count: String(directImpacts.length) })}
+                        </div>
+                      </div>
+                      <SectionList items={visibleDirectImpacts} />
+                      {directImpacts.length > DEFAULT_VISIBLE_RISKS ? (
+                        <div className="flex items-center justify-between gap-3 rounded-lg border border-dashed px-3 py-2 text-xs text-muted-foreground">
+                          <span>
+                            {showAllDirectImpacts
+                              ? t("projectImpact.showingAllRisks")
+                              : t("projectImpact.hiddenRisksCount", { count: String(hiddenDirectImpactsCount) })}
+                          </span>
+                          <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => setShowAllDirectImpacts((prev) => !prev)}>
+                            {showAllDirectImpacts ? t("projectImpact.collapseRisks") : t("projectImpact.showAllRisks")}
+                          </Button>
+                        </div>
+                      ) : null}
+                    </section>
+
                     <section className="space-y-3">
                       <div className="flex items-center justify-between gap-3">
                         <div className="flex items-center gap-2 text-sm font-semibold text-foreground">

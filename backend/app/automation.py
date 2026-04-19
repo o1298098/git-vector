@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -22,33 +23,39 @@ from app.vector_store import _extract_llm_description_from_document, get_vector_
 logger = logging.getLogger(__name__)
 
 
-RISK_KEYWORDS: dict[str, tuple[str, ...]] = {
-    "high": (
-        "auth",
-        "permission",
-        "security",
-        "payment",
-        "billing",
-        "migration",
-        "database",
-        "schema",
-        "login",
-        "token",
-        "webhook",
-        "queue",
-    ),
-    "medium": (
-        "api",
-        "service",
-        "store",
-        "worker",
-        "index",
-        "query",
-        "settings",
-        "route",
-        "controller",
-    ),
-}
+DIFF_HIGH_RISK_KEYWORDS: tuple[str, ...] = (
+    "auth",
+    "permission",
+    "security",
+    "payment",
+    "billing",
+    "migration",
+    "database",
+    "schema",
+    "login",
+    "token",
+    "secret",
+    "credential",
+)
+
+DIFF_MEDIUM_RISK_KEYWORDS: tuple[str, ...] = (
+    "api",
+    "service",
+    "store",
+    "worker",
+    "index",
+    "query",
+    "settings",
+    "route",
+    "controller",
+    "webhook",
+    "queue",
+    "job",
+    "retry",
+    "timeout",
+    "cache",
+    "state",
+)
 
 AUTO_REPLY_BLOCKLIST = (
     "security",
@@ -89,12 +96,52 @@ def _git_commit_subject(repo_path: Path, commit_sha: str) -> str:
     return _run_git(repo_path, "log", "-1", "--pretty=%s", commit_sha)
 
 
-def _infer_risk(paths: list[str]) -> str:
-    joined = "\n".join(paths).lower()
-    for level in ("high", "medium"):
-        if any(keyword in joined for keyword in RISK_KEYWORDS[level]):
-            return level
-    return "low"
+def _git_name_status(repo_path: Path, base_commit: str, head_commit: str) -> list[dict[str, str]]:
+    if not base_commit or not head_commit:
+        return []
+    out = _run_git(repo_path, "diff", "--name-status", f"{base_commit}..{head_commit}")
+    rows: list[dict[str, str]] = []
+    for line in out.splitlines():
+        parts = [part.strip() for part in line.split("\t") if part.strip()]
+        if len(parts) < 2:
+            continue
+        status = parts[0].upper()
+        path = normalize_index_path(parts[-1])
+        previous_path = normalize_index_path(parts[1]) if status.startswith("R") and len(parts) >= 3 else ""
+        rows.append({"status": status, "path": path, "previous_path": previous_path})
+    return rows
+
+
+def _git_numstat(repo_path: Path, base_commit: str, head_commit: str) -> list[dict[str, Any]]:
+    if not base_commit or not head_commit:
+        return []
+    out = _run_git(repo_path, "diff", "--numstat", f"{base_commit}..{head_commit}")
+    rows: list[dict[str, Any]] = []
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        added_raw, deleted_raw, path_raw = parts[0].strip(), parts[1].strip(), parts[2].strip()
+        added = int(added_raw) if added_raw.isdigit() else 0
+        deleted = int(deleted_raw) if deleted_raw.isdigit() else 0
+        rows.append(
+            {
+                "path": normalize_index_path(path_raw),
+                "added": added,
+                "deleted": deleted,
+                "changes": added + deleted,
+            }
+        )
+    return rows
+
+
+def _git_file_patch(repo_path: Path, base_commit: str, head_commit: str, path: str) -> str:
+    if not base_commit or not head_commit or not path.strip():
+        return ""
+    try:
+        return _run_git(repo_path, "diff", "--unified=0", f"{base_commit}..{head_commit}", "--", path)
+    except Exception:
+        return ""
 
 
 def _normalize_risk_level(value: Any, fallback: str = "low") -> str:
@@ -210,6 +257,184 @@ def _infer_cross_system_impact(changed_files: list[str], changed_modules: list[s
     return impacts[:4]
 
 
+DIFF_FACT_PATTERNS: tuple[tuple[str, str, str, int], ...] = (
+    (r"^[+-].*\b(enqueue|job_type|retry|worker|queue)\b", "job_orchestration", "涉及任务入队、执行或重试相关逻辑变更", 2),
+    (r"^[+-].*\b(webhook|issue_comment|issue event|push event|signature|payload)\b", "webhook_contract", "涉及 webhook 或事件载荷解析逻辑变更", 2),
+    (r"^[+-].*\b(status|state|should_trigger|should_auto_post|if\s+not|elif|else:)\b", "state_transition", "涉及状态判断、触发条件或控制流变更", 2),
+    (r"^[+-].*\b(return\s+\{|response|json|Field\(|model_dump|model_validate)\b", "api_contract", "涉及接口字段、返回结构或数据模型变更", 2),
+    (r"^[+-].*\b(insert|update|delete|sqlite|database|schema|sql)\b", "data_persistence", "涉及数据库写入、查询或持久化逻辑变更", 3),
+    (r"^[+-].*\b(fetch|apiJson|AbortController|setInterval|clearInterval|localStorage|useEffect)\b", "frontend_async", "涉及前端异步请求、轮询或本地状态管理变更", 2),
+    (r"^[+-].*\b(content lang|locale|language|i18n|translate|fallback)\b", "localization", "涉及语言映射、国际化或回退逻辑变更", 1),
+    (r"^[+-].*\b(auth|permission|token|secret|credential|password)\b", "security_sensitive", "涉及认证、凭据或敏感权限逻辑变更", 3),
+)
+
+
+RISK_REASON_TEMPLATES: dict[str, str] = {
+    "job_orchestration": "本次改动触及任务入队、执行或重试链路，若参数或状态传递不一致，可能导致任务漏触发、重复执行或失败恢复异常。",
+    "webhook_contract": "本次改动触及 webhook / 事件载荷解析逻辑，若不同 provider 的 payload 字段兼容性不足，可能出现事件漏消费、字段缺失或自动化链路未触发。",
+    "state_transition": "本次改动调整了状态判断或触发条件，若分支覆盖不完整，可能导致行为误判、重复触发或应触发流程被跳过。",
+    "api_contract": "本次改动涉及接口字段或返回结构，若调用方未同步兼容，前后端之间可能出现字段缺失、空态异常或展示错误。",
+    "data_persistence": "本次改动触及持久化逻辑，若写入字段、查询条件或兼容处理不完整，可能导致历史数据读取异常、状态不一致或结果丢失。",
+    "frontend_async": "本次改动涉及前端异步请求、轮询或本地状态管理，若并发与清理处理不完整，可能出现旧请求覆盖新结果、重复轮询或页面闪动。",
+    "localization": "本次改动涉及语言映射或回退逻辑，可能导致默认语言不符合预期、局部文案语言混用或结果展示不一致。",
+    "security_sensitive": "本次改动涉及认证、凭据或敏感权限逻辑，若校验或回退路径处理不严谨，可能扩大访问范围或暴露敏感行为风险。",
+}
+
+
+VALIDATION_TEMPLATES: dict[str, str] = {
+    "job_orchestration": "验证相关任务是否按预期入队、执行、结束，并检查失败后的重试或取消行为是否正常。",
+    "webhook_contract": "分别回放主要 provider 的对应 webhook 事件，确认关键字段提取、自动化触发与审计记录都符合预期。",
+    "state_transition": "覆盖 opened / updated / closed / retry 等关键状态分支，确认边界条件下不会误触发或漏触发。",
+    "api_contract": "联调前后端或上下游调用方，确认新增/变更字段在旧数据、空值和异常响应下都能正确处理。",
+    "data_persistence": "验证新增写入、更新与读取场景，确认历史数据兼容、幂等更新和失败回滚符合预期。",
+    "frontend_async": "通过快速切换筛选、打开关闭弹窗或反复刷新页面，确认请求取消、定时器清理和页面状态一致性正常。",
+    "localization": "分别在中英文或不同内容语言配置下验证展示结果，确认默认回退与局部文本语言一致。",
+    "security_sensitive": "验证未授权、边界权限和敏感输入场景，确认校验生效且不会因回退逻辑放宽约束。",
+}
+
+
+def _extract_diff_facts(repo_dir: Path, base_commit: str, commit_sha: str, changed_files: list[str]) -> dict[str, Any]:
+    name_status = _git_name_status(repo_dir, base_commit, commit_sha)
+    numstat_rows = _git_numstat(repo_dir, base_commit, commit_sha)
+    numstat_by_path = {str(row.get("path") or ""): row for row in numstat_rows}
+    status_by_path = {str(row.get("path") or ""): row for row in name_status}
+    file_facts: list[dict[str, Any]] = []
+    category_scores: dict[str, int] = {}
+    category_examples: dict[str, list[str]] = {}
+
+    for path in changed_files[:12]:
+        patch = _git_file_patch(repo_dir, base_commit, commit_sha, path)
+        lowered_patch = patch.lower()
+        matched_categories: list[str] = []
+        fact_lines: list[str] = []
+        score = 0
+        for pattern, category, description, weight in DIFF_FACT_PATTERNS:
+            if not patch:
+                continue
+            if re.search(pattern, lowered_patch, flags=re.MULTILINE):
+                matched_categories.append(category)
+                fact_lines.append(description)
+                score += weight
+                category_scores[category] = category_scores.get(category, 0) + weight
+                category_examples.setdefault(category, []).append(path)
+        if any(keyword in path.lower() for keyword in DIFF_HIGH_RISK_KEYWORDS):
+            matched_categories.append("security_sensitive")
+            fact_lines.append("文件路径命中敏感能力域，需要重点复核安全与权限相关副作用")
+            score += 2
+            category_scores["security_sensitive"] = category_scores.get("security_sensitive", 0) + 2
+            category_examples.setdefault("security_sensitive", []).append(path)
+        elif any(keyword in path.lower() for keyword in DIFF_MEDIUM_RISK_KEYWORDS):
+            score += 1
+
+        stat = numstat_by_path.get(path, {})
+        status_row = status_by_path.get(path, {})
+        total_changes = int(stat.get("changes") or 0)
+        if total_changes >= 80:
+            fact_lines.append("单文件改动行数较大，回归验证范围可能扩大")
+            score += 2
+        elif total_changes >= 30:
+            fact_lines.append("单文件存在中等规模改动，建议关注边界分支与兼容性")
+            score += 1
+
+        if patch and re.search(r"^[+-].*\b(function|def |const |type |class |interface )\b", patch, flags=re.MULTILINE):
+            fact_lines.append("包含函数、类型或类定义调整，可能改变调用方契约或内部行为")
+            score += 1
+        if patch and re.search(r"^[+-].*\btry:|^[+-].*\bexcept\b|^[+-].*\bcatch\b", patch, flags=re.MULTILINE):
+            fact_lines.append("包含异常处理分支调整，需确认失败路径与回退行为")
+            score += 1
+
+        file_facts.append(
+            {
+                "path": path,
+                "status": str(status_row.get("status") or "M"),
+                "previous_path": str(status_row.get("previous_path") or ""),
+                "added": int(stat.get("added") or 0),
+                "deleted": int(stat.get("deleted") or 0),
+                "changes": total_changes,
+                "matched_categories": sorted(set(matched_categories)),
+                "facts": fact_lines[:5],
+                "risk_score": score,
+            }
+        )
+
+    top_categories = [
+        {"category": category, "score": score, "examples": sorted(set(category_examples.get(category, [])))[:3]}
+        for category, score in sorted(category_scores.items(), key=lambda item: item[1], reverse=True)
+    ]
+    return {"file_facts": file_facts, "top_categories": top_categories}
+
+
+def _build_change_facts(diff_analysis: dict[str, Any]) -> list[str]:
+    facts: list[str] = []
+    for row in diff_analysis.get("file_facts") or []:
+        path = str(row.get("path") or "")
+        status = str(row.get("status") or "M")
+        added = int(row.get("added") or 0)
+        deleted = int(row.get("deleted") or 0)
+        matched = row.get("matched_categories") or []
+        detail = "、".join(str(item) for item in matched[:3])
+        text = f"{path} 出现 {status} 变更（+{added}/-{deleted}）"
+        if detail:
+            text += f"，主要涉及 {detail}"
+        facts.append(text)
+        if len(facts) >= 6:
+            break
+    return facts
+
+
+def _build_diff_based_risks(diff_analysis: dict[str, Any], cross_system_impact: list[str]) -> tuple[str, list[str], list[str], list[str]]:
+    categories = diff_analysis.get("top_categories") or []
+    risk_reasons: list[str] = []
+    validation_checks: list[str] = []
+    direct_impacts: list[str] = []
+    score = 0
+
+    for row in categories[:4]:
+        category = str(row.get("category") or "").strip()
+        examples = row.get("examples") or []
+        if not category:
+            continue
+        template = RISK_REASON_TEMPLATES.get(category)
+        if template:
+            if examples:
+                risk_reasons.append(f"{template} 重点涉及：{', '.join(str(x) for x in examples[:2])}。")
+            else:
+                risk_reasons.append(template)
+        validation = VALIDATION_TEMPLATES.get(category)
+        if validation:
+            validation_checks.append(validation)
+        if category == "webhook_contract":
+            direct_impacts.append("提交影响分析或 issue 自动化是否触发，将依赖新的事件字段解析与 payload 兼容性。")
+        elif category == "job_orchestration":
+            direct_impacts.append("后台任务的入队、执行顺序或失败恢复行为可能随本次变更而改变。")
+        elif category == "api_contract":
+            direct_impacts.append("前后端或上下游之间的数据契约可能发生变化，需要联动确认字段兼容。")
+        elif category == "frontend_async":
+            direct_impacts.append("前端页面的加载、轮询或刷新时序可能改变，重点关注并发状态一致性。")
+        elif category == "data_persistence":
+            direct_impacts.append("分析结果、事件状态或历史记录的写入与读取行为可能受到影响。")
+        elif category == "localization":
+            direct_impacts.append("结果文案或语言回退逻辑可能变化，影响不同语言配置下的展示一致性。")
+        elif category == "state_transition":
+            direct_impacts.append("某些状态分支下的触发条件和后续行为可能与之前不同。")
+        score += int(row.get("score") or 0)
+
+    if cross_system_impact:
+        direct_impacts.extend(cross_system_impact[:2])
+
+    risk_reasons = list(dict.fromkeys(risk_reasons))[:5]
+    validation_checks = list(dict.fromkeys(validation_checks))[:5]
+    direct_impacts = list(dict.fromkeys(direct_impacts))[:5]
+
+    if score >= 8:
+        risk_level = "high"
+    elif score >= 4:
+        risk_level = "medium"
+    else:
+        risk_level = "low"
+    return risk_level, risk_reasons, validation_checks, direct_impacts
+
+
 def _build_global_context_queries(
     changed_files: list[str],
     changed_modules: list[str],
@@ -314,16 +539,18 @@ def analyze_commit_impact(
     changed_modules = _infer_changed_modules(changed_files)
     affected_areas = _infer_affected_areas(changed_files, changed_modules)
     cross_system_impact = _infer_cross_system_impact(changed_files, changed_modules, affected_areas)
+    diff_analysis = _extract_diff_facts(repo_dir, parent_commit_sha, commit_sha, changed_files)
+    change_facts = _build_change_facts(diff_analysis)
+    risk_level, risk_reasons, validation_checks, direct_impacts = _build_diff_based_risks(diff_analysis, cross_system_impact)
     related_context = _recall_related_context(project_id, changed_files, changed_modules, affected_areas, commit_subject)
-    risk_level = _normalize_risk_level(_infer_risk(changed_files + changed_modules + affected_areas + cross_system_impact))
     repository_snapshot = {
         "total_indexable_files": len(normalized_all_files),
         "top_level_areas": sorted({_path_segments(path)[0] for path in normalized_all_files if _path_segments(path)})[:12],
     }
-    verification_focus = [
-        "Regression-test the directly changed modules and their adjacent flows",
-        "Validate the highest-risk automation, API, or data paths touched by this commit",
-        "Review cross-module side effects with someone familiar with the impacted area",
+    verification_focus = validation_checks or [
+        "验证直接改动模块及其相邻流程的回归行为",
+        "验证本次提交触及的高风险自动化、接口或数据链路",
+        "结合受影响模块检查跨模块副作用是否符合预期",
     ]
     summary = {
         "project_id": project_id,
@@ -338,6 +565,10 @@ def analyze_commit_impact(
         "changed_modules": changed_modules,
         "affected_areas": affected_areas,
         "cross_system_impact": cross_system_impact,
+        "diff_analysis": diff_analysis,
+        "change_facts": change_facts,
+        "direct_impacts": direct_impacts,
+        "risk_reasons": risk_reasons,
         "indexed_file_hits": changed_existing_files[:20],
         "repository_snapshot": repository_snapshot,
         "related_context": related_context,
@@ -351,8 +582,9 @@ def analyze_commit_impact(
         output_lang = "English" if normalize_content_lang(effective_content_language()) == "en" else "Chinese"
         system = (
             "You are a senior staff engineer performing project-wide commit impact analysis. "
-            "Do not limit the reasoning to the changed files themselves. Infer the likely blast radius across modules, workflows, automation, and repository boundaries. "
-            "Return JSON with the fields: summary, impact_scope, risks, tests, reviewers, confidence, and optionally risk_level, changed_modules, affected_areas, cross_system_impact, verification_focus. "
+            "Base your reasoning on actual diff facts first, then infer the likely blast radius across modules, workflows, automation, and repository boundaries. "
+            "Return JSON with the fields: summary, impact_scope, risks, tests, reviewers, confidence, and optionally risk_level, changed_modules, affected_areas, cross_system_impact, verification_focus, change_facts, direct_impacts, risk_reasons. "
+            "Every risk and impact statement must be traceable to the provided diff_analysis or change_facts. Avoid generic statements that could apply to any commit. "
             "If you provide risk_level, it must be exactly one of: high, medium, low. Do not use any other wording, translations, or casing for risk_level. "
             f"Write all natural-language values in {output_lang}, but keep risk_level in English enum form."
         )
@@ -368,6 +600,10 @@ def analyze_commit_impact(
                 "changed_modules": changed_modules,
                 "affected_areas": affected_areas,
                 "cross_system_impact": cross_system_impact,
+                "diff_analysis": diff_analysis,
+                "change_facts": change_facts,
+                "direct_impacts": direct_impacts,
+                "risk_reasons": risk_reasons,
                 "repository_snapshot": repository_snapshot,
                 "related_context": related_context,
                 "verification_focus": verification_focus,
