@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useI18n } from "@/i18n/I18nContext";
 import {
@@ -31,9 +31,37 @@ type UsageTrendCardProps = {
   };
 };
 
+type ChartViewport = {
+  width: number;
+  height: number;
+};
+
+const BASE_CHART_WIDTH = 1000;
+const BASE_CHART_HEIGHT = 240;
+
+function scalePath(path: string, scaleX: number, scaleY: number) {
+  return path.replace(/-?\d*\.?\d+/g, (token, index, full) => {
+    const prev = full[index - 1];
+    if (prev === "e" || prev === "E") return token;
+    const value = Number(token);
+    if (Number.isNaN(value)) return token;
+    const prefix = full.slice(0, index);
+    const commandMatch = prefix.match(/[A-Za-z](?=[^A-Za-z]*$)/);
+    const command = commandMatch?.[0] ?? "";
+    const tail = prefix.slice((commandMatch?.index ?? prefix.length - 1) + 1);
+    const axisIndex = tail.split(",").length - 1;
+    const isVerticalOnly = command === "V" || command === "v";
+    const isHorizontalOnly = command === "H" || command === "h";
+    const scaled = isVerticalOnly ? value * scaleY : isHorizontalOnly ? value * scaleX : axisIndex % 2 === 0 ? value * scaleX : value * scaleY;
+    return Number(scaled.toFixed(2)).toString();
+  });
+}
+
 export function UsageTrendCard({ trendRows, trendMode, trendChart }: UsageTrendCardProps) {
   const { t, locale } = useI18n();
   const singlePoint = trendRows.length === 1;
+  const chartRef = useRef<HTMLDivElement | null>(null);
+  const [viewport, setViewport] = useState<ChartViewport>({ width: BASE_CHART_WIDTH, height: BASE_CHART_HEIGHT });
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
   const [focusIndex, setFocusIndex] = useState<number | null>(null);
   const formatLabel = (value: string) => (trendMode === "hour" ? shortHourLabel(value) : shortDayLabel(value));
@@ -44,37 +72,79 @@ export function UsageTrendCard({ trendRows, trendMode, trendChart }: UsageTrendC
       ? pointerIndex
       : Math.max(0, Math.min(trendRows.length - 1, focusIndex));
   const activeRow = activeIndex == null ? null : trendRows[activeIndex];
+  const scaleX = viewport.width / BASE_CHART_WIDTH;
+  const scaleY = viewport.height / BASE_CHART_HEIGHT;
+  const strokeScale = Math.min(scaleX, scaleY);
+  const axisStrokeWidth = Math.max(0.8, Number((0.8 * strokeScale).toFixed(2)));
+  const trendStrokeWidth = 1.8;
+  const guideDash = `${Math.max(3, Math.round(4 * strokeScale))} ${Math.max(3, Math.round(4 * strokeScale))}`;
+  const crosshairDash = `${Math.max(2, Math.round(3 * strokeScale))} ${Math.max(2, Math.round(3 * strokeScale))}`;
+  const activePointRadius = Math.max(3.2, Number((3.2 * strokeScale).toFixed(2)));
+  const lastPointRadius = Math.max(3, Number((3 * strokeScale).toFixed(2)));
+  const scaledLeft = trendChart.left * scaleX;
+  const scaledRight = trendChart.right * scaleX;
+  const scaledMid = trendChart.mid * scaleX;
+  const scaledTop = trendChart.top * scaleY;
+  const scaledAxisBottom = trendChart.axisBottom * scaleY;
   const activeX =
     activeIndex == null
       ? null
       : singlePoint
-        ? trendChart.mid
-        : trendChart.left + ((trendChart.right - trendChart.left) * activeIndex) / Math.max(1, trendRows.length - 1);
-  const activeXPercent = activeX == null ? "50%" : `${(activeX / 1000) * 100}%`;
-  const chartHeight = trendChart.axisBottom - trendChart.top;
-  const yAxisLabelLeft = `${((trendChart.left - 10) / 1000) * 100}%`;
-  const xAxisLabelTop = `${(228 / 240) * 100}%`;
+        ? scaledMid
+        : scaledLeft + ((scaledRight - scaledLeft) * activeIndex) / Math.max(1, trendRows.length - 1);
+  const activeXPercent = activeX == null ? "50%" : `${(activeX / Math.max(1, viewport.width)) * 100}%`;
+  const chartHeight = scaledAxisBottom - scaledTop;
+  const yAxisLabelLeft = `${((scaledLeft - 10) / Math.max(1, viewport.width)) * 100}%`;
+  const xAxisLabelTop = `${((228 * scaleY) / Math.max(1, viewport.height)) * 100}%`;
   const xAxisLabels = singlePoint
-    ? [{ key: "single", left: `${(trendChart.mid / 1000) * 100}%`, text: formatLabel(trendRows[0]?.day || ""), align: "center" as const }]
+    ? [{ key: "single", left: `${(scaledMid / Math.max(1, viewport.width)) * 100}%`, text: formatLabel(trendRows[0]?.day || ""), align: "center" as const }]
     : [
-        { key: "start", left: `${(trendChart.left / 1000) * 100}%`, text: formatLabel(trendRows[0]?.day || ""), align: "left" as const },
+        { key: "start", left: `${(scaledLeft / Math.max(1, viewport.width)) * 100}%`, text: formatLabel(trendRows[0]?.day || ""), align: "left" as const },
         {
           key: "middle",
-          left: `${(trendChart.mid / 1000) * 100}%`,
+          left: `${(scaledMid / Math.max(1, viewport.width)) * 100}%`,
           text: formatLabel(trendRows[Math.floor((trendRows.length - 1) / 2)]?.day || ""),
           align: "center" as const,
         },
         {
           key: "end",
-          left: `${(trendChart.right / 1000) * 100}%`,
+          left: `${(scaledRight / Math.max(1, viewport.width)) * 100}%`,
           text: formatLabel(trendRows[trendRows.length - 1]?.day || ""),
           align: "right" as const,
         },
       ];
-  const promptY =
-    activeRow == null ? null : trendChart.axisBottom - (chartHeight * Number(activeRow.prompt_tokens || 0)) / chartMax;
+  const promptY = activeRow == null ? null : scaledAxisBottom - (chartHeight * Number(activeRow.prompt_tokens || 0)) / chartMax;
   const completionY =
-    activeRow == null ? null : trendChart.axisBottom - (chartHeight * Number(activeRow.completion_tokens || 0)) / chartMax;
+    activeRow == null ? null : scaledAxisBottom - (chartHeight * Number(activeRow.completion_tokens || 0)) / chartMax;
+  const scaledPromptLine = scalePath(trendChart.promptLine, scaleX, scaleY);
+  const scaledCompletionLine = scalePath(trendChart.completionLine, scaleX, scaleY);
+  const scaledPromptArea = scalePath(trendChart.promptArea, scaleX, scaleY);
+  const scaledCompletionArea = scalePath(trendChart.completionArea, scaleX, scaleY);
+  const scaledPromptLast = trendChart.promptLast
+    ? { x: trendChart.promptLast.x * scaleX, y: trendChart.promptLast.y * scaleY }
+    : null;
+  const scaledCompletionLast = trendChart.completionLast
+    ? { x: trendChart.completionLast.x * scaleX, y: trendChart.completionLast.y * scaleY }
+    : null;
+  const scaledYTicks = trendChart.yTicks.map((tick) => ({ ...tick, y: tick.y * scaleY }));
+
+  useEffect(() => {
+    const element = chartRef.current;
+    if (!element) return;
+
+    const updateViewport = () => {
+      const nextWidth = Math.max(1, Math.round(element.clientWidth));
+      const nextHeight = Math.max(1, Math.round(element.clientHeight));
+      setViewport((current) =>
+        current.width === nextWidth && current.height === nextHeight ? current : { width: nextWidth, height: nextHeight },
+      );
+    };
+
+    updateViewport();
+    const observer = new ResizeObserver(updateViewport);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
 
   function formatTooltipTime(value: string): string {
     const date = value.includes("T") ? new Date(value) : new Date(`${value}T00:00:00`);
@@ -115,7 +185,7 @@ export function UsageTrendCard({ trendRows, trendMode, trendChart }: UsageTrendC
                 {t("usage.outputTokens")}
               </span>
             </div>
-            <div className="relative w-full aspect-[1000/240]">
+            <div ref={chartRef} className="relative w-full aspect-[1000/240]">
               {activeRow ? (
                 <div
                   className="pointer-events-none absolute top-2 z-10 min-w-[10rem] rounded-md border bg-background/95 px-2 py-1 text-xs shadow-sm"
@@ -172,8 +242,9 @@ export function UsageTrendCard({ trendRows, trendMode, trendChart }: UsageTrendC
                 </div>
               ))}
               <svg
-                viewBox="0 0 1000 240"
-                preserveAspectRatio="none"
+                width={viewport.width}
+                height={viewport.height}
+                viewBox={`0 0 ${viewport.width} ${viewport.height}`}
                 className="h-full w-full overflow-visible"
                 shapeRendering="geometricPrecision"
                 textRendering="geometricPrecision"
@@ -181,13 +252,13 @@ export function UsageTrendCard({ trendRows, trendMode, trendChart }: UsageTrendC
                 onMouseMove={(event) => {
                   const rect = event.currentTarget.getBoundingClientRect();
                   if (rect.width <= 0 || trendRows.length === 0) return;
-                  const x = ((event.clientX - rect.left) / rect.width) * 1000;
-                  const clamped = Math.max(trendChart.left, Math.min(trendChart.right, x));
+                  const x = ((event.clientX - rect.left) / rect.width) * viewport.width;
+                  const clamped = Math.max(scaledLeft, Math.min(scaledRight, x));
                   if (trendRows.length === 1) {
                     setHoverIndex(0);
                     return;
                   }
-                  const ratio = (clamped - trendChart.left) / Math.max(1, trendChart.right - trendChart.left);
+                  const ratio = (clamped - scaledLeft) / Math.max(1, scaledRight - scaledLeft);
                   const index = Math.round(ratio * (trendRows.length - 1));
                   setHoverIndex(index);
                 }}
@@ -220,57 +291,57 @@ export function UsageTrendCard({ trendRows, trendMode, trendChart }: UsageTrendC
                 </defs>
 
               <line
-                x1={trendChart.left}
-                y1={trendChart.axisBottom}
-                x2={trendChart.right}
-                y2={trendChart.axisBottom}
+                x1={scaledLeft}
+                y1={scaledAxisBottom}
+                x2={scaledRight}
+                y2={scaledAxisBottom}
                 stroke="currentColor"
                 opacity="0.18"
-                strokeWidth="0.8"
+                strokeWidth={axisStrokeWidth}
               />
               {SHOW_Y_AXIS_LINE ? (
                 <line
-                  x1={trendChart.left}
-                  y1={trendChart.top}
-                  x2={trendChart.left}
-                  y2={trendChart.axisBottom}
+                  x1={scaledLeft}
+                  y1={scaledTop}
+                  x2={scaledLeft}
+                  y2={scaledAxisBottom}
                   stroke="currentColor"
                   opacity="0.14"
-                  strokeWidth="0.8"
+                  strokeWidth={axisStrokeWidth}
                 />
               ) : null}
-              {trendChart.yTicks
-                .filter((tick) => tick.y !== trendChart.axisBottom)
+              {scaledYTicks
+                .filter((tick) => tick.y !== scaledAxisBottom)
                 .map((tick) => (
                   <line
                     key={`grid-${tick.y}`}
-                    x1={trendChart.left}
+                    x1={scaledLeft}
                     y1={tick.y}
-                    x2={trendChart.right}
+                    x2={scaledRight}
                     y2={tick.y}
                     stroke="currentColor"
                     opacity="0.1"
-                    strokeWidth="0.8"
-                    strokeDasharray="4 4"
+                    strokeWidth={axisStrokeWidth}
+                    strokeDasharray={guideDash}
                   />
                 ))}
 
-              <path d={trendChart.promptArea} fill="url(#usagePromptFill)" />
-              <path d={trendChart.completionArea} fill="url(#usageCompletionFill)" />
+              <path d={scaledPromptArea} fill="url(#usagePromptFill)" />
+              <path d={scaledCompletionArea} fill="url(#usageCompletionFill)" />
 
               <path
-                d={trendChart.promptLine}
+                d={scaledPromptLine}
                 fill="none"
                 stroke={PROMPT_LINE_COLOR}
-                strokeWidth="1.8"
+                strokeWidth={trendStrokeWidth}
                 strokeLinecap="round"
                 strokeLinejoin="round"
               />
               <path
-                d={trendChart.completionLine}
+                d={scaledCompletionLine}
                 fill="none"
                 stroke={COMPLETION_LINE_COLOR}
-                strokeWidth="1.8"
+                strokeWidth={trendStrokeWidth}
                 strokeLinecap="round"
                 strokeLinejoin="round"
               />
@@ -279,21 +350,21 @@ export function UsageTrendCard({ trendRows, trendMode, trendChart }: UsageTrendC
                 <>
                   <line
                     x1={activeX}
-                    y1={trendChart.top}
+                    y1={scaledTop}
                     x2={activeX}
-                    y2={trendChart.axisBottom}
+                    y2={scaledAxisBottom}
                     stroke="currentColor"
                     opacity="0.22"
-                    strokeDasharray="3 3"
+                    strokeDasharray={crosshairDash}
                   />
-                  {promptY != null ? <circle cx={activeX} cy={promptY} r="3.2" fill={PROMPT_LINE_COLOR} /> : null}
-                  {completionY != null ? <circle cx={activeX} cy={completionY} r="3.2" fill={COMPLETION_LINE_COLOR} /> : null}
+                  {promptY != null ? <circle cx={activeX} cy={promptY} r={activePointRadius} fill={PROMPT_LINE_COLOR} /> : null}
+                  {completionY != null ? <circle cx={activeX} cy={completionY} r={activePointRadius} fill={COMPLETION_LINE_COLOR} /> : null}
                 </>
               ) : null}
 
-              {trendChart.promptLast ? <circle cx={trendChart.promptLast.x} cy={trendChart.promptLast.y} r="3" fill={PROMPT_LINE_COLOR} /> : null}
-              {trendChart.completionLast ? (
-                <circle cx={trendChart.completionLast.x} cy={trendChart.completionLast.y} r="3" fill={COMPLETION_LINE_COLOR} />
+              {scaledPromptLast ? <circle cx={scaledPromptLast.x} cy={scaledPromptLast.y} r={lastPointRadius} fill={PROMPT_LINE_COLOR} /> : null}
+              {scaledCompletionLast ? (
+                <circle cx={scaledCompletionLast.x} cy={scaledCompletionLast.y} r={lastPointRadius} fill={COMPLETION_LINE_COLOR} />
               ) : null}
 
               </svg>
