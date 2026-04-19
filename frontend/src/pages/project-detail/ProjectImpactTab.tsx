@@ -17,6 +17,20 @@ type ImpactFileFact = {
   matched_categories: string[];
   facts: string[];
   risk_score: number;
+  file_role?: string;
+  change_summary?: string;
+  impact_summary?: string;
+  evidence?: string[];
+};
+
+type StructuredSuggestion = {
+  title: string;
+  detail?: string;
+};
+
+type ReviewerSuggestion = {
+  label: string;
+  detail?: string;
 };
 
 function shortSha(value: string | null | undefined) {
@@ -25,12 +39,174 @@ function shortSha(value: string | null | undefined) {
   return text.length > 8 ? text.slice(0, 8) : text;
 }
 
-function asList(value: unknown): string[] {
-  return Array.isArray(value) ? value.map((item) => String(item ?? "").trim()).filter(Boolean) : [];
-}
-
 function asText(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function asDisplayText(value: unknown): string {
+  if (typeof value === "string") {
+    return value.trim();
+  }
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  if (!value || typeof value !== "object") {
+    return "";
+  }
+
+  const row = value as Record<string, unknown>;
+  const preferredKeys = [
+    "text",
+    "label",
+    "title",
+    "summary",
+    "content",
+    "description",
+    "reason",
+    "name",
+    "value",
+  ];
+
+  for (const key of preferredKeys) {
+    const text = asText(row[key]);
+    if (text) return text;
+  }
+
+  const nestedKeys = ["item", "data", "detail"];
+  for (const key of nestedKeys) {
+    const text = asDisplayText(row[key]);
+    if (text) return text;
+  }
+
+  const entries = Object.entries(row)
+    .map(([key, item]) => {
+      const text = asDisplayText(item);
+      return text ? `${key}: ${text}` : "";
+    })
+    .filter(Boolean);
+
+  return entries.join(" | ");
+}
+
+function asList(value: unknown): string[] {
+  return Array.isArray(value) ? value.map((item) => asDisplayText(item)).filter(Boolean) : [];
+}
+
+function asStructuredSuggestions(value: unknown): StructuredSuggestion[] {
+  if (!Array.isArray(value)) return [];
+
+  return value
+    .map((item) => {
+      if (typeof item === "string") {
+        const title = item.trim();
+        return title ? { title } : null;
+      }
+      if (!item || typeof item !== "object") {
+        return null;
+      }
+
+      const row = item as Record<string, unknown>;
+      const title =
+        asText(row.title) ||
+        asText(row.label) ||
+        asText(row.summary) ||
+        asText(row.text) ||
+        asText(row.name) ||
+        asText(row.value) ||
+        asDisplayText(row.item) ||
+        asDisplayText(row.data);
+
+      const detail =
+        asText(row.detail) ||
+        asText(row.description) ||
+        asText(row.reason) ||
+        asText(row.content) ||
+        asText(row.note) ||
+        undefined;
+
+      if (!title) {
+        const fallback = asDisplayText(item);
+        return fallback ? { title: fallback } : null;
+      }
+
+      return { title, detail: detail && detail !== title ? detail : undefined };
+    })
+    .filter((item): item is StructuredSuggestion => !!item);
+}
+
+function asReviewerSuggestions(value: unknown): ReviewerSuggestion[] {
+  if (!Array.isArray(value)) return [];
+
+  return value
+    .map((item) => {
+      if (typeof item === "string") {
+        const label = item.trim();
+        return label ? { label } : null;
+      }
+      if (!item || typeof item !== "object") {
+        return null;
+      }
+
+      const row = item as Record<string, unknown>;
+      const label =
+        asText(row.label) ||
+        asText(row.name) ||
+        asText(row.title) ||
+        asText(row.role) ||
+        asText(row.team) ||
+        asText(row.owner) ||
+        asText(row.reviewer) ||
+        asDisplayText(row.item) ||
+        asDisplayText(row.data);
+
+      const detail =
+        asText(row.reason) ||
+        asText(row.description) ||
+        asText(row.summary) ||
+        asText(row.detail) ||
+        undefined;
+
+      if (!label) {
+        const fallback = asDisplayText(item);
+        return fallback ? { label: fallback } : null;
+      }
+
+      return { label, detail: detail && detail !== label ? detail : undefined };
+    })
+    .filter((item): item is ReviewerSuggestion => !!item);
+}
+
+function StructuredSuggestionList({ items }: { items: StructuredSuggestion[] }) {
+  if (!items.length) {
+    return <div className="rounded-lg border border-dashed px-3 py-4 text-sm text-muted-foreground">—</div>;
+  }
+
+  return (
+    <div className="space-y-2">
+      {items.map((item, index) => (
+        <div key={`${item.title}-${index}`} className="rounded-lg bg-muted/30 px-3 py-2 text-sm text-foreground">
+          <div className="leading-6">{item.title}</div>
+          {item.detail ? <div className="mt-1 text-xs leading-5 text-muted-foreground">{item.detail}</div> : null}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ReviewerSuggestionList({ items }: { items: ReviewerSuggestion[] }) {
+  if (!items.length) {
+    return null;
+  }
+
+  return (
+    <div className="flex flex-wrap gap-2">
+      {items.map((item, index) => (
+        <span key={`${item.label}-${index}`} className="rounded-full border bg-muted/20 px-2.5 py-1 text-[11px] leading-5 text-foreground">
+          {item.detail ? `${item.label} · ${item.detail}` : item.label}
+        </span>
+      ))}
+    </div>
+  );
 }
 
 function formatDateTimeToSeconds(value: string | null | undefined) {
@@ -79,7 +255,7 @@ function SectionList({ items }: { items: string[] }) {
 
 function TagList({ items }: { items: string[] }) {
   if (!items.length) {
-    return <div className="rounded-lg border border-dashed px-3 py-4 text-sm text-muted-foreground">—</div>;
+    return null;
   }
   return (
     <div className="flex flex-wrap gap-2">
@@ -94,25 +270,39 @@ function TagList({ items }: { items: string[] }) {
 
 function asFileFacts(value: unknown): ImpactFileFact[] {
   if (!Array.isArray(value)) return [];
-  return value
-    .map((item) => {
-      if (!item || typeof item !== "object") return null;
-      const row = item as Record<string, unknown>;
-      const path = String(row.path ?? "").trim();
-      if (!path) return null;
-      return {
-        path,
-        status: String(row.status ?? "M").trim() || "M",
-        previous_path: String(row.previous_path ?? "").trim(),
-        added: Number(row.added ?? 0) || 0,
-        deleted: Number(row.deleted ?? 0) || 0,
-        changes: Number(row.changes ?? 0) || 0,
-        matched_categories: asList(row.matched_categories),
-        facts: asList(row.facts),
-        risk_score: Number(row.risk_score ?? 0) || 0,
-      } satisfies ImpactFileFact;
-    })
-    .filter((item): item is ImpactFileFact => item !== null);
+
+  const result: ImpactFileFact[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+
+    const row = item as Record<string, unknown>;
+    const path = String(row.path ?? "").trim();
+    if (!path) continue;
+
+    const fact: ImpactFileFact = {
+      path,
+      status: String(row.status ?? "M").trim() || "M",
+      added: Number(row.added ?? 0) || 0,
+      deleted: Number(row.deleted ?? 0) || 0,
+      changes: Number(row.changes ?? 0) || 0,
+      matched_categories: asList(row.matched_categories),
+      facts: asList(row.facts),
+      risk_score: Number(row.risk_score ?? 0) || 0,
+      file_role: String(row.file_role ?? "").trim() || undefined,
+      change_summary: String(row.change_summary ?? "").trim() || undefined,
+      impact_summary: String(row.impact_summary ?? "").trim() || undefined,
+      evidence: asList(row.evidence),
+    };
+
+    const previousPath = String(row.previous_path ?? "").trim();
+    if (previousPath) {
+      fact.previous_path = previousPath;
+    }
+
+    result.push(fact);
+  }
+
+  return result;
 }
 
 function fileStatusTone(status: string) {
@@ -187,10 +377,12 @@ export function ProjectImpactTab() {
   const topDirectories = useMemo(() => summarizeTopDirectories(filteredChangedFiles.length ? filteredChangedFiles : changedFiles), [changedFiles, filteredChangedFiles]);
   const changedModules = useMemo(() => asList(selectedRun?.summary?.changed_modules), [selectedRun]);
   const affectedAreas = useMemo(() => asList(selectedRun?.summary?.affected_areas), [selectedRun]);
-  const fileFacts = useMemo(
-    () => asFileFacts((selectedRun?.summary?.diff_analysis as Record<string, unknown> | undefined)?.file_facts),
-    [selectedRun],
-  );
+  const fileFacts = useMemo(() => {
+    const rows = asFileFacts((selectedRun?.summary?.diff_analysis as Record<string, unknown> | undefined)?.file_facts);
+    return rows
+      .filter((item) => item.risk_score > 0 || !!item.impact_summary || (item.evidence?.length ?? 0) > 0)
+      .sort((a, b) => b.risk_score - a.risk_score || b.changes - a.changes || a.path.localeCompare(b.path));
+  }, [selectedRun]);
   const visibleFileFacts = useMemo(
     () => (showAllFileFacts ? fileFacts : fileFacts.slice(0, DEFAULT_VISIBLE_FILE_FACTS)),
     [fileFacts, showAllFileFacts],
@@ -234,10 +426,10 @@ export function ProjectImpactTab() {
   }, [diffRiskReasons, impactScope, risks]);
   const visibleRiskItems = useMemo(() => (showAllRisks ? riskItems : riskItems.slice(0, DEFAULT_VISIBLE_RISKS)), [riskItems, showAllRisks]);
   const hiddenRiskCount = Math.max(0, riskItems.length - visibleRiskItems.length);
-  const tests = useMemo(() => asList(llmSummary?.tests), [llmSummary]);
+  const tests = useMemo(() => asStructuredSuggestions(llmSummary?.tests), [llmSummary]);
   const visibleTests = useMemo(() => (showAllTests ? tests : tests.slice(0, DEFAULT_VISIBLE_VALIDATION_ITEMS)), [showAllTests, tests]);
   const hiddenTestsCount = Math.max(0, tests.length - visibleTests.length);
-  const reviewers = useMemo(() => asList(llmSummary?.reviewers), [llmSummary]);
+  const reviewers = useMemo(() => asReviewerSuggestions(llmSummary?.reviewers), [llmSummary]);
   const commitMessage = useMemo(() => asText(selectedRun?.summary?.commit_message), [selectedRun]);
   const narrativeSummary = useMemo(() => asText(llmSummary?.summary) || commitMessage, [llmSummary, commitMessage]);
 
@@ -391,230 +583,212 @@ export function ProjectImpactTab() {
                   </div>
                 </section>
 
-                <div className="grid gap-5 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
-                  <div className="space-y-5">
-                    <section className="space-y-3">
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="text-sm font-semibold text-foreground">{t("projectImpact.changedFiles")}</div>
-                        <div className="text-xs text-muted-foreground">
-                          {t("projectImpact.changedFilesCount", { count: String(changedFiles.length) })}
+                <div className="space-y-5">
+                  <div className="grid gap-5 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
+                    <div className="space-y-5">
+                      <section className="space-y-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="text-sm font-semibold text-foreground">{t("projectImpact.changedFiles")}</div>
+                          <div className="text-xs text-muted-foreground">
+                            {t("projectImpact.changedFilesCount", { count: String(changedFiles.length) })}
+                          </div>
                         </div>
-                      </div>
 
-                      {changedFiles.length ? (
-                        <div className="space-y-3">
-                          <input
-                            value={fileQuery}
-                            onChange={(e) => setFileQuery(e.target.value)}
-                            placeholder={t("projectImpact.fileSearchPlaceholder")}
-                            aria-label={t("projectImpact.fileSearchAria")}
-                            className="h-9 w-full rounded-lg border bg-background px-3 text-sm outline-none transition focus:border-primary/50 focus:ring-2 focus:ring-primary/15"
-                          />
+                        {changedFiles.length ? (
+                          <div className="space-y-3">
+                            <input
+                              value={fileQuery}
+                              onChange={(e) => setFileQuery(e.target.value)}
+                              placeholder={t("projectImpact.fileSearchPlaceholder")}
+                              aria-label={t("projectImpact.fileSearchAria")}
+                              className="h-9 w-full rounded-lg border bg-background px-3 text-sm outline-none transition focus:border-primary/50 focus:ring-2 focus:ring-primary/15"
+                            />
 
-                          {topDirectories.length ? (
-                            <div className="space-y-2">
-                              <div className="flex items-center justify-between gap-3">
-                                <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{t("projectImpact.topDirectories")}</div>
-                                {fileQuery.trim() ? (
-                                  <div className="text-[11px] text-muted-foreground">
-                                    {t("projectImpact.filteredFilesCount", { count: String(filteredChangedFiles.length) })}
+                            {topDirectories.length ? (
+                              <div className="space-y-2">
+                                <div className="flex items-center justify-between gap-3">
+                                  <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{t("projectImpact.topDirectories")}</div>
+                                  {fileQuery.trim() ? (
+                                    <div className="text-[11px] text-muted-foreground">
+                                      {t("projectImpact.filteredFilesCount", { count: String(filteredChangedFiles.length) })}
+                                    </div>
+                                  ) : null}
+                                </div>
+                                <TagList items={topDirectories} />
+                              </div>
+                            ) : null}
+
+                            {filteredChangedFiles.length ? (
+                              <>
+                                <div className="max-h-[280px] space-y-2 overflow-auto pr-1">
+                                  {visibleChangedFiles.map((file) => (
+                                    <div key={file} className="rounded-lg border bg-muted/20 px-3 py-2 font-mono text-xs text-foreground">
+                                      {file}
+                                    </div>
+                                  ))}
+                                </div>
+                                {filteredChangedFiles.length > DEFAULT_VISIBLE_FILES ? (
+                                  <div className="flex items-center justify-between gap-3 rounded-lg border border-dashed px-3 py-2 text-xs text-muted-foreground">
+                                    <span>
+                                      {showAllFiles
+                                        ? t("projectImpact.showingAllFiles")
+                                        : t("projectImpact.hiddenFilesCount", { count: String(hiddenFileCount) })}
+                                    </span>
+                                    <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => setShowAllFiles((prev) => !prev)}>
+                                      {showAllFiles ? t("projectImpact.collapseFiles") : t("projectImpact.showAllFiles")}
+                                    </Button>
                                   </div>
                                 ) : null}
+                              </>
+                            ) : (
+                              <div className="rounded-lg border border-dashed px-3 py-4 text-sm text-muted-foreground">
+                                {t("projectImpact.fileSearchEmpty")}
                               </div>
-                              <TagList items={topDirectories} />
-                            </div>
-                          ) : null}
+                            )}
+                          </div>
+                        ) : null}
+                      </section>
 
-                          {filteredChangedFiles.length ? (
-                            <>
-                              <div className="max-h-[280px] space-y-2 overflow-auto pr-1">
-                                {visibleChangedFiles.map((file) => (
-                                  <div key={file} className="rounded-lg border bg-muted/20 px-3 py-2 font-mono text-xs text-foreground">
-                                    {file}
+                      <section className="space-y-3">
+                        <div className="text-sm font-semibold text-foreground">{t("projectImpact.changedModules")}</div>
+                        <TagList items={changedModules} />
+                      </section>
+
+                      <section className="space-y-3">
+                        <div className="text-sm font-semibold text-foreground">{t("projectImpact.affectedAreas")}</div>
+                        <TagList items={affectedAreas} />
+                      </section>
+
+                      <section className="space-y-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="text-sm font-semibold text-foreground">{t("projectImpact.fileFactsTitle")}</div>
+                          <div className="text-xs text-muted-foreground">
+                            {t("projectImpact.validationItemsCount", { count: String(fileFacts.length) })}
+                          </div>
+                        </div>
+                        {fileFacts.length ? (
+                          <div className="space-y-3">
+                            {visibleFileFacts.map((item) => (
+                              <div key={`${item.path}-${item.status}`} className="rounded-xl border bg-muted/10 p-4 space-y-3">
+                                <div className="flex flex-wrap items-start justify-between gap-3">
+                                  <div className="min-w-0 space-y-1">
+                                    <div className="break-all font-mono text-xs text-foreground">{item.path}</div>
+                                    {item.previous_path ? <div className="text-[11px] text-muted-foreground">from {item.previous_path}</div> : null}
                                   </div>
-                                ))}
-                              </div>
-                              {filteredChangedFiles.length > DEFAULT_VISIBLE_FILES ? (
-                                <div className="flex items-center justify-between gap-3 rounded-lg border border-dashed px-3 py-2 text-xs text-muted-foreground">
-                                  <span>
-                                    {showAllFiles
-                                      ? t("projectImpact.showingAllFiles")
-                                      : t("projectImpact.hiddenFilesCount", { count: String(hiddenFileCount) })}
-                                  </span>
-                                  <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => setShowAllFiles((prev) => !prev)}>
-                                    {showAllFiles ? t("projectImpact.collapseFiles") : t("projectImpact.showAllFiles")}
-                                  </Button>
+                                  <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                                    <span className={`rounded-full border px-2 py-0.5 font-medium ${fileStatusTone(item.status)}`}>{item.status}</span>
+                                    <span className="text-muted-foreground">+{item.added}/-{item.deleted}</span>
+                                    <span className={`font-semibold ${fileRiskTone(item.risk_score)}`}>risk {item.risk_score}</span>
+                                  </div>
                                 </div>
-                              ) : null}
-                            </>
-                          ) : (
-                            <div className="rounded-lg border border-dashed px-3 py-4 text-sm text-muted-foreground">
-                              {t("projectImpact.fileSearchEmpty")}
-                            </div>
-                          )}
-                        </div>
-                      ) : (
-                        <div className="rounded-lg border border-dashed px-3 py-4 text-sm text-muted-foreground">—</div>
-                      )}
-                    </section>
-
-                    <section className="space-y-3">
-                      <div className="text-sm font-semibold text-foreground">{t("projectImpact.changedModules")}</div>
-                      <TagList items={changedModules} />
-                    </section>
-
-                    <section className="space-y-3">
-                      <div className="text-sm font-semibold text-foreground">{t("projectImpact.affectedAreas")}</div>
-                      <TagList items={affectedAreas} />
-                    </section>
-
-                    <section className="space-y-3">
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="text-sm font-semibold text-foreground">{t("projectImpact.fileFactsTitle")}</div>
-                        <div className="text-xs text-muted-foreground">
-                          {t("projectImpact.validationItemsCount", { count: String(fileFacts.length) })}
-                        </div>
-                      </div>
-                      {fileFacts.length ? (
-                        <div className="space-y-3">
-                          {visibleFileFacts.map((item) => (
-                            <div key={`${item.path}-${item.status}`} className="rounded-xl border bg-muted/10 p-3">
-                              <div className="flex flex-wrap items-start justify-between gap-3">
-                                <div className="min-w-0 space-y-1">
-                                  <div className="break-all font-mono text-xs text-foreground">{item.path}</div>
-                                  {item.previous_path ? <div className="text-[11px] text-muted-foreground">from {item.previous_path}</div> : null}
-                                </div>
-                                <div className="flex flex-wrap items-center gap-2 text-[11px]">
-                                  <span className={`rounded-full border px-2 py-0.5 font-medium ${fileStatusTone(item.status)}`}>{item.status}</span>
-                                  <span className="text-muted-foreground">+{item.added}/-{item.deleted}</span>
-                                  <span className={`font-semibold ${fileRiskTone(item.risk_score)}`}>risk {item.risk_score}</span>
-                                </div>
-                              </div>
-                              <div className="mt-3 space-y-3">
+                                {item.file_role ? <div className="text-xs font-medium text-primary">{item.file_role}</div> : null}
+                                {item.change_summary ? <div className="rounded-lg bg-background/70 px-3 py-2 text-sm text-foreground">{item.change_summary}</div> : null}
+                                {item.impact_summary ? <div className="rounded-lg border border-amber-200/60 bg-amber-50/60 px-3 py-2 text-sm text-foreground dark:border-amber-900/40 dark:bg-amber-950/10">{item.impact_summary}</div> : null}
                                 <TagList items={item.matched_categories} />
-                                <SectionList items={item.facts} />
+                                {item.evidence?.length ? <SectionList items={item.evidence} /> : item.facts.length ? <SectionList items={item.facts} /> : null}
                               </div>
-                            </div>
-                          ))}
-                          {fileFacts.length > DEFAULT_VISIBLE_FILE_FACTS ? (
-                            <div className="flex items-center justify-between gap-3 rounded-lg border border-dashed px-3 py-2 text-xs text-muted-foreground">
-                              <span>
-                                {showAllFileFacts
-                                  ? t("projectImpact.showingAllValidationItems")
-                                  : t("projectImpact.hiddenValidationItemsCount", { count: String(hiddenFileFactsCount) })}
-                              </span>
-                              <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => setShowAllFileFacts((prev) => !prev)}>
-                                {showAllFileFacts ? t("projectImpact.collapseValidationItems") : t("projectImpact.showAllValidationItems")}
-                              </Button>
-                            </div>
-                          ) : null}
-                        </div>
-                      ) : (
-                        <div className="rounded-lg border border-dashed px-3 py-4 text-sm text-muted-foreground">—</div>
-                      )}
-                    </section>
+                            ))}
+                            {fileFacts.length > DEFAULT_VISIBLE_FILE_FACTS ? (
+                              <div className="flex items-center justify-between gap-3 rounded-lg border border-dashed px-3 py-2 text-xs text-muted-foreground">
+                                <span>
+                                  {showAllFileFacts
+                                    ? t("projectImpact.showingAllValidationItems")
+                                    : t("projectImpact.hiddenValidationItemsCount", { count: String(hiddenFileFactsCount) })}
+                                </span>
+                                <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => setShowAllFileFacts((prev) => !prev)}>
+                                  {showAllFileFacts ? t("projectImpact.collapseValidationItems") : t("projectImpact.showAllValidationItems")}
+                                </Button>
+                              </div>
+                            ) : null}
+                          </div>
+                        ) : null}
+                      </section>
 
-                    <section className="space-y-3">
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="text-sm font-semibold text-foreground">{t("projectImpact.changeFacts")}</div>
-                        <div className="text-xs text-muted-foreground">
-                          {t("projectImpact.validationItemsCount", { count: String(changeFacts.length) })}
+                      <section className="space-y-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="text-sm font-semibold text-foreground">{t("projectImpact.changeFacts")}</div>
+                          <div className="text-xs text-muted-foreground">
+                            {t("projectImpact.validationItemsCount", { count: String(changeFacts.length) })}
+                          </div>
                         </div>
-                      </div>
-                      <SectionList items={visibleChangeFacts} />
-                      {changeFacts.length > DEFAULT_VISIBLE_VALIDATION_ITEMS ? (
-                        <div className="flex items-center justify-between gap-3 rounded-lg border border-dashed px-3 py-2 text-xs text-muted-foreground">
-                          <span>
-                            {showAllChangeFacts
-                              ? t("projectImpact.showingAllValidationItems")
-                              : t("projectImpact.hiddenValidationItemsCount", { count: String(hiddenChangeFactsCount) })}
-                          </span>
-                          <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => setShowAllChangeFacts((prev) => !prev)}>
-                            {showAllChangeFacts ? t("projectImpact.collapseValidationItems") : t("projectImpact.showAllValidationItems")}
-                          </Button>
-                        </div>
-                      ) : null}
-                    </section>
-                  </div>
+                        <SectionList items={visibleChangeFacts} />
+                        {changeFacts.length > DEFAULT_VISIBLE_VALIDATION_ITEMS ? (
+                          <div className="flex items-center justify-between gap-3 rounded-lg border border-dashed px-3 py-2 text-xs text-muted-foreground">
+                            <span>
+                              {showAllChangeFacts
+                                ? t("projectImpact.showingAllValidationItems")
+                                : t("projectImpact.hiddenValidationItemsCount", { count: String(hiddenChangeFactsCount) })}
+                            </span>
+                            <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => setShowAllChangeFacts((prev) => !prev)}>
+                              {showAllChangeFacts ? t("projectImpact.collapseValidationItems") : t("projectImpact.showAllValidationItems")}
+                            </Button>
+                          </div>
+                        ) : null}
+                      </section>
+                    </div>
 
-                  <div className="space-y-5">
-                    <section className="space-y-3">
-                      <div className="flex items-center justify-between gap-3">
+                    <div className="space-y-5">
+                      <section className="space-y-3">
                         <div className="text-sm font-semibold text-foreground">{t("projectImpact.directImpacts")}</div>
-                        <div className="text-xs text-muted-foreground">
-                          {t("projectImpact.risksCount", { count: String(directImpacts.length) })}
-                        </div>
-                      </div>
-                      <SectionList items={visibleDirectImpacts} />
-                      {directImpacts.length > DEFAULT_VISIBLE_RISKS ? (
-                        <div className="flex items-center justify-between gap-3 rounded-lg border border-dashed px-3 py-2 text-xs text-muted-foreground">
-                          <span>
-                            {showAllDirectImpacts
-                              ? t("projectImpact.showingAllRisks")
-                              : t("projectImpact.hiddenRisksCount", { count: String(hiddenDirectImpactsCount) })}
-                          </span>
-                          <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => setShowAllDirectImpacts((prev) => !prev)}>
-                            {showAllDirectImpacts ? t("projectImpact.collapseRisks") : t("projectImpact.showAllRisks")}
-                          </Button>
-                        </div>
-                      ) : null}
-                    </section>
+                        <SectionList items={visibleDirectImpacts} />
+                        {directImpacts.length > DEFAULT_VISIBLE_RISKS ? (
+                          <div className="flex items-center justify-between gap-3 rounded-lg border border-dashed px-3 py-2 text-xs text-muted-foreground">
+                            <span>
+                              {showAllDirectImpacts
+                                ? t("projectImpact.showingAllRisks")
+                                : t("projectImpact.hiddenRisksCount", { count: String(hiddenDirectImpactsCount) })}
+                            </span>
+                            <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => setShowAllDirectImpacts((prev) => !prev)}>
+                              {showAllDirectImpacts ? t("projectImpact.collapseRisks") : t("projectImpact.showAllRisks")}
+                            </Button>
+                          </div>
+                        ) : null}
+                      </section>
 
-                    <section className="space-y-3">
-                      <div className="flex items-center justify-between gap-3">
+                      <section className="space-y-3">
                         <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
                           <ShieldAlert className="size-4 text-amber-500" aria-hidden />
                           {t("projectImpact.risksAndImpact")}
                         </div>
-                        <div className="text-xs text-muted-foreground">
-                          {t("projectImpact.risksCount", { count: String(riskItems.length) })}
-                        </div>
-                      </div>
-                      <SectionList items={visibleRiskItems} />
-                      {riskItems.length > DEFAULT_VISIBLE_RISKS ? (
-                        <div className="flex items-center justify-between gap-3 rounded-lg border border-dashed px-3 py-2 text-xs text-muted-foreground">
-                          <span>
-                            {showAllRisks
-                              ? t("projectImpact.showingAllRisks")
-                              : t("projectImpact.hiddenRisksCount", { count: String(hiddenRiskCount) })}
-                          </span>
-                          <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => setShowAllRisks((prev) => !prev)}>
-                            {showAllRisks ? t("projectImpact.collapseRisks") : t("projectImpact.showAllRisks")}
-                          </Button>
-                        </div>
-                      ) : null}
-                    </section>
+                        <SectionList items={visibleRiskItems} />
+                        {riskItems.length > DEFAULT_VISIBLE_RISKS ? (
+                          <div className="flex items-center justify-between gap-3 rounded-lg border border-dashed px-3 py-2 text-xs text-muted-foreground">
+                            <span>
+                              {showAllRisks
+                                ? t("projectImpact.showingAllRisks")
+                                : t("projectImpact.hiddenRisksCount", { count: String(hiddenRiskCount) })}
+                            </span>
+                            <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => setShowAllRisks((prev) => !prev)}>
+                              {showAllRisks ? t("projectImpact.collapseRisks") : t("projectImpact.showAllRisks")}
+                            </Button>
+                          </div>
+                        ) : null}
+                      </section>
 
-                    <section className="space-y-3">
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="text-sm font-semibold text-foreground">{t("projectImpact.crossSystemImpact")}</div>
-                        <div className="text-xs text-muted-foreground">
-                          {t("projectImpact.crossSystemImpactCount", { count: String(crossSystemImpact.length) })}
-                        </div>
-                      </div>
-                      <SectionList items={visibleCrossSystemImpact} />
-                      {crossSystemImpact.length > DEFAULT_VISIBLE_VALIDATION_ITEMS ? (
-                        <div className="flex items-center justify-between gap-3 rounded-lg border border-dashed px-3 py-2 text-xs text-muted-foreground">
-                          <span>
-                            {showAllCrossSystemImpact
-                              ? t("projectImpact.showingAllCrossSystemImpact")
-                              : t("projectImpact.hiddenCrossSystemImpactCount", { count: String(hiddenCrossSystemImpactCount) })}
-                          </span>
-                          <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => setShowAllCrossSystemImpact((prev) => !prev)}>
-                            {showAllCrossSystemImpact ? t("projectImpact.collapseCrossSystemImpact") : t("projectImpact.showAllCrossSystemImpact")}
-                          </Button>
-                        </div>
-                      ) : null}
-                    </section>
-
-                    <section className="space-y-4">
-                      <div className="text-sm font-semibold text-foreground">{t("projectImpact.validationSuggestions")}</div>
-
-                      <div className="space-y-3">
+                      <section className="space-y-3">
                         <div className="flex items-center justify-between gap-3">
-                          <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{t("projectImpact.verificationFocusTitle")}</div>
-                          <div className="text-[11px] text-muted-foreground">{t("projectImpact.validationItemsCount", { count: String(verificationFocus.length) })}</div>
+                          <div className="text-sm font-semibold text-foreground">{t("projectImpact.crossSystemImpact")}</div>
+                          <div className="text-xs text-muted-foreground">
+                            {t("projectImpact.crossSystemImpactCount", { count: String(crossSystemImpact.length) })}
+                          </div>
                         </div>
+                        <SectionList items={visibleCrossSystemImpact} />
+                        {crossSystemImpact.length > DEFAULT_VISIBLE_VALIDATION_ITEMS ? (
+                          <div className="flex items-center justify-between gap-3 rounded-lg border border-dashed px-3 py-2 text-xs text-muted-foreground">
+                            <span>
+                              {showAllCrossSystemImpact
+                                ? t("projectImpact.showingAllCrossSystemImpact")
+                                : t("projectImpact.hiddenCrossSystemImpactCount", { count: String(hiddenCrossSystemImpactCount) })}
+                            </span>
+                            <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => setShowAllCrossSystemImpact((prev) => !prev)}>
+                              {showAllCrossSystemImpact ? t("projectImpact.collapseCrossSystemImpact") : t("projectImpact.showAllCrossSystemImpact")}
+                            </Button>
+                          </div>
+                        ) : null}
+                      </section>
+
+                      <section className="space-y-3">
+                        <div className="text-sm font-semibold text-foreground">{t("projectImpact.verificationFocusTitle")}</div>
                         <SectionList items={visibleVerificationFocus} />
                         {verificationFocus.length > DEFAULT_VISIBLE_VALIDATION_ITEMS ? (
                           <div className="flex items-center justify-between gap-3 rounded-lg border border-dashed px-3 py-2 text-xs text-muted-foreground">
@@ -628,50 +802,57 @@ export function ProjectImpactTab() {
                             </Button>
                           </div>
                         ) : null}
-                      </div>
+                      </section>
 
-                      <div className="space-y-3">
-                        <div className="flex items-center justify-between gap-3">
-                          <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{t("projectImpact.testSuggestionsTitle")}</div>
-                          <div className="text-[11px] text-muted-foreground">{t("projectImpact.validationItemsCount", { count: String(tests.length) })}</div>
-                        </div>
-                        <SectionList items={visibleTests} />
-                        {tests.length > DEFAULT_VISIBLE_VALIDATION_ITEMS ? (
-                          <div className="flex items-center justify-between gap-3 rounded-lg border border-dashed px-3 py-2 text-xs text-muted-foreground">
-                            <span>
-                              {showAllTests
-                                ? t("projectImpact.showingAllValidationItems")
-                                : t("projectImpact.hiddenValidationItemsCount", { count: String(hiddenTestsCount) })}
-                            </span>
-                            <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => setShowAllTests((prev) => !prev)}>
-                              {showAllTests ? t("projectImpact.collapseValidationItems") : t("projectImpact.showAllValidationItems")}
-                            </Button>
+                      <section className="space-y-4">
+                        <div className="text-sm font-semibold text-foreground">{t("projectImpact.validationSuggestions")}</div>
+
+                        <div className="space-y-3">
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{t("projectImpact.testSuggestionsTitle")}</div>
+                            <div className="text-[11px] text-muted-foreground">{t("projectImpact.validationItemsCount", { count: String(tests.length) })}</div>
                           </div>
-                        ) : null}
-                      </div>
+                          <StructuredSuggestionList items={visibleTests} />
+                          {tests.length > DEFAULT_VISIBLE_VALIDATION_ITEMS ? (
+                            <div className="flex items-center justify-between gap-3 rounded-lg border border-dashed px-3 py-2 text-xs text-muted-foreground">
+                              <span>
+                                {showAllTests
+                                  ? t("projectImpact.showingAllValidationItems")
+                                  : t("projectImpact.hiddenValidationItemsCount", { count: String(hiddenTestsCount) })}
+                              </span>
+                              <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => setShowAllTests((prev) => !prev)}>
+                                {showAllTests ? t("projectImpact.collapseValidationItems") : t("projectImpact.showAllValidationItems")}
+                              </Button>
+                            </div>
+                          ) : null}
+                        </div>
 
-                      <div className="space-y-3">
-                        <div className="flex items-center justify-between gap-3">
-                          <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{t("projectImpact.suggestedReviewersTitle")}</div>
-                          <div className="text-[11px] text-muted-foreground">{t("projectImpact.validationItemsCount", { count: String(reviewers.length) })}</div>
+                        <div className="space-y-3">
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{t("projectImpact.suggestedReviewersTitle")}</div>
+                            <div className="text-[11px] text-muted-foreground">{t("projectImpact.validationItemsCount", { count: String(reviewers.length) })}</div>
+                          </div>
+                          <ReviewerSuggestionList items={reviewers.map((item) => ({
+                            label: `${t("projectImpact.reviewerPrefix")}${item.label}`,
+                            detail: item.detail,
+                          }))} />
                         </div>
-                        <TagList items={reviewers.map((item) => `${t("projectImpact.reviewerPrefix")}${item}`)} />
-                      </div>
-                    </section>
+                      </section>
 
-                    <section className="space-y-3">
-                      <div className="text-sm font-semibold text-foreground">{t("projectImpact.projectSnapshot")}</div>
-                      <div className="space-y-3 rounded-xl border bg-muted/10 px-4 py-3">
-                        <div className="text-sm text-foreground">
-                          <span className="font-medium">{t("projectImpact.indexableFilesLabel")}</span>{" "}
-                          <span className="text-muted-foreground">{totalIndexableFiles > 0 ? totalIndexableFiles : "—"}</span>
+                      <section className="space-y-3">
+                        <div className="text-sm font-semibold text-foreground">{t("projectImpact.projectSnapshot")}</div>
+                        <div className="space-y-3 rounded-xl border bg-muted/10 px-4 py-3">
+                          <div className="text-sm text-foreground">
+                            <span className="font-medium">{t("projectImpact.indexableFilesLabel")}</span>{" "}
+                            <span className="text-muted-foreground">{totalIndexableFiles > 0 ? totalIndexableFiles : "—"}</span>
+                          </div>
+                          <div className="space-y-2">
+                            <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{t("projectImpact.topLevelAreas")}</div>
+                            <TagList items={topLevelAreas} />
+                          </div>
                         </div>
-                        <div className="space-y-2">
-                          <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{t("projectImpact.topLevelAreas")}</div>
-                          <TagList items={topLevelAreas} />
-                        </div>
-                      </div>
-                    </section>
+                      </section>
+                    </div>
                   </div>
                 </div>
 

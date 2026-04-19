@@ -293,6 +293,125 @@ VALIDATION_TEMPLATES: dict[str, str] = {
 }
 
 
+FILE_ROLE_RULES: tuple[tuple[str, str], ...] = (
+    ("backend/app/automation.py", "提交影响分析生成与自动化链路"),
+    ("backend/app/webhook.py", "Webhook 入口与任务触发链路"),
+    ("backend/app/content_locale.py", "内容语言与回退映射"),
+    ("frontend/src/pages/project-detail/ProjectImpactTab.tsx", "项目详情中的提交影响展示页"),
+    ("frontend/src/i18n/strings.ts", "前端多语言文案映射"),
+    ("frontend/src/pages/jobs/", "任务中心与执行过程展示"),
+)
+
+
+CATEGORY_LABELS: dict[str, str] = {
+    "job_orchestration": "任务编排",
+    "webhook_contract": "Webhook 载荷",
+    "state_transition": "状态分支",
+    "api_contract": "接口契约",
+    "data_persistence": "数据持久化",
+    "frontend_async": "前端异步状态",
+    "localization": "国际化与回退",
+    "security_sensitive": "安全敏感逻辑",
+}
+
+
+def _file_role_for_path(path: str) -> str:
+    normalized = normalize_index_path(path)
+    lowered = normalized.lower()
+    for prefix, label in FILE_ROLE_RULES:
+        if lowered.startswith(prefix.lower()):
+            return label
+    if lowered.startswith("backend/app/"):
+        return "后端业务逻辑"
+    if lowered.startswith("frontend/src/pages/"):
+        return "前端页面逻辑"
+    if lowered.startswith("frontend/src/"):
+        return "前端应用逻辑"
+    return _module_label_for_path(path)
+
+
+def _summarize_categories(categories: list[str]) -> str:
+    labels = [CATEGORY_LABELS.get(item, item) for item in categories if str(item).strip()]
+    return "、".join(labels[:3])
+
+
+def _extract_patch_evidence(patch: str, limit: int = 3) -> list[str]:
+    evidence: list[str] = []
+    for raw in patch.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("+++") or line.startswith("---") or line.startswith("@@"):
+            continue
+        if not (line.startswith("+") or line.startswith("-")):
+            continue
+        text = line[1:].strip()
+        if len(text) < 4:
+            continue
+        if text in {"{", "}", "(", ")", "[", "]"}:
+            continue
+        evidence.append(text[:180])
+        if len(evidence) >= limit:
+            break
+    return evidence
+
+
+def _infer_file_change_summary(path: str, categories: list[str], patch: str) -> str:
+    lowered = normalize_index_path(path).lower()
+    category_text = _summarize_categories(categories)
+    if lowered == "backend/app/automation.py":
+        return "这次改动集中在提交影响分析结果的生成方式上，补强了结构化输出与摘要组织逻辑。"
+    if lowered == "backend/app/webhook.py":
+        return "这次改动主要收敛在 webhook 事件解析与后续任务触发链路。"
+    if lowered == "backend/app/content_locale.py":
+        return "这次改动聚焦于内容语言判断、文案映射和默认回退策略。"
+    if lowered.endswith("projectimpacttab.tsx"):
+        return "这次改动主要重构了项目详情页中影响分析结果的展示编排与交互方式。"
+    if lowered.endswith("strings.ts"):
+        return "这次改动补充并调整了影响分析相关的前端展示文案与翻译映射。"
+    if "frontend_async" in categories:
+        return "这次改动涉及前端异步请求、轮询节奏或状态同步方式。"
+    if "api_contract" in categories:
+        return "这次改动触及接口字段组织、响应结构或数据模型映射。"
+    if "state_transition" in categories:
+        return "这次改动调整了状态判断、触发条件或控制流分支。"
+    if category_text:
+        return f"这次改动主要落在{category_text}相关行为上。"
+    if patch.strip():
+        return "这次改动主要体现在该文件内部实现细节的重组与调整。"
+    return "这次改动涉及该文件，但目前提取出的行为特征仍然有限。"
+
+
+def _infer_file_impact_summary(path: str, categories: list[str], patch: str, total_changes: int) -> str:
+    lowered = normalize_index_path(path).lower()
+    if lowered == "backend/app/automation.py":
+        return "这会改变影响分析结果的生成结构与摘要组织方式，若前后链路未同步，结果解释和输出可信度都可能受影响。"
+    if lowered == "backend/app/webhook.py":
+        return "这会影响 webhook 事件进入后续分析或任务链路的稳定性，重点要看触发条件和载荷兼容是否保持一致。"
+    if lowered == "backend/app/content_locale.py":
+        return "这会影响不同语言配置下分析文案的选择与回退效果，容易在多语言场景暴露展示不一致问题。"
+    if lowered.endswith("projectimpacttab.tsx"):
+        return "这会直接改变项目详情页消费和呈现影响分析结果的方式，重点关注新结构是否被完整读取、排序和展示。"
+    if lowered.endswith("strings.ts"):
+        return "这会直接影响新增字段、标题和提示文案能否正确显示，问题通常会体现在页面文案缺失或语言不一致上。"
+    if "api_contract" in categories and "frontend_async" in categories:
+        return "这类改动会同时波及页面取数与渲染逻辑，联调时要重点确认字段兼容、空值处理和状态一致性。"
+    if "api_contract" in categories:
+        return "这类改动容易影响上下游读取结果时的字段兼容、默认值处理和旧数据容忍度。"
+    if "job_orchestration" in categories or "webhook_contract" in categories:
+        return "这类改动更容易放大到自动化触发、执行顺序和结果记录链路，建议按真实流程回放验证。"
+    if "localization" in categories:
+        return "这类改动主要影响展示层文案与翻译回退，风险通常集中在可读性和一致性，而不是核心业务行为。"
+    if total_changes >= 80:
+        return "该文件改动面较大，更适合按关键场景扩大回归范围，避免只验证主路径而遗漏边界行为。"
+    if patch.strip():
+        return "该文件实现已经发生变化，建议结合实际调用链路确认影响是否停留在局部，还是会继续向上下游扩散。"
+    return "当前还没提炼出足够明确的影响模式，建议结合真实调用链路继续确认。"
+
+
+def _normalize_file_facts(diff_analysis: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = diff_analysis.get("file_facts") or []
+    return [row for row in rows if isinstance(row, dict)]
+
+
 def _extract_diff_facts(repo_dir: Path, base_commit: str, commit_sha: str, changed_files: list[str]) -> dict[str, Any]:
     name_status = _git_name_status(repo_dir, base_commit, commit_sha)
     numstat_rows = _git_numstat(repo_dir, base_commit, commit_sha)
@@ -343,6 +462,11 @@ def _extract_diff_facts(repo_dir: Path, base_commit: str, commit_sha: str, chang
             fact_lines.append("包含异常处理分支调整，需确认失败路径与回退行为")
             score += 1
 
+        role = _file_role_for_path(path)
+        categories = sorted(set(matched_categories))
+        evidence = _extract_patch_evidence(patch)
+        change_summary = _infer_file_change_summary(path, categories, patch)
+        impact_summary = _infer_file_impact_summary(path, categories, patch, total_changes)
         file_facts.append(
             {
                 "path": path,
@@ -351,9 +475,13 @@ def _extract_diff_facts(repo_dir: Path, base_commit: str, commit_sha: str, chang
                 "added": int(stat.get("added") or 0),
                 "deleted": int(stat.get("deleted") or 0),
                 "changes": total_changes,
-                "matched_categories": sorted(set(matched_categories)),
+                "matched_categories": categories,
                 "facts": fact_lines[:5],
                 "risk_score": score,
+                "file_role": role,
+                "change_summary": change_summary,
+                "impact_summary": impact_summary,
+                "evidence": evidence,
             }
         )
 
@@ -366,16 +494,15 @@ def _extract_diff_facts(repo_dir: Path, base_commit: str, commit_sha: str, chang
 
 def _build_change_facts(diff_analysis: dict[str, Any]) -> list[str]:
     facts: list[str] = []
-    for row in diff_analysis.get("file_facts") or []:
+    for row in _normalize_file_facts(diff_analysis):
         path = str(row.get("path") or "")
         status = str(row.get("status") or "M")
         added = int(row.get("added") or 0)
         deleted = int(row.get("deleted") or 0)
-        matched = row.get("matched_categories") or []
-        detail = "、".join(str(item) for item in matched[:3])
+        change_summary = str(row.get("change_summary") or "").strip()
         text = f"{path} 出现 {status} 变更（+{added}/-{deleted}）"
-        if detail:
-            text += f"，主要涉及 {detail}"
+        if change_summary:
+            text += f"，{change_summary}"
         facts.append(text)
         if len(facts) >= 6:
             break
@@ -383,50 +510,51 @@ def _build_change_facts(diff_analysis: dict[str, Any]) -> list[str]:
 
 
 def _build_diff_based_risks(diff_analysis: dict[str, Any], cross_system_impact: list[str]) -> tuple[str, list[str], list[str], list[str]]:
-    categories = diff_analysis.get("top_categories") or []
+    file_facts = sorted(
+        _normalize_file_facts(diff_analysis),
+        key=lambda row: (int(row.get("risk_score") or 0), int(row.get("changes") or 0)),
+        reverse=True,
+    )
+    direct_impacts: list[str] = []
     risk_reasons: list[str] = []
     validation_checks: list[str] = []
-    direct_impacts: list[str] = []
     score = 0
+    has_frontend = any(str(row.get("path") or "").startswith("frontend/") for row in file_facts)
+    has_backend = any(str(row.get("path") or "").startswith("backend/") for row in file_facts)
 
-    for row in categories[:4]:
-        category = str(row.get("category") or "").strip()
-        examples = row.get("examples") or []
-        if not category:
-            continue
-        template = RISK_REASON_TEMPLATES.get(category)
-        if template:
-            if examples:
-                risk_reasons.append(f"{template} 重点涉及：{', '.join(str(x) for x in examples[:2])}。")
-            else:
-                risk_reasons.append(template)
-        validation = VALIDATION_TEMPLATES.get(category)
-        if validation:
-            validation_checks.append(validation)
-        if category == "webhook_contract":
-            direct_impacts.append("提交影响分析或 issue 自动化是否触发，将依赖新的事件字段解析与 payload 兼容性。")
-        elif category == "job_orchestration":
-            direct_impacts.append("后台任务的入队、执行顺序或失败恢复行为可能随本次变更而改变。")
-        elif category == "api_contract":
-            direct_impacts.append("前后端或上下游之间的数据契约可能发生变化，需要联动确认字段兼容。")
-        elif category == "frontend_async":
-            direct_impacts.append("前端页面的加载、轮询或刷新时序可能改变，重点关注并发状态一致性。")
-        elif category == "data_persistence":
-            direct_impacts.append("分析结果、事件状态或历史记录的写入与读取行为可能受到影响。")
-        elif category == "localization":
-            direct_impacts.append("结果文案或语言回退逻辑可能变化，影响不同语言配置下的展示一致性。")
-        elif category == "state_transition":
-            direct_impacts.append("某些状态分支下的触发条件和后续行为可能与之前不同。")
-        score += int(row.get("score") or 0)
+    for row in file_facts[:5]:
+        path = str(row.get("path") or "").strip()
+        impact_summary = str(row.get("impact_summary") or "").strip()
+        change_summary = str(row.get("change_summary") or "").strip()
+        categories = [str(item) for item in (row.get("matched_categories") or []) if str(item).strip()]
+        score += int(row.get("risk_score") or 0)
+        if impact_summary:
+            direct_impacts.append(f"{path}：{impact_summary}")
+        if change_summary and impact_summary:
+            risk_reasons.append(f"{path} 中“{change_summary}”这类变更，意味着{impact_summary}")
+        elif impact_summary:
+            risk_reasons.append(f"{path} 的改动意味着{impact_summary}")
+        for category in categories[:2]:
+            validation = VALIDATION_TEMPLATES.get(category)
+            if validation:
+                validation_checks.append(validation)
+
+    if has_frontend and has_backend:
+        direct_impacts.append("本次改动同时覆盖后端结果生成与前端结果消费，项目影响分析的数据生成链路和页面呈现链路需要一起验证。")
+        risk_reasons.append("前后端同时变更时，如果结果结构、字段命名或空值处理没有同步，页面可能出现数据缺失、展示错位或解释不一致。")
+
+    if file_facts and all(str(row.get("path") or "").endswith("strings.ts") for row in file_facts):
+        direct_impacts = ["本次提交主要影响前端展示文案与翻译映射，属于低风险展示层变更。"]
+        risk_reasons = ["当前改动集中在翻译键和值本身，应重点检查新增字段标题、提示文案与多语言回退是否一致，不应夸大为核心业务逻辑风险。"]
 
     if cross_system_impact:
-        direct_impacts.extend(cross_system_impact[:2])
+        direct_impacts.extend(cross_system_impact[:1])
 
+    direct_impacts = list(dict.fromkeys(direct_impacts))[:5]
     risk_reasons = list(dict.fromkeys(risk_reasons))[:5]
     validation_checks = list(dict.fromkeys(validation_checks))[:5]
-    direct_impacts = list(dict.fromkeys(direct_impacts))[:5]
 
-    if score >= 8:
+    if score >= 9:
         risk_level = "high"
     elif score >= 4:
         risk_level = "medium"
@@ -582,9 +710,14 @@ def analyze_commit_impact(
         output_lang = "English" if normalize_content_lang(effective_content_language()) == "en" else "Chinese"
         system = (
             "You are a senior staff engineer performing project-wide commit impact analysis. "
-            "Base your reasoning on actual diff facts first, then infer the likely blast radius across modules, workflows, automation, and repository boundaries. "
+            "Base your reasoning on structured file-level diff facts first, then infer the likely blast radius across modules, workflows, automation, and repository boundaries. "
             "Return JSON with the fields: summary, impact_scope, risks, tests, reviewers, confidence, and optionally risk_level, changed_modules, affected_areas, cross_system_impact, verification_focus, change_facts, direct_impacts, risk_reasons. "
-            "Every risk and impact statement must be traceable to the provided diff_analysis or change_facts. Avoid generic statements that could apply to any commit. "
+            "Every risk and impact statement must be traceable to one or more files in diff_analysis.file_facts, especially file_role, change_summary, impact_summary, or evidence. "
+            "Do not output generic statements that could apply to any commit. If a change is mostly UI copy or display wiring, say so explicitly and keep the risk scoped to display behavior. "
+            "The summary field is an executive analysis brief, not a file-by-file change log. Summarize the overall nature of the change, the end-to-end impact, and the overall risk judgment. "
+            "For summary, do not enumerate file paths unless absolutely necessary, do not narrate implementation steps, and do not write like release notes or commit descriptions. "
+            "Prefer 2 compact paragraphs or 2-3 concise sentences: first explain what kind of change this is overall, then explain the overall impact/risk and what should be validated. "
+            "The summary should sound like an overall assessment for reviewers, not like a diff walkthrough. "
             "If you provide risk_level, it must be exactly one of: high, medium, low. Do not use any other wording, translations, or casing for risk_level. "
             f"Write all natural-language values in {output_lang}, but keep risk_level in English enum form."
         )

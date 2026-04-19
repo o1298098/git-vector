@@ -75,6 +75,8 @@ def save_impact_analysis_run(
     summary: dict[str, Any] | None = None,
 ) -> None:
     now = _utc_now_iso()
+    project_id_text = str(project_id or "").strip()
+    commit_sha_text = str(commit_sha or "").strip()
     try:
         summary_json = json.dumps(summary or {}, ensure_ascii=False)
     except Exception:
@@ -83,6 +85,11 @@ def save_impact_analysis_run(
         conn = _conn()
         try:
             _init(conn)
+            if project_id_text and commit_sha_text:
+                conn.execute(
+                    "DELETE FROM impact_analysis_runs WHERE project_id=? AND commit_sha=? AND job_id<>?",
+                    (project_id_text, commit_sha_text, str(job_id or "").strip()),
+                )
             conn.execute(
                 """
                 INSERT INTO impact_analysis_runs (
@@ -105,11 +112,11 @@ def save_impact_analysis_run(
                 """,
                 (
                     str(job_id or "").strip(),
-                    str(project_id or "").strip(),
+                    project_id_text,
                     str(repo_path or "").strip(),
                     str(repo_url or "").strip(),
                     str(branch or "").strip(),
-                    str(commit_sha or "").strip(),
+                    commit_sha_text,
                     str(base_commit_sha or "").strip(),
                     str(trigger_source or "").strip(),
                     str(risk_level or "unknown").strip() or "unknown",
