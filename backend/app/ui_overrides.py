@@ -38,7 +38,12 @@ ALLOWED_OVERRIDE_KEYS: frozenset[str] = frozenset({
     "azure_openai_version",
     "azure_openai_deployment",
     "gitlab_access_token",
+    "github_access_token",
+    "gitee_access_token",
     "git_https_username",
+    "gitlab_https_username",
+    "github_https_username",
+    "gitee_https_username",
     "wiki_enabled",
     "wiki_backend",
     "wiki_max_file_pages",
@@ -56,6 +61,8 @@ SECRET_KEYS: frozenset[str] = frozenset({
     "dify_api_key",
     "azure_openai_api_key",
     "gitlab_access_token",
+    "github_access_token",
+    "gitee_access_token",
 })
 
 

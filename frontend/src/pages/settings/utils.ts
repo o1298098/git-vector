@@ -37,7 +37,12 @@ export function respToForm(response: SettingsResponse): FormState {
     azure_openai_version: str("azure_openai_version"),
     azure_openai_deployment: str("azure_openai_deployment"),
     gitlab_access_token: fields.gitlab_access_token?.value === "***" ? "" : str("gitlab_access_token"),
+    github_access_token: fields.github_access_token?.value === "***" ? "" : str("github_access_token"),
+    gitee_access_token: fields.gitee_access_token?.value === "***" ? "" : str("gitee_access_token"),
     git_https_username: str("git_https_username"),
+    gitlab_https_username: str("gitlab_https_username"),
+    github_https_username: str("github_https_username"),
+    gitee_https_username: str("gitee_https_username"),
     wiki_enabled: wikiEnabled,
     wiki_backend: str("wiki_backend") || "mkdocs",
     wiki_max_file_pages: str("wiki_max_file_pages") || "5000",
@@ -80,6 +85,9 @@ export function buildPatch(
     "wiki_backend",
     "npm_registry",
     "git_https_username",
+    "gitlab_https_username",
+    "github_https_username",
+    "gitee_https_username",
   ];
   for (const key of keys) {
     if (initial[key] !== form[key]) patch[key] = form[key];

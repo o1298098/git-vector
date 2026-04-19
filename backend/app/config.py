@@ -26,14 +26,19 @@ class Settings(BaseSettings):
     # Gitea：与 GitHub 类似，验签头 X-Gitea-Signature（body 的 HMAC-SHA256 十六进制；未设置则跳过）
     gitea_webhook_secret: str = ""
     gitlab_access_token: str = ""
-    # 优先于 GITLAB_ACCESS_TOKEN：任意 Git 托管的 HTTPS 克隆令牌（PAT 等）
+    github_access_token: str = ""
+    gitee_access_token: str = ""
+    # 优先于分平台 token：任意 Git 托管的 HTTPS 克隆令牌（PAT 等）
     git_https_token: str = ""
-    # HTTPS 克隆时的用户名；默认 oauth2（GitLab）；GitHub 常用 x-access-token
+    # 通用 HTTPS 克隆用户名；未按平台配置时作为兜底
     git_https_username: str = ""
+    gitlab_https_username: str = ""
+    github_https_username: str = ""
+    gitee_https_username: str = ""
     # 概览「打开仓库」无任务记录时的兜底：与 project_id（path/with/namespace）拼接，如 https://gitlab.com
     gitlab_external_url: str = ""
-    # 索引 / Wiki 中 LLM 生成说明的语言：zh | en（默认中文）
-    content_language: str = "zh"
+    # 索引 / Wiki 中 LLM 生成说明的语言：zh | en（默认英文）
+    content_language: str = "en"
     dify_api_key: str = ""
     dify_base_url: str = "https://api.dify.ai/v1"
     # LLM 供应商：dify | azure_openai | openai（仅使用所选供应商）
@@ -95,7 +100,7 @@ class Settings(BaseSettings):
     @field_validator("content_language", mode="before")
     @classmethod
     def _normalize_content_language(cls, v: object) -> str:
-        s = str(v or "zh").strip().lower()
+        s = str(v or "en").strip().lower()
         return "en" if s.startswith("en") else "zh"
 
     @field_validator("embed_provider", mode="before")

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from typing import Any, Literal
+from urllib.parse import urlparse
 
 from app.config import Settings, settings
 from app.ui_overrides import load_overrides
@@ -116,21 +117,73 @@ def effective_gitlab_access_token() -> str:
     return _str_from_override("gitlab_access_token", settings.gitlab_access_token or "")
 
 
-def effective_git_https_token() -> str:
-    """HTTPS 克隆令牌：GIT_HTTPS_TOKEN 优先，否则 GITLAB_ACCESS_TOKEN / 界面 gitlab_access_token。"""
+def effective_github_access_token() -> str:
+    return _str_from_override("github_access_token", settings.github_access_token or "")
+
+
+def effective_gitee_access_token() -> str:
+    return _str_from_override("gitee_access_token", settings.gitee_access_token or "")
+
+
+def detect_git_provider(repo_url: str) -> str:
+    raw = str(repo_url or "").strip().lower()
+    if not raw:
+        return "generic"
+    if raw.startswith("git@"):
+        host_part = raw.split(":", 1)[0].split("@", 1)[-1]
+    else:
+        try:
+            parsed = urlparse(raw)
+            host_part = (parsed.hostname or "").lower()
+        except Exception:
+            host_part = ""
+    if host_part in ("github.com", "www.github.com") or host_part.endswith(".github.com"):
+        return "github"
+    if host_part in ("gitee.com", "www.gitee.com") or host_part.endswith(".gitee.com"):
+        return "gitee"
+    if host_part in ("gitlab.com", "www.gitlab.com") or host_part.endswith(".gitlab.com"):
+        return "gitlab"
+    return "generic"
+
+
+def effective_git_https_token(repo_url: str = "") -> str:
+    """HTTPS 克隆令牌：GIT_HTTPS_TOKEN 优先，否则按仓库提供商回退到对应 PAT。"""
     env_tok = (settings.git_https_token or "").strip()
     if env_tok:
         return env_tok
+    provider = detect_git_provider(repo_url)
+    if provider == "github":
+        return effective_github_access_token()
+    if provider == "gitee":
+        return effective_gitee_access_token()
     return effective_gitlab_access_token()
 
 
 def stored_git_https_username() -> str:
-    """界面/环境变量中的原始值；空字符串表示克隆时回退为 oauth2。"""
     return _str_from_override("git_https_username", settings.git_https_username or "")
 
 
-def effective_git_https_username() -> str:
-    u = stored_git_https_username().strip()
+def stored_gitlab_https_username() -> str:
+    return _str_from_override("gitlab_https_username", settings.gitlab_https_username or "")
+
+
+def stored_github_https_username() -> str:
+    return _str_from_override("github_https_username", settings.github_https_username or "")
+
+
+def stored_gitee_https_username() -> str:
+    return _str_from_override("gitee_https_username", settings.gitee_https_username or "")
+
+
+def effective_git_https_username(repo_url: str = "") -> str:
+    provider = detect_git_provider(repo_url)
+    if provider == "github":
+        u = stored_github_https_username().strip() or stored_git_https_username().strip()
+        return u if u else "x-access-token"
+    if provider == "gitee":
+        u = stored_gitee_https_username().strip() or stored_git_https_username().strip()
+        return u if u else "oauth2"
+    u = stored_gitlab_https_username().strip() or stored_git_https_username().strip()
     return u if u else "oauth2"
 
 
@@ -173,7 +226,7 @@ def effective_npm_registry() -> str:
 
 
 def effective_content_language() -> str:
-    raw = _str_from_override("content_language", settings.content_language or "zh")
+    raw = _str_from_override("content_language", settings.content_language or "en")
     return "en" if str(raw).strip().lower().startswith("en") else "zh"
 
 
@@ -241,7 +294,18 @@ def snapshot_for_api() -> dict[str, Any]:
             "value": sec_effective(effective_gitlab_access_token, "gitlab_access_token"),
             "source": field_source("gitlab_access_token"),
         },
+        "github_access_token": {
+            "value": sec_effective(effective_github_access_token, "github_access_token"),
+            "source": field_source("github_access_token"),
+        },
+        "gitee_access_token": {
+            "value": sec_effective(effective_gitee_access_token, "gitee_access_token"),
+            "source": field_source("gitee_access_token"),
+        },
         "git_https_username": {"value": stored_git_https_username().strip(), "source": field_source("git_https_username")},
+        "gitlab_https_username": {"value": stored_gitlab_https_username().strip(), "source": field_source("gitlab_https_username")},
+        "github_https_username": {"value": stored_github_https_username().strip(), "source": field_source("github_https_username")},
+        "gitee_https_username": {"value": stored_gitee_https_username().strip(), "source": field_source("gitee_https_username")},
         "wiki_enabled": {"value": effective_wiki_enabled(), "source": field_source("wiki_enabled")},
         "wiki_backend": {"value": effective_wiki_backend(), "source": field_source("wiki_backend")},
         "wiki_max_file_pages": {"value": effective_wiki_max_file_pages(), "source": field_source("wiki_max_file_pages")},
@@ -284,7 +348,12 @@ def env_defaults_for_api() -> dict[str, Any]:
         "azure_openai_version": s.azure_openai_version,
         "azure_openai_deployment": s.azure_openai_deployment,
         "gitlab_access_token": mask("gitlab_access_token"),
+        "github_access_token": mask("github_access_token"),
+        "gitee_access_token": mask("gitee_access_token"),
         "git_https_username": s.git_https_username or "",
+        "gitlab_https_username": s.gitlab_https_username or "",
+        "github_https_username": s.github_https_username or "",
+        "gitee_https_username": s.gitee_https_username or "",
         "wiki_enabled": bool(s.wiki_enabled),
         "wiki_backend": str(s.wiki_backend),
         "wiki_max_file_pages": int(s.wiki_max_file_pages),

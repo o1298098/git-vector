@@ -12,6 +12,8 @@ export const SECRET_KEYS = [
   "dify_api_key",
   "azure_openai_api_key",
   "gitlab_access_token",
+  "github_access_token",
+  "gitee_access_token",
 ] as const;
 
 export const SETTINGS_SECTIONS: { id: string; labelKey: string }[] = [
@@ -54,7 +56,12 @@ export type FormState = {
   azure_openai_version: string;
   azure_openai_deployment: string;
   gitlab_access_token: string;
+  github_access_token: string;
+  gitee_access_token: string;
   git_https_username: string;
+  gitlab_https_username: string;
+  github_https_username: string;
+  gitee_https_username: string;
   wiki_enabled: boolean;
   wiki_backend: string;
   wiki_max_file_pages: string;
@@ -83,7 +90,12 @@ export const EMPTY_FORM: FormState = {
   azure_openai_version: "",
   azure_openai_deployment: "",
   gitlab_access_token: "",
+  github_access_token: "",
+  gitee_access_token: "",
   git_https_username: "",
+  gitlab_https_username: "",
+  github_https_username: "",
+  gitee_https_username: "",
   wiki_enabled: true,
   wiki_backend: "mkdocs",
   wiki_max_file_pages: "5000",

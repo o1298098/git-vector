@@ -95,7 +95,12 @@ def _normalize_patch_item(key: str, raw: Any) -> Any:
         "azure_openai_version",
         "azure_openai_deployment",
         "gitlab_access_token",
+        "github_access_token",
+        "gitee_access_token",
         "git_https_username",
+        "gitlab_https_username",
+        "github_https_username",
+        "gitee_https_username",
         "npm_registry",
         "content_language",
     ):

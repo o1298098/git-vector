@@ -295,12 +295,41 @@ export function Settings() {
               <section id="settings-gitlab" className="scroll-mt-24 space-y-0">
                 <Card className="border shadow-sm">
                   <CardHeader className="border-b bg-muted/30 py-4">
-                    <CardTitle className="text-lg">{t("settings.gitlabTitle")}</CardTitle>
-                    <CardDescription>{t("settings.gitlabDesc")}</CardDescription>
+                    <CardTitle className="text-lg">HTTPS 凭据</CardTitle>
+                    <CardDescription>按 GitLab / GitHub / Gitee 分开配置，便于后续 webhook 与项目创建时识别仓库类型。</CardDescription>
                   </CardHeader>
-                  <CardContent className="space-y-5 p-4 pt-6 sm:p-6">
-                    {row("gitlab_access_token", t("settings.gitTokenLabel"), t("settings.gitTokenHint"), { secret: true })}
-                    {row("git_https_username", t("settings.gitHttpsUsername"), t("settings.gitHttpsUsernameHint"))}
+                  <CardContent className="space-y-8 p-4 pt-6 sm:p-6">
+                    <div className="space-y-5">
+                      <div className="space-y-1">
+                        <h3 className="text-base font-semibold">GitLab</h3>
+                        <p className="text-sm text-muted-foreground">GitLab 私有仓库建议填写 PAT；HTTPS 用户名默认回退为 oauth2。</p>
+                      </div>
+                      {row("gitlab_access_token", "GitLab PAT", "对应环境变量 GITLAB_ACCESS_TOKEN。", { secret: true })}
+                      {row("gitlab_https_username", "GitLab HTTPS 用户名（可选）", "默认 oauth2；如有特殊账号格式可覆盖。")}
+                    </div>
+                    <div className="space-y-5 border-t border-border/60 pt-6">
+                      <div className="space-y-1">
+                        <h3 className="text-base font-semibold">GitHub</h3>
+                        <p className="text-sm text-muted-foreground">GitHub 私有仓库建议填写 PAT；HTTPS 用户名默认回退为 x-access-token。</p>
+                      </div>
+                      {row("github_access_token", "GitHub PAT", "用于 GitHub HTTPS 克隆鉴权。", { secret: true })}
+                      {row("github_https_username", "GitHub HTTPS 用户名（可选）", "默认 x-access-token，也可填写你的 GitHub 用户名。")}
+                    </div>
+                    <div className="space-y-5 border-t border-border/60 pt-6">
+                      <div className="space-y-1">
+                        <h3 className="text-base font-semibold">Gitee</h3>
+                        <p className="text-sm text-muted-foreground">Gitee 私有仓库建议填写 PAT；HTTPS 用户名可按 Gitee 账户习惯覆盖。</p>
+                      </div>
+                      {row("gitee_access_token", "Gitee PAT", "用于 Gitee HTTPS 克隆鉴权。", { secret: true })}
+                      {row("gitee_https_username", "Gitee HTTPS 用户名（可选）", "默认 oauth2；如你的 Gitee 需要指定用户名可在这里配置。")}
+                    </div>
+                    <div className="space-y-5 border-t border-border/60 pt-6">
+                      <div className="space-y-1">
+                        <h3 className="text-base font-semibold">通用兜底</h3>
+                        <p className="text-sm text-muted-foreground">当仓库类型无法识别或你希望统一使用同一套 HTTPS 用户名时，会回退到这里。</p>
+                      </div>
+                      {row("git_https_username", "通用 HTTPS 用户名（可选）", "未命中平台专属用户名时使用；GitLab/Gitee 默认 oauth2，GitHub 默认 x-access-token。")}
+                    </div>
                   </CardContent>
                 </Card>
               </section>
