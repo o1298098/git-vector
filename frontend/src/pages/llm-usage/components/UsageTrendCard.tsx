@@ -52,6 +52,25 @@ export function UsageTrendCard({ trendRows, trendMode, trendChart }: UsageTrendC
         : trendChart.left + ((trendChart.right - trendChart.left) * activeIndex) / Math.max(1, trendRows.length - 1);
   const activeXPercent = activeX == null ? "50%" : `${(activeX / 1000) * 100}%`;
   const chartHeight = trendChart.axisBottom - trendChart.top;
+  const yAxisLabelLeft = `${((trendChart.left - 10) / 1000) * 100}%`;
+  const xAxisLabelTop = `${(228 / 240) * 100}%`;
+  const xAxisLabels = singlePoint
+    ? [{ key: "single", left: `${(trendChart.mid / 1000) * 100}%`, text: formatLabel(trendRows[0]?.day || ""), align: "center" as const }]
+    : [
+        { key: "start", left: `${(trendChart.left / 1000) * 100}%`, text: formatLabel(trendRows[0]?.day || ""), align: "left" as const },
+        {
+          key: "middle",
+          left: `${(trendChart.mid / 1000) * 100}%`,
+          text: formatLabel(trendRows[Math.floor((trendRows.length - 1) / 2)]?.day || ""),
+          align: "center" as const,
+        },
+        {
+          key: "end",
+          left: `${(trendChart.right / 1000) * 100}%`,
+          text: formatLabel(trendRows[trendRows.length - 1]?.day || ""),
+          align: "right" as const,
+        },
+      ];
   const promptY =
     activeRow == null ? null : trendChart.axisBottom - (chartHeight * Number(activeRow.prompt_tokens || 0)) / chartMax;
   const completionY =
@@ -125,10 +144,39 @@ export function UsageTrendCard({ trendRows, trendMode, trendChart }: UsageTrendC
                   </div>
                 </div>
               ) : null}
+              {trendChart.yTicks.map((tick) => (
+                <div
+                  key={`tick-label-${tick.y}`}
+                  className="pointer-events-none absolute -translate-y-1/2 text-[11px] leading-none text-muted-foreground/70"
+                  style={{ left: yAxisLabelLeft, top: `${(tick.y / 240) * 100}%`, transform: "translate(-100%, -50%)" }}
+                >
+                  {compactNum(tick.value)}
+                </div>
+              ))}
+              {xAxisLabels.map((label) => (
+                <div
+                  key={label.key}
+                  className="pointer-events-none absolute text-xs leading-none text-muted-foreground/80"
+                  style={{
+                    left: label.left,
+                    top: xAxisLabelTop,
+                    transform:
+                      label.align === "left"
+                        ? "translateX(0)"
+                        : label.align === "right"
+                          ? "translateX(-100%)"
+                          : "translateX(-50%)",
+                  }}
+                >
+                  {label.text}
+                </div>
+              ))}
               <svg
                 viewBox="0 0 1000 240"
-                preserveAspectRatio="xMidYMid meet"
+                preserveAspectRatio="none"
                 className="h-full w-full overflow-visible"
+                shapeRendering="geometricPrecision"
+                textRendering="geometricPrecision"
                 onMouseLeave={() => setHoverIndex(null)}
                 onMouseMove={(event) => {
                   const rect = event.currentTarget.getBoundingClientRect();
@@ -206,20 +254,6 @@ export function UsageTrendCard({ trendRows, trendMode, trendChart }: UsageTrendC
                     strokeDasharray="4 4"
                   />
                 ))}
-              {trendChart.yTicks.map((tick) => (
-                <text
-                  key={`tick-${tick.y}`}
-                  x={trendChart.left - 10}
-                  y={tick.y}
-                  textAnchor="end"
-                  dominantBaseline="middle"
-                  fill="currentColor"
-                  opacity="0.62"
-                  fontSize="11"
-                >
-                  {compactNum(tick.value)}
-                </text>
-              ))}
 
               <path d={trendChart.promptArea} fill="url(#usagePromptFill)" />
               <path d={trendChart.completionArea} fill="url(#usageCompletionFill)" />
@@ -262,23 +296,6 @@ export function UsageTrendCard({ trendRows, trendMode, trendChart }: UsageTrendC
                 <circle cx={trendChart.completionLast.x} cy={trendChart.completionLast.y} r="3" fill={COMPLETION_LINE_COLOR} />
               ) : null}
 
-                {singlePoint ? (
-                  <text x={trendChart.mid} y="228" textAnchor="middle" fill="currentColor" opacity="0.7" fontSize="12">
-                    {formatLabel(trendRows[0]?.day || "")}
-                  </text>
-                ) : (
-                  <>
-                    <text x={trendChart.left} y="228" textAnchor="start" fill="currentColor" opacity="0.7" fontSize="12">
-                      {formatLabel(trendRows[0]?.day || "")}
-                    </text>
-                    <text x={trendChart.mid} y="228" textAnchor="middle" fill="currentColor" opacity="0.7" fontSize="12">
-                      {formatLabel(trendRows[Math.floor((trendRows.length - 1) / 2)]?.day || "")}
-                    </text>
-                    <text x={trendChart.right} y="228" textAnchor="end" fill="currentColor" opacity="0.7" fontSize="12">
-                      {formatLabel(trendRows[trendRows.length - 1]?.day || "")}
-                    </text>
-                  </>
-                )}
               </svg>
             </div>
           </div>
