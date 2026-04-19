@@ -800,11 +800,13 @@ def _run_job_subprocess(job_id: str) -> None:
             result_payload: dict[str, Any] = {}
             success_message = "完成"
         elif latest_job.job_type == "impact_analysis":
-            from app.automation import analyze_local_commit
+            from app.automation import analyze_commit_impact
             from app.vector_project_index_repo import _upsert_project_index_in_db, get_project_index_meta
 
-            store.update_job(job_id, progress=15, step="impact_analysis", message="Preparing local commit impact analysis")
-            result_payload = analyze_local_commit(
+            ensure_repo_latest = bool(payload.get("ensure_repo_latest"))
+            prep_message = "Preparing push webhook impact analysis" if ensure_repo_latest else "Preparing local commit impact analysis"
+            store.update_job(job_id, progress=15, step="impact_analysis", message=prep_message)
+            result_payload = analyze_commit_impact(
                 project_id=latest_job.project_id,
                 repo_path=str(payload.get("repo_path") or ""),
                 repo_url=latest_job.repo_url,
@@ -814,6 +816,7 @@ def _run_job_subprocess(job_id: str) -> None:
                 author=str(payload.get("author") or ""),
                 message=str(payload.get("message") or ""),
                 trigger_source=str(payload.get("trigger_source") or "git_hook"),
+                ensure_repo_latest=ensure_repo_latest,
                 job_id=job_id,
             )
             meta = get_project_index_meta(latest_job.project_id) or {}
@@ -823,7 +826,7 @@ def _run_job_subprocess(job_id: str) -> None:
                 latest_job.project_name,
                 last_analyzed_commit=str(result_payload.get("commit_sha") or ""),
                 last_impact_job_id=job_id,
-                last_local_repo_path=str(payload.get("repo_path") or ""),
+                last_local_repo_path=str(result_payload.get("repo_path") or payload.get("repo_path") or ""),
             )
             success_message = "Impact analysis completed"
         elif latest_job.job_type == "issue_reply":

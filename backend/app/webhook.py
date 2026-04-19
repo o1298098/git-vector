@@ -41,6 +41,15 @@ class LocalCommitBody(BaseModel):
     trigger_source: str = Field("git_hook", description="触发来源")
 
 
+class PushImpactBody(BaseModel):
+    branch: str = Field("", description="branch name")
+    commit_sha: str = Field(..., description="head commit sha")
+    parent_commit_sha: str = Field("", description="base commit sha")
+    author: str = Field("", description="commit author")
+    message: str = Field("", description="commit message")
+    trigger_source: str = Field("push_webhook", description="trigger source")
+
+
 class IssueEventBody(BaseModel):
     provider: str = Field("generic", description="事件来源平台")
     project_id: str = Field(..., description="项目标识")
@@ -67,11 +76,45 @@ class IssueEventBody(BaseModel):
     source: str = Field("webhook", description="消息来源")
 
 
+def _extract_push_impact_payload(data: dict[str, Any]) -> PushImpactBody | None:
+    after = str(data.get("after") or data.get("head_commit", {}).get("id") or "").strip()
+    if not after or set(after) == {"0"}:
+        return None
+    before = str(data.get("before") or "").strip()
+    if set(before) == {"0"}:
+        before = ""
+    head_commit = data.get("head_commit") or {}
+    commits = data.get("commits") or []
+    latest_commit = head_commit if isinstance(head_commit, dict) and head_commit else (commits[-1] if isinstance(commits, list) and commits else {})
+    author_info = latest_commit.get("author") or {}
+    author = str(
+        author_info.get("name")
+        or author_info.get("username")
+        or data.get("user_name")
+        or data.get("pusher", {}).get("name")
+        or data.get("sender", {}).get("login")
+        or ""
+    ).strip()
+    message = str(latest_commit.get("message") or data.get("head_commit", {}).get("message") or "").strip()
+    ref = str(data.get("ref") or "").strip()
+    branch = ref.split("/")[-1] if ref else ""
+    return PushImpactBody(
+        branch=branch,
+        commit_sha=after,
+        parent_commit_sha=before,
+        author=author,
+        message=message,
+        trigger_source="push_webhook",
+    )
+
+
 def _enqueue_if_main_branch(
     ref: str,
     repo_url: Optional[str],
     project_id: str,
     project_name: str,
+    *,
+    impact: PushImpactBody | None = None,
 ) -> dict[str, Any]:
     if not ref.endswith("/main") and not ref.endswith("/master"):
         return {"status": "ignored", "reason": f"ref not main/master: {ref}"}
@@ -79,17 +122,37 @@ def _enqueue_if_main_branch(
         raise HTTPException(status_code=400, detail="Missing repository URL")
 
     pname = resolve_project_display_name_for_enqueue(str(project_id), project_name)
-    job = get_job_queue().enqueue(
+    index_job = get_job_queue().enqueue(
         project_id=str(project_id),
         repo_url=str(repo_url),
         project_name=pname,
         job_type="index",
     )
+    impact_job = None
+    if impact is not None and str(impact.commit_sha or "").strip():
+        impact_payload = {
+            "branch": impact.branch,
+            "commit_sha": impact.commit_sha,
+            "parent_commit_sha": impact.parent_commit_sha,
+            "author": impact.author,
+            "message": impact.message,
+            "trigger_source": impact.trigger_source,
+            "ensure_repo_latest": True,
+        }
+        impact_job = get_job_queue().enqueue(
+            project_id=str(project_id),
+            repo_url=str(repo_url),
+            project_name=pname,
+            job_type="impact_analysis",
+            payload=impact_payload,
+        )
     return {
         "status": "queued",
         "project_id": project_id,
         "project_name": pname or None,
-        "job_id": job.job_id,
+        "job_id": index_job.job_id,
+        "index_job_id": index_job.job_id,
+        "impact_job_id": impact_job.job_id if impact_job else None,
     }
 
 
@@ -539,7 +602,13 @@ async def gitlab_webhook(
         project_id = str(project.get("id") or "unknown")
     project_name = str(project.get("name") or "").strip()
 
-    return _enqueue_if_main_branch(ref, repo_url, str(project_id), project_name)
+    return _enqueue_if_main_branch(
+        ref,
+        repo_url,
+        str(project_id),
+        project_name,
+        impact=_extract_push_impact_payload(data),
+    )
 
 
 @router.post("/github")
@@ -580,7 +649,13 @@ async def github_webhook(
         project_id = str(repo.get("name") or repo.get("id") or "unknown")
     project_name = str(repo.get("name") or "").strip()
 
-    return _enqueue_if_main_branch(ref, repo_url, str(project_id), project_name)
+    return _enqueue_if_main_branch(
+        ref,
+        repo_url,
+        str(project_id),
+        project_name,
+        impact=_extract_push_impact_payload(data),
+    )
 
 
 @router.post("/gitea")
@@ -617,4 +692,10 @@ async def gitea_webhook(
     project_id = repo.get("full_name") or repo.get("name") or "unknown"
     project_name = str(repo.get("name") or "").strip()
 
-    return _enqueue_if_main_branch(ref, repo_url, str(project_id), project_name)
+    return _enqueue_if_main_branch(
+        ref,
+        repo_url,
+        str(project_id),
+        project_name,
+        impact=_extract_push_impact_payload(data),
+    )

@@ -12,7 +12,7 @@ from app.effective_settings import effective_llm_provider, effective_openai_mode
 from app.impact_repo import save_impact_analysis_run
 from app.issue_poster import post_issue_comment
 from app.issue_rules_repo import get_issue_reply_rules
-from app.indexer import collect_code_files, normalize_index_path
+from app.indexer import _repo_dir, clone_or_pull, collect_code_files, normalize_index_path
 from app.project_issue_repo import append_issue_message, get_project_issue, update_issue_reply_state
 from app.llm_client import get_llm_client
 from app.llm_usage import record_llm_usage
@@ -126,10 +126,9 @@ def _recall_related_context(project_id: str, changed_files: list[str], top_k: in
     return dedup[:top_k]
 
 
-def analyze_local_commit(
+def analyze_commit_impact(
     *,
     project_id: str,
-    repo_path: str,
     repo_url: str,
     branch: str,
     commit_sha: str,
@@ -138,8 +137,16 @@ def analyze_local_commit(
     message: str,
     trigger_source: str,
     job_id: str,
+    repo_path: str = "",
+    ensure_repo_latest: bool = False,
 ) -> dict[str, Any]:
-    repo_dir = Path(repo_path)
+    repo_dir = Path(repo_path).expanduser() if str(repo_path or "").strip() else _repo_dir(project_id)
+    if ensure_repo_latest:
+        if not str(repo_url or "").strip():
+            raise RuntimeError("repo_url is required when ensure_repo_latest is enabled")
+        repo_dir = clone_or_pull(repo_url, project_id)
+    if not repo_dir.exists():
+        raise RuntimeError(f"repository mirror not found: {repo_dir}")
     changed_files = _git_changed_files(repo_dir, parent_commit_sha, commit_sha)
     if not changed_files and commit_sha:
         changed_files = [normalize_index_path(p) for p in _run_git(repo_dir, "show", "--pretty=", "--name-only", commit_sha).splitlines() if p.strip()]
@@ -151,6 +158,7 @@ def analyze_local_commit(
     risk_level = _infer_risk(changed_files)
     summary = {
         "project_id": project_id,
+        "repo_path": str(repo_dir),
         "branch": branch,
         "commit_sha": commit_sha,
         "base_commit_sha": parent_commit_sha,
@@ -199,7 +207,7 @@ def analyze_local_commit(
             append_audit_event(
                 event_type="impact_analysis.llm_failed",
                 actor="system",
-                route="automation.analyze_local_commit",
+                route="automation.analyze_commit_impact",
                 method="POST",
                 resource_type="impact_analysis",
                 resource_id=job_id,
@@ -218,7 +226,7 @@ def analyze_local_commit(
     save_impact_analysis_run(
         job_id=job_id,
         project_id=project_id,
-        repo_path=repo_path,
+        repo_path=str(repo_dir),
         repo_url=repo_url,
         branch=branch,
         commit_sha=commit_sha,
@@ -231,7 +239,7 @@ def analyze_local_commit(
     append_audit_event(
         event_type="impact_analysis.completed",
         actor="system",
-        route="automation.analyze_local_commit",
+        route="automation.analyze_commit_impact",
         method="POST",
         resource_type="impact_analysis",
         resource_id=job_id,

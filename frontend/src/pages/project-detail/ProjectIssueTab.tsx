@@ -346,16 +346,15 @@ export function ProjectIssueTab() {
       </Card>
 
       <Card className="flex h-[calc(100vh-96px)] min-w-0 min-h-0 flex-col shadow-sm">
-        <CardHeader className="flex flex-row items-center justify-between space-y-0">
+        <CardHeader className="flex flex-row items-center justify-between space-y-0 px-5">
           <div>
             <CardTitle className="text-base">{t("projectIssue.issueListTitle")}</CardTitle>
           </div>
-          <Button variant="outline" size="sm" onClick={() => void load()} disabled={loading}>
+          <Button variant="outline" size="icon" onClick={() => void load()} disabled={loading} aria-label={t("common.refresh")}>
             <RefreshCw className="size-4" aria-hidden />
-            {t("common.refresh")}
           </Button>
         </CardHeader>
-        <CardContent className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
+        <CardContent className="min-h-0 flex-1 space-y-2 overflow-y-auto px-5 pb-5">
           {issues.length === 0 ? (
             <div className="rounded-md border border-dashed px-4 py-6 text-sm text-muted-foreground">{t("projectIssue.empty")}</div>
           ) : (
@@ -382,7 +381,7 @@ export function ProjectIssueTab() {
       </Card>
 
       <Card className="flex h-[calc(100vh-96px)] min-w-0 min-h-0 flex-col shadow-sm">
-        <CardHeader className="space-y-3">
+        <CardHeader className="space-y-3 px-5">
           <div>
             <CardTitle className="text-base">{t("projectIssue.detailTitle")}</CardTitle>
             <CardDescription>
@@ -405,7 +404,7 @@ export function ProjectIssueTab() {
             </div>
           ) : null}
         </CardHeader>
-        <CardContent className="min-h-0 flex flex-1 flex-col space-y-4 overflow-hidden pr-1 text-sm">
+        <CardContent className="min-h-0 flex flex-1 flex-col space-y-4 overflow-hidden px-5 pb-5 text-sm">
           {selectedIssue ? (
             <div className="flex min-h-0 flex-1 flex-col space-y-4">
               {selectedIssue.labels.length > 0 ? (
