@@ -161,16 +161,44 @@ def _path_segments(path: str) -> list[str]:
     return [segment for segment in normalized.split("/") if segment]
 
 
-MODULE_LABEL_OVERRIDES: tuple[tuple[str, str], ...] = (
-    ("frontend/src/pages/", "frontend pages"),
-    ("frontend/src/components/", "frontend components"),
-    ("frontend/src/", "frontend app"),
-    ("backend/app/", "backend app"),
-    ("backend/", "backend services"),
-    ("docs/", "documentation"),
-    ("scripts/", "automation scripts"),
-    ("tests/", "tests"),
-)
+MODULE_LABEL_CONTAINER_SEGMENTS: set[str] = {
+    "src",
+    "app",
+    "lib",
+    "pkg",
+    "internal",
+    "cmd",
+    "packages",
+    "services",
+    "modules",
+}
+
+MODULE_LABEL_IGNORED_LEAF_SEGMENTS: set[str] = {
+    "components",
+    "pages",
+    "views",
+    "routes",
+    "controllers",
+    "handlers",
+    "utils",
+    "helpers",
+    "common",
+    "shared",
+}
+
+TOP_LEVEL_ROLE_HINTS: dict[str, str] = {
+    "docs": "documentation",
+    "scripts": "automation scripts",
+    "tests": "tests",
+    "test": "tests",
+    "spec": "tests",
+    "specs": "tests",
+    "migrations": "migrations",
+    "deploy": "deployment",
+    "ops": "operations",
+    "infra": "infrastructure",
+    "config": "configuration",
+}
 
 
 AREA_KEYWORDS: tuple[tuple[str, str], ...] = (
@@ -193,18 +221,45 @@ AREA_KEYWORDS: tuple[tuple[str, str], ...] = (
 
 def _module_label_for_path(path: str) -> str:
     normalized = normalize_index_path(path)
-    lowered = normalized.lower()
-    for prefix, label in MODULE_LABEL_OVERRIDES:
-        if lowered.startswith(prefix):
-            suffix = normalized[len(prefix) :].strip("/")
-            if suffix:
-                first = suffix.split("/", 1)[0].replace("-", " ").replace("_", " ").strip()
-                if first:
-                    return f"{label} / {first}"
-            return label
     segments = _path_segments(normalized)
-    if len(segments) >= 2:
-        return " / ".join(segments[:2])
+    if not segments:
+        return normalized or "unknown"
+
+    lowered_segments = [segment.lower() for segment in segments]
+    first = lowered_segments[0]
+    if first in TOP_LEVEL_ROLE_HINTS and len(segments) == 1:
+        return TOP_LEVEL_ROLE_HINTS[first]
+
+    selected: list[str] = []
+    index = 0
+    while index < len(segments) and len(selected) < 2:
+        raw_segment = segments[index]
+        lowered = lowered_segments[index]
+
+        if not selected:
+            selected.append(raw_segment)
+            index += 1
+            continue
+
+        if lowered in MODULE_LABEL_CONTAINER_SEGMENTS:
+            index += 1
+            continue
+
+        if lowered in MODULE_LABEL_IGNORED_LEAF_SEGMENTS and index + 1 < len(segments):
+            next_segment = segments[index + 1]
+            selected.append(next_segment)
+            index += 2
+            continue
+
+        selected.append(raw_segment)
+        index += 1
+
+    if len(selected) == 1 and first in TOP_LEVEL_ROLE_HINTS:
+        return TOP_LEVEL_ROLE_HINTS[first]
+
+    cleaned = [segment.replace("-", " ").replace("_", " ").strip() for segment in selected if segment.strip()]
+    if cleaned:
+        return " / ".join(cleaned[:2])
     return normalized or "unknown"
 
 
@@ -230,42 +285,69 @@ def _infer_affected_areas(changed_files: list[str], changed_modules: list[str], 
         if keyword in joined and label not in seen:
             seen.add(label)
             areas.append(label)
+
     if not areas:
-        if any(path.startswith("frontend/") for path in changed_files):
-            areas.append("frontend behavior")
-        if any(path.startswith("backend/") for path in changed_files):
-            areas.append("backend behavior")
-        if not areas:
-            areas.append("repository structure")
+        for module in changed_modules:
+            module_text = str(module).strip()
+            if not module_text or module_text.lower() in seen:
+                continue
+            seen.add(module_text.lower())
+            areas.append(module_text)
+            if len(areas) >= limit:
+                break
+
+    if not areas:
+        top_levels = []
+        for path in changed_files:
+            segments = _path_segments(path)
+            if not segments:
+                continue
+            top = segments[0].replace("-", " ").replace("_", " ").strip()
+            if not top:
+                continue
+            top_levels.append(top)
+        for top in list(dict.fromkeys(top_levels))[:limit]:
+            areas.append(f"{top} area")
+
+    if not areas:
+        areas.append("repository structure")
     return areas[:limit]
 
 
 def _infer_cross_system_impact(changed_files: list[str], changed_modules: list[str], affected_areas: list[str]) -> list[str]:
     impacts: list[str] = []
-    has_frontend = any(path.startswith("frontend/") for path in changed_files)
-    has_backend = any(path.startswith("backend/") for path in changed_files)
-    if has_frontend and has_backend:
-        impacts.append("Crosses frontend and backend boundaries")
-    if any("webhook" in value.lower() for value in changed_files + changed_modules + affected_areas):
-        impacts.append("Can affect remote event ingestion and downstream automation")
-    if any("queue" in value.lower() or "job" in value.lower() for value in changed_files + changed_modules + affected_areas):
-        impacts.append("May change background job execution and retry behavior")
-    if any("index" in value.lower() or "vector" in value.lower() for value in changed_files + changed_modules + affected_areas):
+    top_levels = {
+        _path_segments(path)[0].lower()
+        for path in changed_files
+        if _path_segments(path)
+    }
+    joined_values = changed_files + changed_modules + affected_areas
+    lowered_values = [value.lower() for value in joined_values]
+
+    if len(top_levels) >= 2:
+        impacts.append("Spans multiple top-level areas of the repository")
+    if any("webhook" in value or "event" in value for value in lowered_values):
+        impacts.append("Can affect external event intake and downstream automation")
+    if any("queue" in value or "job" in value or "worker" in value for value in lowered_values):
+        impacts.append("May change background execution, scheduling, or retry behavior")
+    if any("index" in value or "vector" in value or "search" in value or "retrieve" in value for value in lowered_values):
         impacts.append("May influence indexing, retrieval, or analysis quality")
-    if any("setting" in value.lower() or "config" in value.lower() for value in changed_files + changed_modules + affected_areas):
+    if any("setting" in value or "config" in value or "env" in value for value in lowered_values):
         impacts.append("Configuration-sensitive behavior should be revalidated")
+    if any("api" in value or "contract" in value or "schema" in value for value in lowered_values):
+        impacts.append("Contract compatibility across callers and consumers should be rechecked")
     return impacts[:4]
 
 
 DIFF_FACT_PATTERNS: tuple[tuple[str, str, str, int], ...] = (
-    (r"^[+-].*\b(enqueue|job_type|retry|worker|queue)\b", "job_orchestration", "涉及任务入队、执行或重试相关逻辑变更", 2),
-    (r"^[+-].*\b(webhook|issue_comment|issue event|push event|signature|payload)\b", "webhook_contract", "涉及 webhook 或事件载荷解析逻辑变更", 2),
-    (r"^[+-].*\b(status|state|should_trigger|should_auto_post|if\s+not|elif|else:)\b", "state_transition", "涉及状态判断、触发条件或控制流变更", 2),
-    (r"^[+-].*\b(return\s+\{|response|json|Field\(|model_dump|model_validate)\b", "api_contract", "涉及接口字段、返回结构或数据模型变更", 2),
-    (r"^[+-].*\b(insert|update|delete|sqlite|database|schema|sql)\b", "data_persistence", "涉及数据库写入、查询或持久化逻辑变更", 3),
-    (r"^[+-].*\b(fetch|apiJson|AbortController|setInterval|clearInterval|localStorage|useEffect)\b", "frontend_async", "涉及前端异步请求、轮询或本地状态管理变更", 2),
-    (r"^[+-].*\b(content lang|locale|language|i18n|translate|fallback)\b", "localization", "涉及语言映射、国际化或回退逻辑变更", 1),
-    (r"^[+-].*\b(auth|permission|token|secret|credential|password)\b", "security_sensitive", "涉及认证、凭据或敏感权限逻辑变更", 3),
+    (r"^[+-].*\b(enqueue|job_type|retry|worker|queue)\b", "job_orchestration", "job_orchestration", 2),
+    (r"^[+-].*\b(webhook|issue_comment|issue event|push event|signature|payload)\b", "webhook_contract", "webhook_contract", 2),
+    (r"^[+-].*\b(status|state|should_trigger|should_auto_post|if\s+not|elif|else:)\b", "state_transition", "state_transition", 2),
+    (r"^[+-].*\b(return\s+\{|response|json|Field\(|model_dump|model_validate)\b", "api_contract", "api_contract", 2),
+    (r"^[+-].*\b(insert|update|delete|sqlite|database|schema|sql)\b", "data_persistence", "data_persistence", 3),
+    (r"^[+-].*\b(fetch|apiJson|AbortController|setInterval|clearInterval|localStorage|useEffect)\b", "frontend_async", "frontend_async", 2),
+    (r"^[+-].*\b(content lang|locale|language|i18n|translate|fallback)\b", "localization", "localization", 1),
+    (r"^[+-].*\b(auth|permission|token|secret|credential|password)\b", "security_sensitive", "security_sensitive", 3),
 )
 
 
@@ -315,24 +397,195 @@ CATEGORY_LABELS: dict[str, str] = {
 }
 
 
+IMPACT_I18N: dict[str, dict[str, Any]] = {
+    "zh": {
+        "category_labels": {
+            "job_orchestration": "任务编排",
+            "webhook_contract": "Webhook 载荷",
+            "state_transition": "状态分支",
+            "api_contract": "接口契约",
+            "data_persistence": "数据持久化",
+            "frontend_async": "前端异步状态",
+            "localization": "国际化与回退",
+            "security_sensitive": "安全敏感逻辑",
+        },
+        "default_backend_app_role": "后端业务逻辑",
+        "default_frontend_page_role": "前端页面逻辑",
+        "default_frontend_app_role": "前端应用逻辑",
+        "change_summary": {
+            "frontend_async": "这次改动涉及前端异步请求、轮询节奏或状态同步方式。",
+            "api_contract": "这次改动触及接口字段组织、响应结构或数据模型映射。",
+            "state_transition": "这次改动调整了状态判断、触发条件或控制流分支。",
+            "job_orchestration": "这次改动涉及任务编排、执行顺序或后台流程衔接。",
+            "webhook_contract": "这次改动涉及事件载荷解析或外部事件接入约定。",
+            "data_persistence": "这次改动涉及数据写入、读取或持久化处理逻辑。",
+            "localization": "这次改动涉及语言映射、翻译回退或多语言内容组织。",
+            "security_sensitive": "这次改动涉及认证、权限或敏感能力边界。",
+            "category_generic": "这次改动主要落在{category_text}相关行为上。",
+            "patch_generic": "这次改动主要体现在该文件内部实现细节的重组与调整。",
+            "fallback": "这次改动涉及该文件，但目前提取出的行为特征仍然有限。",
+        },
+        "impact_summary": {
+            "api_and_frontend": "这类改动会同时波及页面取数与渲染逻辑，联调时要重点确认字段兼容、空值处理和状态一致性。",
+            "api_contract": "这类改动容易影响上下游读取结果时的字段兼容、默认值处理和旧数据容忍度。",
+            "job_orchestration_or_webhook": "这类改动更容易放大到自动化触发、执行顺序和结果记录链路，建议按真实流程回放验证。",
+            "localization": "这类改动主要影响展示层文案与翻译回退，风险通常集中在可读性和一致性，而不是核心业务行为。",
+            "security_sensitive": "这类改动可能影响访问控制、凭据处理或敏感能力边界，需要重点确认副作用是否被正确约束。",
+            "data_persistence": "这类改动可能影响历史数据兼容、读写一致性以及失败后的恢复或回滚行为。",
+            "state_transition": "这类改动可能影响状态流转、分支覆盖和触发条件，需重点确认边界场景是否仍符合预期。",
+            "large_change": "该文件改动面较大，更适合按关键场景扩大回归范围，避免只验证主路径而遗漏边界行为。",
+            "patch_generic": "该文件实现已经发生变化，建议结合实际调用链路确认影响是停留在局部，还是会继续向上下游扩散。",
+            "fallback": "当前还没提炼出足够明确的影响模式，建议结合真实调用链路继续确认。",
+        },
+        "fact_descriptions": {
+            "job_orchestration": "涉及任务入队、执行或重试相关逻辑变更",
+            "webhook_contract": "涉及 webhook 或事件载荷解析逻辑变更",
+            "state_transition": "涉及状态判断、触发条件或控制流变更",
+            "api_contract": "涉及接口字段、返回结构或数据模型变更",
+            "data_persistence": "涉及数据库写入、查询或持久化逻辑变更",
+            "frontend_async": "涉及前端异步请求、轮询或本地状态管理变更",
+            "localization": "涉及语言映射、国际化或回退逻辑变更",
+            "security_sensitive": "涉及认证、凭据或敏感权限逻辑变更",
+            "high_risk_path": "文件路径命中敏感能力域，需要重点复核安全与权限相关副作用",
+            "large_file_change": "单文件改动行数较大，回归验证范围可能扩大",
+            "medium_file_change": "单文件存在中等规模改动，建议关注边界分支与兼容性",
+            "definition_change": "包含函数、类型或类定义调整，可能改变调用方契约或内部行为",
+            "exception_change": "包含异常处理分支调整，需确认失败路径与回退行为",
+        },
+        "change_fact_format": "{path} 出现 {status} 变更（+{added}/-{deleted}），{change_summary}",
+        "change_fact_format_no_summary": "{path} 出现 {status} 变更（+{added}/-{deleted}）",
+        "risk_reason_with_change": "{path} 中“{change_summary}”这类变更，意味着{impact_summary}",
+        "risk_reason_without_change": "{path} 的改动意味着{impact_summary}",
+        "cross_system_both": "本次改动同时覆盖后端结果生成与前端结果消费，项目影响分析的数据生成链路和页面呈现链路需要一起验证。",
+        "cross_system_both_risk": "前后端同时变更时，如果结果结构、字段命名或空值处理没有同步，页面可能出现数据缺失、展示错位或解释不一致。",
+        "strings_only_direct": "本次提交主要影响前端展示文案与翻译映射，属于低风险展示层变更。",
+        "strings_only_risk": "当前改动集中在翻译键和值本身，应重点检查新增字段标题、提示文案与多语言回退是否一致，不应夸大为核心业务逻辑风险。",
+        "verification_fallback": [
+            "验证直接改动模块及其相邻流程的回归行为",
+            "验证本次提交触及的高风险自动化、接口或数据链路",
+            "结合受影响模块检查跨模块副作用是否符合预期",
+        ],
+        "risk_reasons": RISK_REASON_TEMPLATES,
+        "validation_templates": VALIDATION_TEMPLATES,
+    },
+    "en": {
+        "category_labels": {
+            "job_orchestration": "job orchestration",
+            "webhook_contract": "webhook payload handling",
+            "state_transition": "state transitions",
+            "api_contract": "API contract",
+            "data_persistence": "data persistence",
+            "frontend_async": "frontend async state",
+            "localization": "localization and fallback",
+            "security_sensitive": "security-sensitive logic",
+        },
+        "default_backend_app_role": "backend business logic",
+        "default_frontend_page_role": "frontend page logic",
+        "default_frontend_app_role": "frontend application logic",
+        "change_summary": {
+            "frontend_async": "This change touches frontend async requests, polling cadence, or state synchronization behavior.",
+            "api_contract": "This change touches API field organization, response structure, or data model mapping.",
+            "state_transition": "This change adjusts state checks, trigger conditions, or control-flow branches.",
+            "job_orchestration": "This change touches job orchestration, execution order, or background workflow coordination.",
+            "webhook_contract": "This change touches event payload parsing or external event integration contracts.",
+            "data_persistence": "This change touches data writes, reads, or persistence handling logic.",
+            "localization": "This change touches language mapping, translation fallback, or multilingual content organization.",
+            "security_sensitive": "This change touches authentication, authorization, or sensitive capability boundaries.",
+            "category_generic": "This change mainly affects behavior related to {category_text}.",
+            "patch_generic": "This change is primarily reflected in internal implementation refactoring and adjustments within this file.",
+            "fallback": "This change touches the file, but the extracted behavioral signals are still limited.",
+        },
+        "impact_summary": {
+            "api_and_frontend": "This kind of change can affect both data fetching and rendering logic, so integration testing should focus on field compatibility, null handling, and state consistency.",
+            "api_contract": "This kind of change can affect field compatibility, default handling, and tolerance for older data across upstream and downstream consumers.",
+            "job_orchestration_or_webhook": "This kind of change is more likely to expand into automation triggering, execution order, and result-recording flows, so it should be replayed and validated against real workflows.",
+            "localization": "This kind of change mainly affects display-layer copy and translation fallback. The risk is usually concentrated in readability and consistency rather than core business behavior.",
+            "security_sensitive": "This kind of change can affect access control, credential handling, or sensitive capability boundaries, so side effects should be reviewed carefully.",
+            "data_persistence": "This kind of change can affect historical compatibility, read/write consistency, and recovery or rollback behavior after failures.",
+            "state_transition": "This kind of change can affect state progression, branch coverage, and trigger conditions, so boundary scenarios should be verified carefully.",
+            "large_change": "This file changed substantially, so broader scenario-based regression coverage is more appropriate than validating only the happy path.",
+            "patch_generic": "Implementation in this file has changed. Validate whether the impact stays local or continues to propagate across upstream and downstream flows.",
+            "fallback": "There is not enough signal yet to derive a sharper impact pattern, so validate it against the real call flow.",
+        },
+        "fact_descriptions": {
+            "job_orchestration": "Touches logic related to job enqueueing, execution, or retries",
+            "webhook_contract": "Touches webhook or event payload parsing logic",
+            "state_transition": "Touches state checks, trigger conditions, or control flow",
+            "api_contract": "Touches API fields, response structure, or data models",
+            "data_persistence": "Touches database writes, queries, or persistence logic",
+            "frontend_async": "Touches frontend async requests, polling, or local state management",
+            "localization": "Touches language mapping, i18n, or fallback logic",
+            "security_sensitive": "Touches authentication, credentials, or sensitive permission logic",
+            "high_risk_path": "The file path hits a sensitive capability area and should receive closer review for security and permission side effects",
+            "large_file_change": "The file changed substantially, so regression scope may need to expand",
+            "medium_file_change": "The file has a medium-sized change set, so boundary branches and compatibility should be reviewed",
+            "definition_change": "Includes changes to functions, types, or class definitions, which may alter caller contracts or internal behavior",
+            "exception_change": "Includes changes to exception-handling branches, so failure paths and fallback behavior should be verified",
+        },
+        "change_fact_format": "{path} changed with status {status} (+{added}/-{deleted}), {change_summary}",
+        "change_fact_format_no_summary": "{path} changed with status {status} (+{added}/-{deleted})",
+        "risk_reason_with_change": "In {path}, a change like \"{change_summary}\" implies that {impact_summary}",
+        "risk_reason_without_change": "The change in {path} implies that {impact_summary}",
+        "cross_system_both": "This change spans both backend result generation and frontend result consumption, so the data-generation path and the page rendering path for project impact analysis should be validated together.",
+        "cross_system_both_risk": "When frontend and backend change together, any mismatch in result shape, field naming, or null handling can cause missing data, broken rendering, or inconsistent interpretation in the UI.",
+        "strings_only_direct": "This commit mainly affects frontend display copy and translation mappings, which is a low-risk presentation-layer change.",
+        "strings_only_risk": "The current change is concentrated in translation keys and values, so the focus should be on whether new field titles, helper copy, and multilingual fallback stay consistent rather than overstating it as core business-logic risk.",
+        "verification_fallback": [
+            "Validate regression behavior in the directly changed modules and their adjacent flows",
+            "Validate the higher-risk automation, API, or data paths touched by this commit",
+            "Check whether cross-module side effects remain within expectations for the affected modules",
+        ],
+        "risk_reasons": {
+            "job_orchestration": "This change touches job enqueueing, execution, or retry flows. If parameters or state propagation are inconsistent, it can lead to missed triggers, duplicate execution, or broken failure recovery.",
+            "webhook_contract": "This change touches webhook or event payload parsing. If payload compatibility across providers is incomplete, events may be dropped, fields may be missing, or downstream automation may fail to trigger.",
+            "state_transition": "This change adjusts state checks or trigger conditions. If branch coverage is incomplete, it can cause misclassification, duplicate triggering, or skipped flows that should have run.",
+            "api_contract": "This change touches API fields or response shape. If consumers are not updated compatibly, upstream and downstream systems may see missing fields, empty-state issues, or rendering errors.",
+            "data_persistence": "This change touches persistence logic. If written fields, query conditions, or compatibility handling are incomplete, historical reads, state consistency, or result integrity may be affected.",
+            "frontend_async": "This change touches frontend async requests, polling, or local state management. If concurrency or cleanup handling is incomplete, stale responses may overwrite fresh results, polling may duplicate, or the page may flicker.",
+            "localization": "This change touches language mapping or fallback logic, which may cause the default language to differ from expectations, mixed-language copy in some areas, or inconsistent result presentation.",
+            "security_sensitive": "This change touches authentication, credentials, or sensitive permission logic. If validation or fallback paths are not handled carefully, it can broaden access or expose sensitive behavior risks.",
+        },
+        "validation_templates": {
+            "job_orchestration": "Validate that related jobs are enqueued, executed, and finished as expected, and verify retry or cancellation behavior after failures.",
+            "webhook_contract": "Replay representative webhook events from the main providers and verify field extraction, automation triggering, and audit logging.",
+            "state_transition": "Cover key state branches such as opened, updated, closed, and retry to verify that boundary conditions neither over-trigger nor miss expected flows.",
+            "api_contract": "Integration-test upstream and downstream consumers to verify that new or changed fields are handled correctly for existing data, null values, and error responses.",
+            "data_persistence": "Validate create, update, and read paths, and confirm historical compatibility, idempotent updates, and failure rollback behavior.",
+            "frontend_async": "Rapidly switch filters, open and close dialogs, or refresh repeatedly to verify request cancellation, timer cleanup, and UI state consistency.",
+            "localization": "Validate rendered output under Chinese and English or other configured content-language settings, and confirm default fallback behavior and local copy consistency.",
+            "security_sensitive": "Validate unauthorized, boundary-permission, and sensitive-input scenarios to confirm that checks remain enforced and are not weakened by fallback behavior.",
+        },
+    },
+}
+
+
+def _impact_lang() -> str:
+    return normalize_content_lang(effective_content_language())
+
+
+def _impact_messages(lang: str | None = None) -> dict[str, Any]:
+    normalized = normalize_content_lang(lang or _impact_lang())
+    return IMPACT_I18N.get(normalized, IMPACT_I18N["zh"])
+
+
 def _file_role_for_path(path: str) -> str:
     normalized = normalize_index_path(path)
     lowered = normalized.lower()
-    for prefix, label in FILE_ROLE_RULES:
-        if lowered.startswith(prefix.lower()):
-            return label
+    messages = _impact_messages()
     if lowered.startswith("backend/app/"):
-        return "后端业务逻辑"
+        return messages["default_backend_app_role"]
     if lowered.startswith("frontend/src/pages/"):
-        return "前端页面逻辑"
+        return messages["default_frontend_page_role"]
     if lowered.startswith("frontend/src/"):
-        return "前端应用逻辑"
+        return messages["default_frontend_app_role"]
     return _module_label_for_path(path)
 
 
 def _summarize_categories(categories: list[str]) -> str:
-    labels = [CATEGORY_LABELS.get(item, item) for item in categories if str(item).strip()]
-    return "、".join(labels[:3])
+    labels_map = _impact_messages()["category_labels"]
+    labels = [labels_map.get(item, item) for item in categories if str(item).strip()]
+    separator = "、" if _impact_lang() == "zh" else ", "
+    return separator.join(labels[:3])
 
 
 def _extract_patch_evidence(patch: str, limit: int = 3) -> list[str]:
@@ -355,56 +608,52 @@ def _extract_patch_evidence(patch: str, limit: int = 3) -> list[str]:
 
 
 def _infer_file_change_summary(path: str, categories: list[str], patch: str) -> str:
-    lowered = normalize_index_path(path).lower()
     category_text = _summarize_categories(categories)
-    if lowered == "backend/app/automation.py":
-        return "这次改动集中在提交影响分析结果的生成方式上，补强了结构化输出与摘要组织逻辑。"
-    if lowered == "backend/app/webhook.py":
-        return "这次改动主要收敛在 webhook 事件解析与后续任务触发链路。"
-    if lowered == "backend/app/content_locale.py":
-        return "这次改动聚焦于内容语言判断、文案映射和默认回退策略。"
-    if lowered.endswith("projectimpacttab.tsx"):
-        return "这次改动主要重构了项目详情页中影响分析结果的展示编排与交互方式。"
-    if lowered.endswith("strings.ts"):
-        return "这次改动补充并调整了影响分析相关的前端展示文案与翻译映射。"
+    messages = _impact_messages()["change_summary"]
     if "frontend_async" in categories:
-        return "这次改动涉及前端异步请求、轮询节奏或状态同步方式。"
+        return messages["frontend_async"]
     if "api_contract" in categories:
-        return "这次改动触及接口字段组织、响应结构或数据模型映射。"
+        return messages["api_contract"]
     if "state_transition" in categories:
-        return "这次改动调整了状态判断、触发条件或控制流分支。"
+        return messages["state_transition"]
+    if "job_orchestration" in categories:
+        return messages["job_orchestration"]
+    if "webhook_contract" in categories:
+        return messages["webhook_contract"]
+    if "data_persistence" in categories:
+        return messages["data_persistence"]
+    if "localization" in categories:
+        return messages["localization"]
+    if "security_sensitive" in categories:
+        return messages["security_sensitive"]
     if category_text:
-        return f"这次改动主要落在{category_text}相关行为上。"
+        return str(messages["category_generic"]).format(category_text=category_text)
     if patch.strip():
-        return "这次改动主要体现在该文件内部实现细节的重组与调整。"
-    return "这次改动涉及该文件，但目前提取出的行为特征仍然有限。"
+        return messages["patch_generic"]
+    return messages["fallback"]
 
 
 def _infer_file_impact_summary(path: str, categories: list[str], patch: str, total_changes: int) -> str:
-    lowered = normalize_index_path(path).lower()
-    if lowered == "backend/app/automation.py":
-        return "这会改变影响分析结果的生成结构与摘要组织方式，若前后链路未同步，结果解释和输出可信度都可能受影响。"
-    if lowered == "backend/app/webhook.py":
-        return "这会影响 webhook 事件进入后续分析或任务链路的稳定性，重点要看触发条件和载荷兼容是否保持一致。"
-    if lowered == "backend/app/content_locale.py":
-        return "这会影响不同语言配置下分析文案的选择与回退效果，容易在多语言场景暴露展示不一致问题。"
-    if lowered.endswith("projectimpacttab.tsx"):
-        return "这会直接改变项目详情页消费和呈现影响分析结果的方式，重点关注新结构是否被完整读取、排序和展示。"
-    if lowered.endswith("strings.ts"):
-        return "这会直接影响新增字段、标题和提示文案能否正确显示，问题通常会体现在页面文案缺失或语言不一致上。"
+    messages = _impact_messages()["impact_summary"]
     if "api_contract" in categories and "frontend_async" in categories:
-        return "这类改动会同时波及页面取数与渲染逻辑，联调时要重点确认字段兼容、空值处理和状态一致性。"
+        return messages["api_and_frontend"]
     if "api_contract" in categories:
-        return "这类改动容易影响上下游读取结果时的字段兼容、默认值处理和旧数据容忍度。"
+        return messages["api_contract"]
     if "job_orchestration" in categories or "webhook_contract" in categories:
-        return "这类改动更容易放大到自动化触发、执行顺序和结果记录链路，建议按真实流程回放验证。"
+        return messages["job_orchestration_or_webhook"]
     if "localization" in categories:
-        return "这类改动主要影响展示层文案与翻译回退，风险通常集中在可读性和一致性，而不是核心业务行为。"
+        return messages["localization"]
+    if "security_sensitive" in categories:
+        return messages["security_sensitive"]
+    if "data_persistence" in categories:
+        return messages["data_persistence"]
+    if "state_transition" in categories:
+        return messages["state_transition"]
     if total_changes >= 80:
-        return "该文件改动面较大，更适合按关键场景扩大回归范围，避免只验证主路径而遗漏边界行为。"
+        return messages["large_change"]
     if patch.strip():
-        return "该文件实现已经发生变化，建议结合实际调用链路确认影响是否停留在局部，还是会继续向上下游扩散。"
-    return "当前还没提炼出足够明确的影响模式，建议结合真实调用链路继续确认。"
+        return messages["patch_generic"]
+    return messages["fallback"]
 
 
 def _normalize_file_facts(diff_analysis: dict[str, Any]) -> list[dict[str, Any]]:
@@ -427,18 +676,19 @@ def _extract_diff_facts(repo_dir: Path, base_commit: str, commit_sha: str, chang
         matched_categories: list[str] = []
         fact_lines: list[str] = []
         score = 0
-        for pattern, category, description, weight in DIFF_FACT_PATTERNS:
+        fact_messages = _impact_messages()["fact_descriptions"]
+        for pattern, category, description_key, weight in DIFF_FACT_PATTERNS:
             if not patch:
                 continue
             if re.search(pattern, lowered_patch, flags=re.MULTILINE):
                 matched_categories.append(category)
-                fact_lines.append(description)
+                fact_lines.append(str(fact_messages.get(description_key, description_key)))
                 score += weight
                 category_scores[category] = category_scores.get(category, 0) + weight
                 category_examples.setdefault(category, []).append(path)
         if any(keyword in path.lower() for keyword in DIFF_HIGH_RISK_KEYWORDS):
             matched_categories.append("security_sensitive")
-            fact_lines.append("文件路径命中敏感能力域，需要重点复核安全与权限相关副作用")
+            fact_lines.append(str(fact_messages["high_risk_path"]))
             score += 2
             category_scores["security_sensitive"] = category_scores.get("security_sensitive", 0) + 2
             category_examples.setdefault("security_sensitive", []).append(path)
@@ -449,17 +699,17 @@ def _extract_diff_facts(repo_dir: Path, base_commit: str, commit_sha: str, chang
         status_row = status_by_path.get(path, {})
         total_changes = int(stat.get("changes") or 0)
         if total_changes >= 80:
-            fact_lines.append("单文件改动行数较大，回归验证范围可能扩大")
+            fact_lines.append(str(fact_messages["large_file_change"]))
             score += 2
         elif total_changes >= 30:
-            fact_lines.append("单文件存在中等规模改动，建议关注边界分支与兼容性")
+            fact_lines.append(str(fact_messages["medium_file_change"]))
             score += 1
 
         if patch and re.search(r"^[+-].*\b(function|def |const |type |class |interface )\b", patch, flags=re.MULTILINE):
-            fact_lines.append("包含函数、类型或类定义调整，可能改变调用方契约或内部行为")
+            fact_lines.append(str(fact_messages["definition_change"]))
             score += 1
         if patch and re.search(r"^[+-].*\btry:|^[+-].*\bexcept\b|^[+-].*\bcatch\b", patch, flags=re.MULTILINE):
-            fact_lines.append("包含异常处理分支调整，需确认失败路径与回退行为")
+            fact_lines.append(str(fact_messages["exception_change"]))
             score += 1
 
         role = _file_role_for_path(path)
@@ -494,15 +744,23 @@ def _extract_diff_facts(repo_dir: Path, base_commit: str, commit_sha: str, chang
 
 def _build_change_facts(diff_analysis: dict[str, Any]) -> list[str]:
     facts: list[str] = []
+    messages = _impact_messages()
     for row in _normalize_file_facts(diff_analysis):
         path = str(row.get("path") or "")
         status = str(row.get("status") or "M")
         added = int(row.get("added") or 0)
         deleted = int(row.get("deleted") or 0)
         change_summary = str(row.get("change_summary") or "").strip()
-        text = f"{path} 出现 {status} 变更（+{added}/-{deleted}）"
         if change_summary:
-            text += f"，{change_summary}"
+            text = str(messages["change_fact_format"]).format(
+                path=path,
+                status=status,
+                added=added,
+                deleted=deleted,
+                change_summary=change_summary,
+            )
+        else:
+            text = str(messages["change_fact_format_no_summary"]).format(path=path, status=status, added=added, deleted=deleted)
         facts.append(text)
         if len(facts) >= 6:
             break
@@ -515,12 +773,15 @@ def _build_diff_based_risks(diff_analysis: dict[str, Any], cross_system_impact: 
         key=lambda row: (int(row.get("risk_score") or 0), int(row.get("changes") or 0)),
         reverse=True,
     )
+    messages = _impact_messages()
+    validation_templates = messages["validation_templates"]
     direct_impacts: list[str] = []
     risk_reasons: list[str] = []
     validation_checks: list[str] = []
     score = 0
     has_frontend = any(str(row.get("path") or "").startswith("frontend/") for row in file_facts)
     has_backend = any(str(row.get("path") or "").startswith("backend/") for row in file_facts)
+    impact_separator = "：" if _impact_lang() == "zh" else ": "
 
     for row in file_facts[:5]:
         path = str(row.get("path") or "").strip()
@@ -529,23 +790,23 @@ def _build_diff_based_risks(diff_analysis: dict[str, Any], cross_system_impact: 
         categories = [str(item) for item in (row.get("matched_categories") or []) if str(item).strip()]
         score += int(row.get("risk_score") or 0)
         if impact_summary:
-            direct_impacts.append(f"{path}：{impact_summary}")
+            direct_impacts.append(f"{path}{impact_separator}{impact_summary}")
         if change_summary and impact_summary:
-            risk_reasons.append(f"{path} 中“{change_summary}”这类变更，意味着{impact_summary}")
+            risk_reasons.append(str(messages["risk_reason_with_change"]).format(path=path, change_summary=change_summary, impact_summary=impact_summary))
         elif impact_summary:
-            risk_reasons.append(f"{path} 的改动意味着{impact_summary}")
+            risk_reasons.append(str(messages["risk_reason_without_change"]).format(path=path, impact_summary=impact_summary))
         for category in categories[:2]:
-            validation = VALIDATION_TEMPLATES.get(category)
+            validation = validation_templates.get(category)
             if validation:
                 validation_checks.append(validation)
 
     if has_frontend and has_backend:
-        direct_impacts.append("本次改动同时覆盖后端结果生成与前端结果消费，项目影响分析的数据生成链路和页面呈现链路需要一起验证。")
-        risk_reasons.append("前后端同时变更时，如果结果结构、字段命名或空值处理没有同步，页面可能出现数据缺失、展示错位或解释不一致。")
+        direct_impacts.append(str(messages["cross_system_both"]))
+        risk_reasons.append(str(messages["cross_system_both_risk"]))
 
     if file_facts and all(str(row.get("path") or "").endswith("strings.ts") for row in file_facts):
-        direct_impacts = ["本次提交主要影响前端展示文案与翻译映射，属于低风险展示层变更。"]
-        risk_reasons = ["当前改动集中在翻译键和值本身，应重点检查新增字段标题、提示文案与多语言回退是否一致，不应夸大为核心业务逻辑风险。"]
+        direct_impacts = [str(messages["strings_only_direct"])]
+        risk_reasons = [str(messages["strings_only_risk"])]
 
     if cross_system_impact:
         direct_impacts.extend(cross_system_impact[:1])
@@ -675,11 +936,7 @@ def analyze_commit_impact(
         "total_indexable_files": len(normalized_all_files),
         "top_level_areas": sorted({_path_segments(path)[0] for path in normalized_all_files if _path_segments(path)})[:12],
     }
-    verification_focus = validation_checks or [
-        "验证直接改动模块及其相邻流程的回归行为",
-        "验证本次提交触及的高风险自动化、接口或数据链路",
-        "结合受影响模块检查跨模块副作用是否符合预期",
-    ]
+    verification_focus = validation_checks or list(_impact_messages()["verification_fallback"])
     summary = {
         "project_id": project_id,
         "repo_path": str(repo_dir),
