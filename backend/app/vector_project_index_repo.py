@@ -36,6 +36,18 @@ def _init_project_index_db(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE project_index ADD COLUMN last_indexed_commit TEXT NOT NULL DEFAULT ''")
     if "last_embed_model" not in cols:
         conn.execute("ALTER TABLE project_index ADD COLUMN last_embed_model TEXT NOT NULL DEFAULT ''")
+    if "repo_provider" not in cols:
+        conn.execute("ALTER TABLE project_index ADD COLUMN repo_provider TEXT NOT NULL DEFAULT ''")
+    if "last_analyzed_commit" not in cols:
+        conn.execute("ALTER TABLE project_index ADD COLUMN last_analyzed_commit TEXT NOT NULL DEFAULT ''")
+    if "last_impact_job_id" not in cols:
+        conn.execute("ALTER TABLE project_index ADD COLUMN last_impact_job_id TEXT NOT NULL DEFAULT ''")
+    if "last_local_repo_path" not in cols:
+        conn.execute("ALTER TABLE project_index ADD COLUMN last_local_repo_path TEXT NOT NULL DEFAULT ''")
+    if "repo_provider_override" not in cols:
+        conn.execute("ALTER TABLE project_index ADD COLUMN repo_provider_override TEXT NOT NULL DEFAULT ''")
+    if "repo_web_base_url" not in cols:
+        conn.execute("ALTER TABLE project_index ADD COLUMN repo_web_base_url TEXT NOT NULL DEFAULT ''")
     conn.commit()
 
 
@@ -49,7 +61,8 @@ def _read_project_index_from_db() -> list[dict[str, Any]]:
             rows = conn.execute(
                 """
                 SELECT project_id, doc_count,
-                       COALESCE(project_name, '') AS project_name
+                       COALESCE(project_name, '') AS project_name,
+                       COALESCE(repo_provider, '') AS repo_provider
                 FROM project_index
                 ORDER BY project_id ASC
                 """
@@ -59,6 +72,7 @@ def _read_project_index_from_db() -> list[dict[str, Any]]:
                     "project_id": r["project_id"],
                     "doc_count": int(r["doc_count"]),
                     "project_name": (r["project_name"] or "").strip(),
+                    "repo_provider": (r["repo_provider"] or "").strip(),
                 }
                 for r in rows
             ]
@@ -109,7 +123,13 @@ def get_project_index_meta(project_id: str) -> dict[str, Any] | None:
                 """
                 SELECT project_id, doc_count, project_name,
                        COALESCE(last_indexed_commit, '') AS last_indexed_commit,
-                       COALESCE(last_embed_model, '') AS last_embed_model
+                       COALESCE(last_embed_model, '') AS last_embed_model,
+                       COALESCE(repo_provider, '') AS repo_provider,
+                       COALESCE(last_analyzed_commit, '') AS last_analyzed_commit,
+                       COALESCE(last_impact_job_id, '') AS last_impact_job_id,
+                       COALESCE(last_local_repo_path, '') AS last_local_repo_path,
+                       COALESCE(repo_provider_override, '') AS repo_provider_override,
+                       COALESCE(repo_web_base_url, '') AS repo_web_base_url
                 FROM project_index WHERE project_id=?
                 """,
                 (pid,),
@@ -124,6 +144,12 @@ def get_project_index_meta(project_id: str) -> dict[str, Any] | None:
         "project_name": (row["project_name"] or "").strip(),
         "last_indexed_commit": str(row["last_indexed_commit"] or "").strip(),
         "last_embed_model": str(row["last_embed_model"] or "").strip(),
+        "repo_provider": str(row["repo_provider"] or "").strip(),
+        "last_analyzed_commit": str(row["last_analyzed_commit"] or "").strip(),
+        "last_impact_job_id": str(row["last_impact_job_id"] or "").strip(),
+        "last_local_repo_path": str(row["last_local_repo_path"] or "").strip(),
+        "repo_provider_override": str(row["repo_provider_override"] or "").strip(),
+        "repo_web_base_url": str(row["repo_web_base_url"] or "").strip(),
     }
 
 
@@ -150,10 +176,18 @@ def _upsert_project_index_in_db(
     *,
     last_indexed_commit: str = "",
     last_embed_model: str = "",
+    repo_provider: str = "",
+    last_analyzed_commit: str = "",
+    last_impact_job_id: str = "",
+    last_local_repo_path: str = "",
 ) -> None:
     pname = (project_name or "").strip()
     lc = (last_indexed_commit or "").strip()
     em = (last_embed_model or "").strip()
+    rp = (repo_provider or "").strip().lower()
+    lac = (last_analyzed_commit or "").strip()
+    lij = (last_impact_job_id or "").strip()
+    llp = (last_local_repo_path or "").strip()
     now = _utc_now_iso()
     db_path = _project_index_db_path()
     with _project_index_db_lock:
@@ -164,8 +198,8 @@ def _upsert_project_index_in_db(
             conn.execute(
                 """
                 INSERT INTO project_index
-                    (project_id, doc_count, updated_at, project_name, last_indexed_commit, last_embed_model)
-                VALUES (?, ?, ?, ?, ?, ?)
+                    (project_id, doc_count, updated_at, project_name, last_indexed_commit, last_embed_model, repo_provider, last_analyzed_commit, last_impact_job_id, last_local_repo_path)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(project_id) DO UPDATE SET
                     doc_count = excluded.doc_count,
                     updated_at = excluded.updated_at,
@@ -180,9 +214,25 @@ def _upsert_project_index_in_db(
                     last_embed_model = CASE
                         WHEN TRIM(excluded.last_embed_model) != '' THEN TRIM(excluded.last_embed_model)
                         ELSE project_index.last_embed_model
+                    END,
+                    repo_provider = CASE
+                        WHEN TRIM(excluded.repo_provider) != '' THEN TRIM(excluded.repo_provider)
+                        ELSE project_index.repo_provider
+                    END,
+                    last_analyzed_commit = CASE
+                        WHEN TRIM(excluded.last_analyzed_commit) != '' THEN TRIM(excluded.last_analyzed_commit)
+                        ELSE project_index.last_analyzed_commit
+                    END,
+                    last_impact_job_id = CASE
+                        WHEN TRIM(excluded.last_impact_job_id) != '' THEN TRIM(excluded.last_impact_job_id)
+                        ELSE project_index.last_impact_job_id
+                    END,
+                    last_local_repo_path = CASE
+                        WHEN TRIM(excluded.last_local_repo_path) != '' THEN TRIM(excluded.last_local_repo_path)
+                        ELSE project_index.last_local_repo_path
                     END
                 """,
-                (project_id, int(doc_count), now, pname, lc, em),
+                (project_id, int(doc_count), now, pname, lc, em, rp, lac, lij, llp),
             )
             conn.commit()
         finally:
@@ -199,8 +249,8 @@ def _replace_project_index_in_db(project_stats: dict[str, int]) -> None:
             conn.executemany(
                 """
                 INSERT INTO project_index
-                    (project_id, doc_count, updated_at, project_name, last_indexed_commit, last_embed_model)
-                VALUES (?, ?, ?, '', '', '')
+                    (project_id, doc_count, updated_at, project_name, last_indexed_commit, last_embed_model, repo_provider)
+                VALUES (?, ?, ?, '', '', '', '')
                 """,
                 [(pid, int(count), _utc_now_iso()) for pid, count in project_stats.items()],
             )
@@ -224,6 +274,32 @@ def set_project_display_name(project_id: str, project_name: str) -> bool:
             cur = conn.execute(
                 "UPDATE project_index SET project_name=?, updated_at=? WHERE project_id=?",
                 (pname, now, pid),
+            )
+            conn.commit()
+            return int(cur.rowcount or 0) > 0
+        finally:
+            conn.close()
+
+
+def set_project_repo_overrides(project_id: str, *, repo_provider_override: str = "", repo_web_base_url: str = "") -> bool:
+    pid = str(project_id or "").strip()
+    if not pid:
+        return False
+    provider = (repo_provider_override or "").strip().lower()
+    web_base = (repo_web_base_url or "").strip()
+    now = _utc_now_iso()
+    db_path = _project_index_db_path()
+    with _project_index_db_lock:
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        try:
+            _init_project_index_db(conn)
+            cur = conn.execute(
+                """
+                UPDATE project_index
+                SET repo_provider_override=?, repo_web_base_url=?, updated_at=?
+                WHERE project_id=?
+                """,
+                (provider, web_base, now, pid),
             )
             conn.commit()
             return int(cur.rowcount or 0) > 0

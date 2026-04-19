@@ -14,6 +14,7 @@ from app.audit_helpers import actor_from_user, mask_query_payload, request_meta
 from app.audit_repo import append_audit_event
 from app.auth_ui import require_ui_session
 from app.config import settings
+from app.effective_settings import detect_git_provider
 
 router = APIRouter()
 
@@ -258,6 +259,7 @@ def _enrich_projects_from_jobs(projects: list[dict]) -> None:
         fallback_name = (job_names.get(pid) or "").strip()
         name = cached or fallback_name
         p["project_name"] = name if name else None
+        p["repo_provider"] = str(p.get("repo_provider") or detect_git_provider(job_urls.get(pid, "")) or "").strip() or None
         raw_repo = (job_urls.get(pid) or "").strip()
         p["repo_url"] = _repo_url_for_browser(raw_repo, pid)
         first_at = (job_created.get(pid) or "").strip()

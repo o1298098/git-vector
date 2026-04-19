@@ -8,7 +8,7 @@ import re
 import socket
 import threading
 import time
-from typing import Any
+from typing import Any, Callable
 
 # Chroma 0.4.x 使用旧版 PostHog 调用方式 capture(distinct_id, event, properties)，
 # 而 posthog 6.x 仅接受 capture(event, **kwargs)。在首次 import chromadb 前做兼容补丁：
@@ -578,6 +578,7 @@ class VectorStore:
         chunks: list[dict[str, Any]],
         *,
         mode: str,
+        on_log: Callable[..., None] | None = None,
     ) -> tuple[list[str], list[str], list[dict[str, Any]], list[list[float]]]:
         """准备 upsert 参数并完成 embedding/失败过滤/去重。"""
         documents = [c.get("content", "") for c in chunks]
@@ -586,6 +587,16 @@ class VectorStore:
         metadatas = [self._sanitize_metadata(m) for m in raw_metas]
         ids = [stable_vector_id(project_id, m) for m in metadatas]
 
+        if on_log:
+            try:
+                on_log(
+                    "INFO",
+                    "upsert_vector_store",
+                    f"Embedding start: mode={mode}, chunks={len(chunks)}, inputs={len(embed_inputs)}",
+                    source="vector_store",
+                )
+            except Exception:
+                pass
         try:
             emb_with_idx = _embed(embed_inputs, prefix="passage: ")
         except Exception as e:  # noqa: S110
@@ -603,6 +614,16 @@ class VectorStore:
             )
             raise RuntimeError("EMBEDDING_UNAVAILABLE: embedding failed for all chunks")
 
+        if on_log:
+            try:
+                on_log(
+                    "INFO",
+                    "upsert_vector_store",
+                    f"Embedding done: mode={mode}, succeeded={len(emb_with_idx)}, attempted={len(embed_inputs)}",
+                    source="vector_store",
+                )
+            except Exception:
+                pass
         idx_to_emb: dict[int, list[float]] = {idx: emb for idx, emb in emb_with_idx}
         kept_ids: list[str] = []
         kept_docs: list[str] = []
@@ -648,6 +669,16 @@ class VectorStore:
             project_id=project_id,
             mode=mode,
         )
+        if on_log:
+            try:
+                on_log(
+                    "INFO",
+                    "upsert_vector_store",
+                    f"Embedding rows prepared: mode={mode}, kept={len(kept_ids)}, attempted={len(chunks)}",
+                    source="vector_store",
+                )
+            except Exception:
+                pass
         if not kept_ids:
             if mode == "incremental":
                 logger.error(
@@ -698,6 +729,7 @@ class VectorStore:
         project_name: str = "",
         last_indexed_commit: str = "",
         last_embed_model: str = "",
+        on_log: Callable[..., None] | None = None,
     ) -> dict[str, Any]:
         if not chunks:
             return {"attempted": 0, "embedded": 0, "status": "skipped"}
@@ -706,6 +738,7 @@ class VectorStore:
             project_id,
             chunks,
             mode="full",
+            on_log=on_log,
         )
 
         # 全量：先删该项目全部向量，再写入（稳定 id 与旧 :: 序号 id 不混用）
@@ -716,6 +749,16 @@ class VectorStore:
             except Exception as e:  # noqa: S110
                 logger.warning("Delete old vectors failed for project %s: %s", project_id, e)
 
+            if on_log:
+                try:
+                    on_log(
+                        "INFO",
+                        "upsert_vector_store",
+                        f"Vector store full upsert start: rows={len(kept_ids)}",
+                        source="vector_store",
+                    )
+                except Exception:
+                    pass
             self.collection.upsert(
                 ids=kept_ids,
                 embeddings=kept_embs,
@@ -723,6 +766,16 @@ class VectorStore:
                 metadatas=kept_metas,
             )
             logger.info("Upserted %s chunks for project %s (full)", len(kept_ids), project_id)
+            if on_log:
+                try:
+                    on_log(
+                        "INFO",
+                        "upsert_vector_store",
+                        f"Vector store full upsert done: rows={len(kept_ids)}",
+                        source="vector_store",
+                    )
+                except Exception:
+                    pass
 
             # 探测实际写入数量，写入缓存，避免 delete/upsert 部分失败导致统计不一致。
             doc_count = self._probe_doc_count_after_upsert(
@@ -749,6 +802,7 @@ class VectorStore:
         project_name: str = "",
         last_indexed_commit: str = "",
         last_embed_model: str = "",
+        on_log: Callable[..., None] | None = None,
     ) -> dict[str, Any]:
         """仅 upsert 给定条目，不删全项目；调用方应先按路径删除待刷新路径上的旧向量。"""
         if not chunks:
@@ -757,10 +811,21 @@ class VectorStore:
             project_id,
             chunks,
             mode="incremental",
+            on_log=on_log,
         )
 
         with self._chrom_lock:
             self._ensure_fresh_client_by_marker()
+            if on_log:
+                try:
+                    on_log(
+                        "INFO",
+                        "upsert_vector_store",
+                        f"Vector store incremental upsert start: rows={len(kept_ids)}",
+                        source="vector_store",
+                    )
+                except Exception:
+                    pass
             self.collection.upsert(
                 ids=kept_ids,
                 embeddings=kept_embs,
@@ -768,6 +833,16 @@ class VectorStore:
                 metadatas=kept_metas,
             )
             logger.info("Incrementally upserted %s chunks for project %s", len(kept_ids), project_id)
+            if on_log:
+                try:
+                    on_log(
+                        "INFO",
+                        "upsert_vector_store",
+                        f"Vector store incremental upsert done: rows={len(kept_ids)}",
+                        source="vector_store",
+                    )
+                except Exception:
+                    pass
 
             doc_count = self._probe_doc_count_after_upsert(
                 project_id,

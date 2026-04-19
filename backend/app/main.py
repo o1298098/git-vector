@@ -85,6 +85,9 @@ app.include_router(llm_usage_router, prefix="/api", tags=["llm-usage"])
 from app.code_chat_api import router as code_chat_router
 
 app.include_router(code_chat_router, prefix="/api", tags=["code-chat"])
+from app.project_detail_api import router as project_detail_router
+
+app.include_router(project_detail_router, prefix="/api", tags=["project-detail"])
 
 
 def _admin_dist() -> Path | None:
@@ -149,6 +152,8 @@ def root():
             "POST /webhook/gitea",
         ],
         "webhook_trigger": "POST /webhook/trigger",
+        "local_commit": "POST /webhook/local-commit",
+        "issue_event": "POST /webhook/issue-event",
         "query": "POST /api/query",
         "code_chat": "POST /api/code-chat",
         "code_chat_stream": "POST /api/code-chat/stream",

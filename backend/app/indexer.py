@@ -649,7 +649,10 @@ def _describe_chunks(
                 len(sub_chunks),
             )
             if sub_chunks:
-                described_sub = describe_functions_batch(sub_chunks)
+                described_sub = describe_functions_batch(
+                    sub_chunks,
+                    on_log=lambda level, step, message, source="analyzer": report(step, level=level, reason=message, source=source),
+                )
                 for pos, dc in zip(idxs, described_sub):
                     function_chunks[pos] = dc
         else:
@@ -693,7 +696,10 @@ def _describe_chunks(
             )
     else:
         report("describe_chunks", percent=55, chunk_count=len(function_chunks))
-        function_chunks = describe_functions_batch(function_chunks)
+        function_chunks = describe_functions_batch(
+            function_chunks,
+            on_log=lambda level, step, message, source="analyzer": report(step, level=level, reason=message, source=source),
+        )
     return function_chunks, paths_refresh
 
 
@@ -770,6 +776,7 @@ def _upsert_docs_to_store(
                 project_name=project_name,
                 last_indexed_commit=head,
                 last_embed_model=embed_model,
+                on_log=lambda level, step, message, source="vector_store": report(step, level=level, reason=message, source=source),
             )
             if upsert_result.get("status") == "partial":
                 report(
@@ -803,6 +810,7 @@ def _upsert_docs_to_store(
         project_name=project_name,
         last_indexed_commit=head,
         last_embed_model=embed_model,
+        on_log=lambda level, step, message, source="vector_store": report(step, level=level, reason=message, source=source),
     )
     if upsert_result.get("status") == "partial":
         report(
@@ -828,16 +836,27 @@ def run_index_pipeline(
         try:
             progress({"stage": stage, **fields})
         except Exception:
-            # 进度上报失败不影响主流程
             return
 
+    def _log(level: str, stage: str, message: str, *, source: str = "indexer") -> None:
+        _report(stage, level=level, reason=message, source=source)
+
     try:
-        _report("clone_or_pull", percent=5)
+        _report("clone_or_pull", percent=5, level="INFO", reason=f"Preparing repository sync for {project_id}")
         repo_path = clone_or_pull(repo_url, project_id)
+        _report("clone_or_pull", percent=10, level="INFO", reason=f"Repository ready: {repo_path}")
         head = _git_rev_parse(repo_path) or ""
         use_incremental, last_commit, embed_model, paths_delta = _resolve_incremental_context(
             project_id=project_id,
             repo_path=repo_path,
+            head=head,
+        )
+        _report(
+            "resolve_incremental",
+            percent=12,
+            level="INFO",
+            reason="Index mode resolved",
+            mode="incremental" if use_incremental else "full",
             head=head,
         )
 
@@ -846,17 +865,28 @@ def run_index_pipeline(
             _report("done", percent=100, status="skipped", reason="unchanged", head=head)
             return
 
-        _report("collect_files", percent=15)
+        _report("collect_files", percent=15, level="INFO", reason="Scanning code files")
         files = collect_code_files(repo_path)
+        _report("collect_files", percent=20, level="INFO", reason="Code file scan completed", file_count=len(files))
         if not files:
             logger.warning("No code files found for %s", project_id)
             _report("done", percent=100, status="skipped", reason="no_files")
             return
         _log_collected_file_extensions(project_id, files)
+        _report("parse_functions", percent=22, level="INFO", reason="Parsing functions and code blocks", file_count=len(files))
         function_chunks = _parse_function_chunks(project_id, files, _report)
+        _report("parse_functions", percent=35, level="INFO", reason="Function and code block parsing completed", chunk_count=len(function_chunks))
         if not function_chunks:
             _report("done", percent=100, status="skipped", reason="no_chunks")
             return
+        _report(
+            "describe_chunks",
+            percent=40,
+            level="INFO",
+            reason="Starting LLM code understanding and description generation",
+            chunk_count=len(function_chunks),
+            mode="incremental" if use_incremental else "full",
+        )
         function_chunks, paths_refresh = _describe_chunks(
             project_id=project_id,
             function_chunks=function_chunks,
@@ -864,7 +894,16 @@ def run_index_pipeline(
             paths_delta=paths_delta,
             report=_report,
         )
+        _report(
+            "describe_chunks",
+            percent=58,
+            level="INFO",
+            reason="LLM code understanding and description generation completed",
+            chunk_count=len(function_chunks),
+            mode="incremental" if use_incremental else "full",
+        )
 
+        _report("generate_wiki", percent=60, level="INFO", reason="Generating wiki and structured documentation")
         _maybe_generate_wiki(
             project_id=project_id,
             project_name=project_name,
@@ -873,8 +912,18 @@ def run_index_pipeline(
             files=files,
             report=_report,
         )
+        _report("generate_wiki", percent=68, level="INFO", reason="Wiki generation stage completed")
 
         docs = _chunks_to_embedding_docs(project_id, function_chunks)
+        _report("build_embedding_docs", percent=74, level="INFO", reason="Embedding documents prepared", doc_count=len(docs))
+        _report(
+            "upsert_vector_store",
+            percent=80,
+            level="INFO",
+            reason="Starting embedding generation and vector store upsert",
+            doc_count=len(docs),
+            mode="incremental" if use_incremental else "full",
+        )
         _upsert_docs_to_store(
             project_id=project_id,
             project_name=project_name,

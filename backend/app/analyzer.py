@@ -1,6 +1,6 @@
 import logging
 import json
-from typing import Any
+from typing import Any, Callable
 
 from app.content_locale import analyze_repo_system_user, describe_batch_system_user
 from app.effective_settings import effective_content_language
@@ -80,7 +80,11 @@ def _idx_from_row(row: dict[str, Any], batch_len: int) -> int | None:
     return None
 
 
-def describe_functions_batch(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def describe_functions_batch(
+    chunks: list[dict[str, Any]],
+    *,
+    on_log: Callable[..., None] | None = None,
+) -> list[dict[str, Any]]:
     """
     对函数级 chunk 批量调用 LLM 生成一行较为详细的中文描述，便于检索「功能是否在代码中实现」。
     若不配置 LLM 或为 file 级回退 chunk（kind==file）则跳过描述，直接返回。
@@ -100,8 +104,10 @@ def describe_functions_batch(chunks: list[dict[str, Any]]) -> list[dict[str, Any
     tmpl_lbl = "模板" if lang == "zh" else "Template"
     fn_lbl = "函数/方法" if lang == "zh" else "Function/method"
     out: list[dict[str, Any]] = []
+    total_batches = max(1, (len(chunks) + MAX_FUNCS_PER_BATCH - 1) // MAX_FUNCS_PER_BATCH)
     for i in range(0, len(chunks), MAX_FUNCS_PER_BATCH):
         batch = chunks[i : i + MAX_FUNCS_PER_BATCH]
+        batch_no = (i // MAX_FUNCS_PER_BATCH) + 1
         parts = []
         for j, c in enumerate(batch):
             code = (c.get("code") or "")[:MAX_CODE_LEN]
@@ -109,6 +115,16 @@ def describe_functions_batch(chunks: list[dict[str, Any]]) -> list[dict[str, Any
             label = tmpl_lbl if kind == "vue_template" else fn_lbl
             parts.append(f"[{j}] ({label}) {c.get('path', '')} :: {c.get('name', '')}\n{code}")
         prompt = user_head + "\n\n---\n\n".join(parts)
+        if on_log:
+            try:
+                on_log(
+                    "INFO",
+                    "describe_chunks",
+                    f"LLM describe batch start {batch_no}/{total_batches}: chunks={len(batch)}, prompt_chars={len(prompt)}",
+                    source="analyzer",
+                )
+            except Exception:
+                pass
         try:
             text = client.chat(
                 system=system,
@@ -117,6 +133,16 @@ def describe_functions_batch(chunks: list[dict[str, Any]]) -> list[dict[str, Any
             )
             json_rows = _parse_batch_json_lines(text or "")
             lines = [ln.strip() for ln in (text or "").strip().split("\n") if ln.strip()]
+            if on_log:
+                try:
+                    on_log(
+                        "INFO",
+                        "describe_chunks",
+                        f"LLM describe batch done {batch_no}/{total_batches}: response_lines={len(lines)}, json_rows={len(json_rows)}",
+                        source="analyzer",
+                    )
+                except Exception:
+                    pass
             row_by_idx: dict[int, dict[str, Any]] = {}
             for row in json_rows:
                 idx = _idx_from_row(row, len(batch))
@@ -145,6 +171,16 @@ def describe_functions_batch(chunks: list[dict[str, Any]]) -> list[dict[str, Any
                     out.append({**c, "description": desc})
         except Exception as e:
             logger.warning("LLM describe batch failed: %s", e)
+            if on_log:
+                try:
+                    on_log(
+                        "ERROR",
+                        "describe_chunks",
+                        f"LLM describe batch failed {batch_no}/{total_batches}: {e}",
+                        source="analyzer",
+                    )
+                except Exception:
+                    pass
             out.extend(batch)
     return out
 

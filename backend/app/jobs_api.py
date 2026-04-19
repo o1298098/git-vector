@@ -10,7 +10,9 @@ from pydantic import BaseModel, Field
 
 from app.audit_helpers import actor_from_user, request_meta
 from app.audit_repo import append_audit_event
+from app.effective_settings import detect_git_provider
 from app.job_queue import JobStatus, build_repo_url_for_clone, get_job_queue, get_job_store, sanitize_text
+from app.issue_reply_job_payload_repo import get_issue_reply_job_payload, save_issue_reply_job_payload
 from app.llm_client import precheck_llm_connectivity
 from app.vector_store import precheck_embedding_connectivity
 from app.config import settings
@@ -33,12 +35,23 @@ class PrecheckBody(BaseModel):
     project_id: Optional[str] = Field(None, description="项目标识（可选）")
 
 
+def _derive_project_id(repo_url: str, project_id: Optional[str] = None) -> str:
+    pid = (project_id or "").strip()
+    if pid:
+        return pid
+    clean = (repo_url or "").strip().rstrip("/")
+    if not clean:
+        return "unknown"
+    tail = clean.split("/")[-1].replace(".git", "").strip()
+    return tail or "unknown"
+
+
 @router.post("/index-jobs/enqueue")
 async def enqueue_index_job(body: EnqueueBody, request: Request):
-    pid = body.project_id or body.repo_url.split("/")[-1].replace(".git", "")
+    pid = _derive_project_id(body.repo_url, body.project_id)
     pname = (body.project_name or "").strip()
     q = get_job_queue()
-    job = await asyncio.to_thread(q.enqueue, str(pid), body.repo_url, pname)
+    job = await asyncio.to_thread(q.enqueue, str(pid), body.repo_url, pname, job_type="index")
     meta = request_meta(request)
     append_audit_event(
         event_type="job.enqueue",
@@ -52,6 +65,7 @@ async def enqueue_index_job(body: EnqueueBody, request: Request):
             "project_id": job.project_id,
             "project_name": job.project_name or "",
             "repo_url": sanitize_text(body.repo_url),
+            "repo_provider": detect_git_provider(body.repo_url),
         },
         ip=meta["ip"],
         user_agent=meta["user_agent"],
@@ -61,6 +75,7 @@ async def enqueue_index_job(body: EnqueueBody, request: Request):
         "job_id": job.job_id,
         "project_id": job.project_id,
         "project_name": job.project_name or None,
+        "repo_provider": detect_git_provider(body.repo_url),
     }
 
 
@@ -74,7 +89,23 @@ async def retry_index_job(job_id: str, request: Request):
     if old.status in ("queued", "running"):
         raise HTTPException(status_code=409, detail="job is not finished yet")
     q = get_job_queue()
-    job = await asyncio.to_thread(q.enqueue, old.project_id, old.repo_url, old.project_name or "")
+    retry_payload = old.payload
+    if old.job_type == "issue_reply":
+        retry_payload = await asyncio.to_thread(get_issue_reply_job_payload, old.job_id)
+        if not retry_payload:
+            raise HTTPException(status_code=409, detail="issue reply payload missing for retry")
+    job = await asyncio.to_thread(
+        q.enqueue,
+        old.project_id,
+        old.repo_url,
+        old.project_name or "",
+        job_type=old.job_type,
+        payload=retry_payload,
+    )
+    if old.job_type == "issue_reply":
+        saved = await asyncio.to_thread(save_issue_reply_job_payload, job_id=job.job_id, payload=retry_payload)
+        if not saved:
+            raise HTTPException(status_code=500, detail="failed to persist issue reply payload for retry")
     meta = request_meta(request)
     append_audit_event(
         event_type="job.retry",
@@ -84,7 +115,7 @@ async def retry_index_job(job_id: str, request: Request):
         resource_type="index_job",
         resource_id=job.job_id,
         status="ok",
-        payload={"retry_of": old.job_id, "project_id": old.project_id},
+        payload={"retry_of": old.job_id, "project_id": old.project_id, "job_type": old.job_type},
         ip=meta["ip"],
         user_agent=meta["user_agent"],
     )
@@ -133,6 +164,9 @@ async def get_index_job(job_id: str):
         "project_id": job.project_id,
         "project_name": job.project_name or None,
         "repo_url": job.repo_url,
+        "job_type": job.job_type,
+        "payload": job.payload,
+        "result": job.result,
         "status": job.status,
         "progress": job.progress,
         "step": job.step,
@@ -143,6 +177,38 @@ async def get_index_job(job_id: str):
         "failure_reason": job.failure_reason or None,
         "log_excerpt": job.log_excerpt or None,
         "is_current": (get_job_queue().get_current_job_id() == job.job_id),
+    }
+
+
+@router.get("/index-jobs/{job_id}/logs")
+async def get_index_job_logs(
+    job_id: str,
+    limit: int = Query(200, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+):
+    store = get_job_store()
+    job = await asyncio.to_thread(store.get_job, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job not found")
+    total = await asyncio.to_thread(store.count_job_logs, job_id)
+    rows = await asyncio.to_thread(store.list_job_logs, job_id, limit=limit, offset=offset)
+    return {
+        "job_id": job_id,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "logs": [
+            {
+                "id": row.id,
+                "sequence": row.sequence,
+                "created_at": row.created_at,
+                "level": row.level,
+                "step": row.step or None,
+                "message": row.message,
+                "source": row.source,
+            }
+            for row in rows
+        ],
     }
 
 
@@ -180,6 +246,9 @@ async def list_index_jobs(
                 "project_id": j.project_id,
                 "project_name": j.project_name or None,
                 "repo_url": j.repo_url,
+                "job_type": j.job_type,
+                "payload": j.payload,
+                "result": j.result,
                 "status": j.status,
                 "progress": j.progress,
                 "step": j.step,
@@ -232,6 +301,7 @@ async def precheck_index_job(body: PrecheckBody):
     if not repo_url:
         raise HTTPException(status_code=400, detail="repo_url 不能为空")
 
+    repo_provider = detect_git_provider(repo_url)
     repo_ok, repo_detail = await asyncio.to_thread(_run_git_ls_remote, repo_url)
     emb_ok, emb_detail = await asyncio.to_thread(_check_embedding)
     llm_ok, llm_detail = await asyncio.to_thread(_check_llm)
@@ -243,14 +313,16 @@ async def precheck_index_job(body: PrecheckBody):
 
     checks = [
         {"key": "repo", "label": "仓库连通/权限", "ok": repo_ok, "detail": repo_detail},
+        {"key": "provider", "label": "仓库类型识别", "ok": repo_provider != "generic", "detail": repo_provider},
         {"key": "embedding", "label": "Embedding 可用性", "ok": emb_ok, "detail": emb_detail},
         {"key": "llm", "label": "LLM 可用性", "ok": llm_ok, "detail": llm_detail},
         {"key": "disk", "label": "磁盘空间", "ok": disk_ok, "detail": disk_detail},
     ]
     return {
-        "ok": all(bool(c["ok"]) for c in checks),
+        "ok": all(bool(c["ok"]) for c in checks if c["key"] != "provider"),
         "repo_url": repo_url,
-        "project_id": (body.project_id or "").strip() or None,
+        "project_id": _derive_project_id(repo_url, body.project_id),
+        "repo_provider": repo_provider,
         "checks": checks,
     }
 
