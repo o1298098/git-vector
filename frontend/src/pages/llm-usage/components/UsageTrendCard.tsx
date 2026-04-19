@@ -76,11 +76,11 @@ export function UsageTrendCard({ trendRows, trendMode, trendChart }: UsageTrendC
   const scaleY = viewport.height / BASE_CHART_HEIGHT;
   const strokeScale = Math.min(scaleX, scaleY);
   const axisStrokeWidth = Math.max(0.8, Number((0.8 * strokeScale).toFixed(2)));
-  const trendStrokeWidth = 1.8;
+  const trendStrokeWidth = 1.5;
   const guideDash = `${Math.max(3, Math.round(4 * strokeScale))} ${Math.max(3, Math.round(4 * strokeScale))}`;
   const crosshairDash = `${Math.max(2, Math.round(3 * strokeScale))} ${Math.max(2, Math.round(3 * strokeScale))}`;
-  const activePointRadius = Math.max(3.2, Number((3.2 * strokeScale).toFixed(2)));
-  const lastPointRadius = Math.max(3, Number((3 * strokeScale).toFixed(2)));
+  const activePointRadius = 3.2;
+  const lastPointRadius = 3;
   const scaledLeft = trendChart.left * scaleX;
   const scaledRight = trendChart.right * scaleX;
   const scaledMid = trendChart.mid * scaleX;
@@ -336,6 +336,7 @@ export function UsageTrendCard({ trendRows, trendMode, trendChart }: UsageTrendC
                 strokeWidth={trendStrokeWidth}
                 strokeLinecap="round"
                 strokeLinejoin="round"
+                vectorEffect="non-scaling-stroke"
               />
               <path
                 d={scaledCompletionLine}
@@ -344,6 +345,7 @@ export function UsageTrendCard({ trendRows, trendMode, trendChart }: UsageTrendC
                 strokeWidth={trendStrokeWidth}
                 strokeLinecap="round"
                 strokeLinejoin="round"
+                vectorEffect="non-scaling-stroke"
               />
 
               {activeRow && activeX != null ? (
