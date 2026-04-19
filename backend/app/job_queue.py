@@ -720,7 +720,7 @@ def _apply_index_progress(store: JobStore, job_id: str, payload: dict[str, Any])
     reason = str(payload.get("reason") or "")
     error = str(payload.get("error") or "")
 
-    lang = effective_content_language()
+    lang = "en"
     done_ok, fail_prefix, fail_generic = index_done_messages(lang)
     stage_msgs = index_progress_messages(lang)
 
@@ -798,7 +798,7 @@ def _run_job_subprocess(job_id: str) -> None:
                 project_name=latest_job.project_name,
             )
             result_payload: dict[str, Any] = {}
-            success_message = "完成"
+            success_message = "Complete"
         elif latest_job.job_type == "impact_analysis":
             from app.automation import analyze_commit_impact
             from app.vector_project_index_repo import _upsert_project_index_in_db, get_project_index_meta
@@ -857,7 +857,7 @@ def _run_job_subprocess(job_id: str) -> None:
             job_id,
             status="failed",
             step="failed",
-            message=f"失败: {err}",
+            message=f"Failed: {err}",
             finished_at=finished,
             failure_reason=err,
         )
@@ -950,7 +950,7 @@ class IndexJobQueue:
                 status="cancelled",
                 progress=int(job2.progress or 0),
                 step="cancelled",
-                message="任务已取消",
+                message="Task cancelled",
                 finished_at=finished,
             )
             return "cancelled_stale"
@@ -1018,7 +1018,7 @@ class IndexJobQueue:
                     status="cancelled",
                     progress=j.progress,
                     step="cancelled",
-                    message="服务关闭，任务已终止",
+                    message="Service shutting down, task terminated",
                     finished_at=_utc_now_iso(),
                 )
             return
@@ -1035,7 +1035,7 @@ class IndexJobQueue:
                 status="cancelled",
                 progress=max(0, min(100, prog)),
                 step="cancelled",
-                message="用户已取消",
+                message="Cancelled by user",
                 finished_at=_utc_now_iso(),
             )
             return
@@ -1045,9 +1045,9 @@ class IndexJobQueue:
                 job_id,
                 status="failed",
                 step="failed",
-                message=f"子进程异常退出 (code={exit_code})",
+                message=f"Subprocess exited abnormally (code={exit_code})",
                 finished_at=_utc_now_iso(),
-                failure_reason=f"子进程异常退出 code={exit_code}",
+                failure_reason=f"Subprocess exited abnormally code={exit_code}",
             )
             self.store.append_job_log(job_id, f"worker: subprocess exited abnormally with code={exit_code}")
             logger.error("Index subprocess exited abnormally job_id=%s exitcode=%s", job_id, exit_code)
@@ -1061,7 +1061,7 @@ class IndexJobQueue:
             job_id,
             status="failed",
             step="failed",
-            message=f"失败: {err}",
+            message=f"Failed: {err}",
             finished_at=finished,
             failure_reason=err,
         )

@@ -345,64 +345,42 @@ def wiki_i18n(lang: str) -> WikiI18n:
 
 
 def describe_batch_system_user(lang: str) -> tuple[str, str]:
-    """describe_functions_batch：system 与 user 指令前缀（不含代码块）。"""
-    if normalize_content_lang(lang) == "en":
-        system = (
-            "You are a code analysis assistant. For each input item, output exactly one JSON object in ONE line. "
-            "Required keys: idx (integer), summary (string), functionality (array of 2-4 short strings), tags (array of 3-5 keywords). "
-            "Return JSONL only (one JSON object per input item, in the same order). "
-            "Do not include markdown, numbering, or code fences."
-        )
-        user_head = (
-            "Each item below is either a function/method or a UI template/markup fragment. "
-            "For functions/methods, summarize logic/inputs/outputs/side effects; "
-            "for templates, summarize structure/interaction/bindings. "
-            "Use only information present in code. Set idx from the bracket prefix like [0], [1], ... . "
-            "Output JSONL only:\n\n"
-        )
-        return system, user_head
+    """describe_functions_batch system and user prefixes."""
+    output_lang = "English" if normalize_content_lang(lang) == "en" else "Chinese"
     system = (
-        "你是代码分析助手。对每个输入项输出一行 JSON 对象（JSONL）。"
-        "必须包含键：idx（整数）、summary（字符串）、functionality（2-4条短句数组）、tags（3-5个关键词数组）。"
-        "只输出 JSONL，不要编号、不要 Markdown、不要代码围栏，顺序与输入严格一致。"
+        "You are a code analysis assistant. For each input item, output exactly one JSON object in ONE line. "
+        "Required keys: idx (integer), summary (string), functionality (array of 2-4 short strings), tags (array of 3-5 keywords). "
+        "Return JSONL only (one JSON object per input item, in the same order). "
+        "Do not include markdown, numbering, or code fences. "
+        f"Write all natural-language fields in {output_lang}."
     )
     user_head = (
-        "以下每一项要么是函数/方法代码，要么是界面模板或标记类片段（如 HTML、组件模板等）。"
-        "函数/方法重点提炼逻辑、输入输出、副作用；模板重点提炼结构、交互、绑定。"
-        "仅基于代码，不要臆测。idx 必须使用每项前缀方括号里的数字（如 [0]、[1]）。"
-        "请直接输出 JSONL：\n\n"
+        "Each item below is either a function/method or a UI template/markup fragment. "
+        "For functions/methods, summarize logic, inputs, outputs, and side effects. "
+        "For templates, summarize structure, interaction, and bindings. "
+        "Use only information present in code. Set idx from the bracket prefix like [0], [1], ... . "
+        "Output JSONL only:\n\n"
     )
     return system, user_head
 
 
 def analyze_repo_system_user(lang: str, project_id: str, files_context: str) -> tuple[str, str]:
-    """analyze_repo_and_describe 的 system / user。"""
-    if normalize_content_lang(lang) == "en":
-        system = (
-            "You are a code assistant. From the project files, write concise English **feature notes**.\n"
-            "1. Group by module/file; say what the code does and what it exposes.\n"
-            "2. Multiple sections; each: [module or path] then a short paragraph.\n"
-            "3. Do not paste large code; natural language only."
-        )
-        user = (
-            f"Project id: {project_id}\n\nAnalyze the code and produce the sections "
-            f"([module/path] + description):\n\n{files_context}\n\nOutput only those sections."
-        )
-        return system, user
-    system = """你是一个代码分析助手。根据提供的项目代码文件内容，用中文生成简洁的「功能说明」。
-要求：
-1. 按模块/文件归纳功能，说明这段代码在做什么、对外提供什么能力。
-2. 输出多段说明，每段对应一个逻辑模块或文件，格式为：
-   [模块名或文件路径]
-   功能说明内容（一两句话即可）
-3. 不要复制大段代码，只写自然语言说明。"""
-    user = f"""项目标识: {project_id}
-
-请分析以下代码并生成功能说明（多段，每段对应一个模块/文件）：
-
-{files_context}
-
-请直接输出多段 [模块/路径] + 功能说明，不要其他前缀。"""
+    """System and user prompts for repository feature analysis."""
+    output_lang = "English" if normalize_content_lang(lang) == "en" else "Chinese"
+    system = (
+        "You are a code assistant. From the project files, write concise feature notes.\n"
+        "1. Group by module or file and explain what the code does and what it exposes.\n"
+        "2. Produce multiple sections; each section should start with [module or path] followed by a short paragraph.\n"
+        "3. Do not paste large code blocks; use natural language only.\n"
+        f"4. Write the final answer in {output_lang}."
+    )
+    user = (
+        f"Project id: {project_id}\n\n"
+        "Analyze the following code and produce feature notes with multiple sections "
+        "(each section corresponds to one module or file):\n\n"
+        f"{files_context}\n\n"
+        "Output only the sectioned feature notes."
+    )
     return system, user
 
 

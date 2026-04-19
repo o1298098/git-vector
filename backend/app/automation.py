@@ -8,7 +8,8 @@ from pathlib import Path
 from typing import Any
 
 from app.audit_repo import append_audit_event
-from app.effective_settings import effective_llm_provider, effective_openai_model
+from app.content_locale import normalize_content_lang
+from app.effective_settings import effective_content_language, effective_llm_provider, effective_openai_model
 from app.impact_repo import save_impact_analysis_run
 from app.issue_poster import post_issue_comment
 from app.issue_rules_repo import get_issue_reply_rules
@@ -96,12 +97,162 @@ def _infer_risk(paths: list[str]) -> str:
     return "low"
 
 
-def _recall_related_context(project_id: str, changed_files: list[str], top_k: int = 6) -> list[dict[str, Any]]:
+def _normalize_risk_level(value: Any, fallback: str = "low") -> str:
+    risk = str(value or "").strip().lower().replace("_", "").replace("-", "").replace(" ", "")
+    if risk in {"critical", "highest", "high", "高", "高风险", "3"}:
+        return "high"
+    if risk in {"moderate", "medium", "med", "warning", "warn", "中", "中等", "中风险", "2"}:
+        return "medium"
+    if risk in {"low", "minor", "safe", "info", "低", "低风险", "1"}:
+        return "low"
+    fallback_text = str(fallback or "low").strip().lower()
+    return fallback_text if fallback_text in {"high", "medium", "low"} else "low"
+
+
+def _path_segments(path: str) -> list[str]:
+    normalized = normalize_index_path(path)
+    return [segment for segment in normalized.split("/") if segment]
+
+
+MODULE_LABEL_OVERRIDES: tuple[tuple[str, str], ...] = (
+    ("frontend/src/pages/", "frontend pages"),
+    ("frontend/src/components/", "frontend components"),
+    ("frontend/src/", "frontend app"),
+    ("backend/app/", "backend app"),
+    ("backend/", "backend services"),
+    ("docs/", "documentation"),
+    ("scripts/", "automation scripts"),
+    ("tests/", "tests"),
+)
+
+
+AREA_KEYWORDS: tuple[tuple[str, str], ...] = (
+    ("issue", "issue automation"),
+    ("webhook", "webhook ingestion"),
+    ("impact", "commit impact analysis"),
+    ("index", "repository indexing"),
+    ("vector", "vector search"),
+    ("queue", "background job queue"),
+    ("job", "background jobs"),
+    ("setting", "settings management"),
+    ("config", "configuration"),
+    ("auth", "authentication"),
+    ("repo", "repository sync"),
+    ("project-detail", "project detail UI"),
+    ("llm", "llm integration"),
+    ("usage", "usage tracking"),
+)
+
+
+def _module_label_for_path(path: str) -> str:
+    normalized = normalize_index_path(path)
+    lowered = normalized.lower()
+    for prefix, label in MODULE_LABEL_OVERRIDES:
+        if lowered.startswith(prefix):
+            suffix = normalized[len(prefix) :].strip("/")
+            if suffix:
+                first = suffix.split("/", 1)[0].replace("-", " ").replace("_", " ").strip()
+                if first:
+                    return f"{label} / {first}"
+            return label
+    segments = _path_segments(normalized)
+    if len(segments) >= 2:
+        return " / ".join(segments[:2])
+    return normalized or "unknown"
+
+
+def _infer_changed_modules(changed_files: list[str], limit: int = 8) -> list[str]:
+    modules: list[str] = []
+    seen: set[str] = set()
+    for path in changed_files:
+        label = _module_label_for_path(path)
+        if label in seen:
+            continue
+        seen.add(label)
+        modules.append(label)
+        if len(modules) >= limit:
+            break
+    return modules
+
+
+def _infer_affected_areas(changed_files: list[str], changed_modules: list[str], limit: int = 8) -> list[str]:
+    joined = "\n".join(changed_files + changed_modules).lower()
+    areas: list[str] = []
+    seen: set[str] = set()
+    for keyword, label in AREA_KEYWORDS:
+        if keyword in joined and label not in seen:
+            seen.add(label)
+            areas.append(label)
+    if not areas:
+        if any(path.startswith("frontend/") for path in changed_files):
+            areas.append("frontend behavior")
+        if any(path.startswith("backend/") for path in changed_files):
+            areas.append("backend behavior")
+        if not areas:
+            areas.append("repository structure")
+    return areas[:limit]
+
+
+def _infer_cross_system_impact(changed_files: list[str], changed_modules: list[str], affected_areas: list[str]) -> list[str]:
+    impacts: list[str] = []
+    has_frontend = any(path.startswith("frontend/") for path in changed_files)
+    has_backend = any(path.startswith("backend/") for path in changed_files)
+    if has_frontend and has_backend:
+        impacts.append("Crosses frontend and backend boundaries")
+    if any("webhook" in value.lower() for value in changed_files + changed_modules + affected_areas):
+        impacts.append("Can affect remote event ingestion and downstream automation")
+    if any("queue" in value.lower() or "job" in value.lower() for value in changed_files + changed_modules + affected_areas):
+        impacts.append("May change background job execution and retry behavior")
+    if any("index" in value.lower() or "vector" in value.lower() for value in changed_files + changed_modules + affected_areas):
+        impacts.append("May influence indexing, retrieval, or analysis quality")
+    if any("setting" in value.lower() or "config" in value.lower() for value in changed_files + changed_modules + affected_areas):
+        impacts.append("Configuration-sensitive behavior should be revalidated")
+    return impacts[:4]
+
+
+def _build_global_context_queries(
+    changed_files: list[str],
+    changed_modules: list[str],
+    affected_areas: list[str],
+    commit_subject: str,
+) -> list[str]:
+    queries: list[str] = []
+    for value in changed_files[:4]:
+        if value.strip():
+            queries.append(value.strip())
+    for value in changed_modules[:3]:
+        if value.strip():
+            queries.append(value.strip())
+    for value in affected_areas[:3]:
+        if value.strip():
+            queries.append(value.strip())
+    if commit_subject.strip():
+        queries.append(commit_subject.strip())
+    dedup: list[str] = []
+    seen: set[str] = set()
+    for value in queries:
+        key = value.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        dedup.append(value)
+    return dedup[:10]
+
+
+def _recall_related_context(
+    project_id: str,
+    changed_files: list[str],
+    changed_modules: list[str],
+    affected_areas: list[str],
+    commit_subject: str,
+    top_k: int = 10,
+) -> list[dict[str, Any]]:
     store = get_vector_store()
+    queries = _build_global_context_queries(changed_files, changed_modules, affected_areas, commit_subject)
     results: list[dict[str, Any]] = []
-    for path in changed_files[:4]:
+    for query in queries:
         try:
-            hits = store.query(project_id=project_id, query_texts=[path], n_results=max(1, min(top_k, 3)))
+            hits = store.query(project_id=project_id, query_texts=[query], n_results=max(2, min(top_k, 4)))
         except Exception:
             continue
         docs = hits.get("results") or []
@@ -109,21 +260,26 @@ def _recall_related_context(project_id: str, changed_files: list[str], top_k: in
             meta = row.get("metadata") or {}
             results.append(
                 {
+                    "query": query,
                     "path": str(meta.get("path") or ""),
                     "name": str(meta.get("name") or ""),
                     "kind": str(meta.get("kind") or ""),
+                    "module": _module_label_for_path(str(meta.get("path") or "")),
                     "score": row.get("score"),
+                    "summary": _extract_llm_description_from_document(str(row.get("document") or ""))[:240],
                 }
             )
     dedup: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set()
-    for row in results:
+    for row in sorted(results, key=lambda item: float(item.get("score") or 0), reverse=True):
         key = (row.get("path", ""), row.get("name", ""), row.get("kind", ""))
         if key in seen:
             continue
         seen.add(key)
         dedup.append(row)
-    return dedup[:top_k]
+        if len(dedup) >= top_k:
+            break
+    return dedup
 
 
 def analyze_commit_impact(
@@ -152,10 +308,23 @@ def analyze_commit_impact(
         changed_files = [normalize_index_path(p) for p in _run_git(repo_dir, "show", "--pretty=", "--name-only", commit_sha).splitlines() if p.strip()]
     commit_subject = message.strip() or _git_commit_subject(repo_dir, commit_sha)
     all_files = collect_code_files(repo_dir)
-    available_paths = {normalize_index_path(path) for path, _ in all_files}
+    normalized_all_files = [normalize_index_path(path) for path, _ in all_files]
+    available_paths = set(normalized_all_files)
     changed_existing_files = [path for path in changed_files if path in available_paths]
-    related_context = _recall_related_context(project_id, changed_files)
-    risk_level = _infer_risk(changed_files)
+    changed_modules = _infer_changed_modules(changed_files)
+    affected_areas = _infer_affected_areas(changed_files, changed_modules)
+    cross_system_impact = _infer_cross_system_impact(changed_files, changed_modules, affected_areas)
+    related_context = _recall_related_context(project_id, changed_files, changed_modules, affected_areas, commit_subject)
+    risk_level = _normalize_risk_level(_infer_risk(changed_files + changed_modules + affected_areas + cross_system_impact))
+    repository_snapshot = {
+        "total_indexable_files": len(normalized_all_files),
+        "top_level_areas": sorted({_path_segments(path)[0] for path in normalized_all_files if _path_segments(path)})[:12],
+    }
+    verification_focus = [
+        "Regression-test the directly changed modules and their adjacent flows",
+        "Validate the highest-risk automation, API, or data paths touched by this commit",
+        "Review cross-module side effects with someone familiar with the impacted area",
+    ]
     summary = {
         "project_id": project_id,
         "repo_path": str(repo_dir),
@@ -166,20 +335,26 @@ def analyze_commit_impact(
         "commit_message": commit_subject,
         "changed_files": changed_files,
         "changed_file_count": len(changed_files),
+        "changed_modules": changed_modules,
+        "affected_areas": affected_areas,
+        "cross_system_impact": cross_system_impact,
         "indexed_file_hits": changed_existing_files[:20],
+        "repository_snapshot": repository_snapshot,
         "related_context": related_context,
         "risk_level": risk_level,
-        "recommended_actions": [
-            "检查受影响模块的单元测试与集成测试",
-            "优先回归与高风险路径相关的接口或流程",
-            "让熟悉相关模块的 reviewer 参与评审",
-        ],
+        "verification_focus": verification_focus,
+        "recommended_actions": verification_focus,
     }
 
     client = get_llm_client()
     if client:
+        output_lang = "English" if normalize_content_lang(effective_content_language()) == "en" else "Chinese"
         system = (
-            "你是资深代码评审助手。请根据提交变更和检索上下文，输出 JSON，字段包含 summary、impact_scope、risks、tests、reviewers、confidence。"
+            "You are a senior staff engineer performing project-wide commit impact analysis. "
+            "Do not limit the reasoning to the changed files themselves. Infer the likely blast radius across modules, workflows, automation, and repository boundaries. "
+            "Return JSON with the fields: summary, impact_scope, risks, tests, reviewers, confidence, and optionally risk_level, changed_modules, affected_areas, cross_system_impact, verification_focus. "
+            "If you provide risk_level, it must be exactly one of: high, medium, low. Do not use any other wording, translations, or casing for risk_level. "
+            f"Write all natural-language values in {output_lang}, but keep risk_level in English enum form."
         )
         user = json.dumps(
             {
@@ -190,7 +365,12 @@ def analyze_commit_impact(
                 "author": author,
                 "message": commit_subject,
                 "changed_files": changed_files,
+                "changed_modules": changed_modules,
+                "affected_areas": affected_areas,
+                "cross_system_impact": cross_system_impact,
+                "repository_snapshot": repository_snapshot,
                 "related_context": related_context,
+                "verification_focus": verification_focus,
             },
             ensure_ascii=False,
         )
@@ -200,7 +380,9 @@ def analyze_commit_impact(
             if isinstance(parsed, dict):
                 summary["llm"] = parsed
                 summary["confidence"] = parsed.get("confidence")
-                risk_level = str(parsed.get("risk_level") or risk_level)
+                risk_level = _normalize_risk_level(parsed.get("risk_level"), fallback=risk_level)
+                if isinstance(summary.get("llm"), dict):
+                    summary["llm"]["risk_level"] = risk_level
                 summary["risk_level"] = risk_level
         except Exception as exc:
             logger.warning("impact analysis llm failed: %s", exc)
@@ -442,11 +624,13 @@ def generate_issue_reply(*, payload: dict[str, Any], job_id: str) -> dict[str, A
     }
     client = get_llm_client()
     if client:
+        configured_output_lang = "English" if normalize_content_lang(effective_content_language()) == "en" else "Chinese"
         system = (
             "You are an open-source project maintainer assistant and a code Q&A assistant. Prioritize answers grounded in the retrieved vector context in related_context, especially when the user asks about implementation details, file locations, function logic, call relationships, configuration, or debugging suggestions."
             "If the evidence in related_context is insufficient, say clearly that you cannot fully confirm it yet, and do not invent file names, function names, or implementation details."
             "Your reply should sound natural and human, not like a template, ticket bot, or audit report."
-            "Reply in the same language as the user's latest question. If the user writes in Chinese, reply in Chinese; if the user writes in English, reply in English; apply the same rule to other languages. If the user mixes languages, follow the primary language of the latest message."
+            "By default, reply in the same language as the user's latest question. If the latest message language is unclear, fall back to the configured output language."
+            f"The configured fallback output language is {configured_output_lang}."
             "For code-related questions, answer the user's main question first, then naturally mention the supporting code evidence or likely implementation locations when helpful."
             "Do not end every reply with next-step suggestions, follow-up offers, or action proposals by default. Only include them when the user explicitly asks for guidance, troubleshooting steps, implementation advice, or when a next action is truly necessary to answer correctly."
             "Avoid stiff section headings, excessive numbering, formulaic boilerplate, and repetitive closing phrases unless the user explicitly asks for that format."
