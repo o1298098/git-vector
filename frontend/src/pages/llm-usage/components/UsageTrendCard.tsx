@@ -95,7 +95,7 @@ export function UsageTrendCard({ trendRows, trendMode, trendChart }: UsageTrendC
   const activeXPercent = activeX == null ? "50%" : `${(activeX / Math.max(1, viewport.width)) * 100}%`;
   const chartHeight = scaledAxisBottom - scaledTop;
   const yAxisLabelLeft = `${((scaledLeft - 10) / Math.max(1, viewport.width)) * 100}%`;
-  const xAxisLabelTop = `${((228 * scaleY) / Math.max(1, viewport.height)) * 100}%`;
+  const xAxisLabelTop = `${((scaledAxisBottom + 18) / Math.max(1, viewport.height)) * 100}%`;
   const xAxisLabels = singlePoint
     ? [{ key: "single", left: `${(scaledMid / Math.max(1, viewport.width)) * 100}%`, text: formatLabel(trendRows[0]?.day || ""), align: "center" as const }]
     : [
