@@ -29,7 +29,6 @@ download(['python', 'javascript', 'typescript', 'go', 'java', 'csharp', 'rust', 
 
 COPY backend/app ./app
 COPY frontend ./frontend
-COPY scripts ./scripts
 RUN cd frontend && npm install && npm run build
 
 ENV PYTHONUNBUFFERED=1
