@@ -339,6 +339,7 @@ const DEFAULT_VISIBLE_FILES = 20;
 const DEFAULT_VISIBLE_FILE_FACTS = 6;
 const DEFAULT_VISIBLE_RISKS = 5;
 const DEFAULT_VISIBLE_VALIDATION_ITEMS = 3;
+const IMPACT_RUNS_SCROLL_CLASS = "impact-runs-scroll";
 
 export function ProjectImpactTab() {
   const { t } = useI18n();
@@ -480,6 +481,32 @@ export function ProjectImpactTab() {
 
   return (
     <div className="space-y-4">
+      <style>{`
+        .${IMPACT_RUNS_SCROLL_CLASS} {
+          scrollbar-width: thin;
+          scrollbar-color: rgba(100, 116, 139, 0.35) transparent;
+        }
+
+        .${IMPACT_RUNS_SCROLL_CLASS}::-webkit-scrollbar {
+          width: 8px;
+        }
+
+        .${IMPACT_RUNS_SCROLL_CLASS}::-webkit-scrollbar-track {
+          background: transparent;
+        }
+
+        .${IMPACT_RUNS_SCROLL_CLASS}::-webkit-scrollbar-thumb {
+          border-radius: 9999px;
+          background-color: rgba(100, 116, 139, 0.32);
+          border: 2px solid transparent;
+          background-clip: content-box;
+        }
+
+        .${IMPACT_RUNS_SCROLL_CLASS}::-webkit-scrollbar-thumb:hover {
+          background-color: rgba(100, 116, 139, 0.5);
+        }
+      `}</style>
+
       {error ? (
         <div className="flex items-start gap-2 rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive">
           <AlertCircle className="mt-0.5 size-4 shrink-0" aria-hidden />
@@ -487,8 +514,8 @@ export function ProjectImpactTab() {
         </div>
       ) : null}
 
-      <div className="grid gap-4 xl:grid-cols-[280px_minmax(0,1fr)]">
-        <Card className="min-w-0 overflow-hidden border-0 shadow-sm ring-1 ring-border/70">
+      <div className="grid items-start gap-4 xl:grid-cols-[280px_minmax(0,1fr)]">
+        <Card className="min-w-0 border-0 shadow-sm ring-1 ring-border/70">
           <CardHeader className="border-b bg-muted/15 px-4 py-4">
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0 space-y-1">
@@ -505,42 +532,44 @@ export function ProjectImpactTab() {
               </Button>
             </div>
           </CardHeader>
-          <CardContent className="p-2.5">
+          <CardContent className="overflow-hidden p-2.5 rounded-b-xl">
             {runs.length === 0 ? (
               <div className="rounded-xl border border-dashed px-4 py-10 text-sm text-muted-foreground">{t("projectImpact.empty")}</div>
             ) : (
-              <div className="max-h-[72vh] space-y-2 overflow-auto pr-1">
-                {runs.map((run) => {
-                  const active = selectedRun?.job_id === run.job_id;
-                  return (
-                    <button
-                      key={run.job_id}
-                      type="button"
-                      onClick={() => setSelectedRun(run)}
-                      className={[
-                        "group w-full rounded-xl border px-3 py-3 text-left transition-all",
-                        active ? "border-primary/35 bg-primary/[0.06] shadow-sm" : "border-border/70 bg-background hover:border-primary/20 hover:bg-muted/25",
-                      ].join(" ")}
-                    >
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="min-w-0 flex-1">
-                          <div className="line-clamp-1 text-sm font-medium text-foreground">{commitMessage && selectedRun?.job_id === run.job_id ? commitMessage : asText(run.summary?.commit_message) || "—"}</div>
-                          <div className="mt-1 text-xs text-muted-foreground">{shortSha(run.commit_sha)}</div>
+              <div className={`${IMPACT_RUNS_SCROLL_CLASS} box-border overflow-y-auto xl:max-h-[calc(100vh-14rem)]`}>
+                <div className="space-y-2 px-1 pb-4">
+                  {runs.map((run) => {
+                    const active = selectedRun?.job_id === run.job_id;
+                    return (
+                      <button
+                        key={run.job_id}
+                        type="button"
+                        onClick={() => setSelectedRun(run)}
+                        className={[
+                          "group w-full rounded-xl border px-3 py-3 text-left transition-all",
+                          active ? "border-primary/35 bg-primary/[0.06] shadow-sm" : "border-border/70 bg-background hover:border-primary/20 hover:bg-muted/25",
+                        ].join(" ")}
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0 flex-1">
+                            <div className="line-clamp-1 text-sm font-medium text-foreground">{commitMessage && selectedRun?.job_id === run.job_id ? commitMessage : asText(run.summary?.commit_message) || "—"}</div>
+                            <div className="mt-1 text-xs text-muted-foreground">{shortSha(run.commit_sha)}</div>
+                          </div>
+                          <span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${riskTone(run.risk_level)}`}>
+                            {(run.risk_level || "unknown").toUpperCase()}
+                          </span>
                         </div>
-                        <span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${riskTone(run.risk_level)}`}>
-                          {(run.risk_level || "unknown").toUpperCase()}
-                        </span>
-                      </div>
-                      <div className="mt-2 flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
-                        <div className="flex min-w-0 items-center gap-1.5">
-                          <GitBranch className="size-3 shrink-0" aria-hidden />
-                          <span className="truncate">{run.branch || "—"}</span>
+                        <div className="mt-2 flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
+                          <div className="flex min-w-0 items-center gap-1.5">
+                            <GitBranch className="size-3 shrink-0" aria-hidden />
+                            <span className="truncate">{run.branch || "—"}</span>
+                          </div>
+                          <span className="shrink-0">{formatDateTimeToSeconds(run.created_at)}</span>
                         </div>
-                        <span className="shrink-0">{formatDateTimeToSeconds(run.created_at)}</span>
-                      </div>
-                    </button>
-                  );
-                })}
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
             )}
           </CardContent>
