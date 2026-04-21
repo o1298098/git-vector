@@ -1,4 +1,5 @@
 const TOKEN_KEY = "gv_admin_ui_token";
+const UNAUTHORIZED_EVENT = "gv:unauthorized";
 
 type ApiErrorPayload = {
   code?: string;
@@ -36,6 +37,15 @@ export function setToken(token: string | null) {
   else localStorage.removeItem(TOKEN_KEY);
 }
 
+export function notifyUnauthorized() {
+  window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+}
+
+export function onUnauthorized(handler: () => void) {
+  window.addEventListener(UNAUTHORIZED_EVENT, handler);
+  return () => window.removeEventListener(UNAUTHORIZED_EVENT, handler);
+}
+
 export async function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
   const headers = new Headers(init.headers);
   const token = getToken();
@@ -43,7 +53,12 @@ export async function apiFetch(path: string, init: RequestInit = {}): Promise<Re
   if (!headers.has("Content-Type") && init.body && typeof init.body === "string") {
     headers.set("Content-Type", "application/json");
   }
-  return fetch(path, { ...init, headers });
+  const response = await fetch(path, { ...init, headers });
+  if (response.status === 401 && getToken()) {
+    setToken(null);
+    notifyUnauthorized();
+  }
+  return response;
 }
 
 export async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {

@@ -7,7 +7,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { apiFetch, apiJson, getToken, setToken } from "@/lib/api";
+import { apiFetch, apiJson, getToken, onUnauthorized, setToken } from "@/lib/api";
 
 type AuthState = {
   ready: boolean;
@@ -67,6 +67,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       cancelled = true;
     };
   }, [refreshMe]);
+
+  useEffect(() => {
+    if (!uiLoginRequired) return;
+    return onUnauthorized(() => {
+      setUsername(null);
+    });
+  }, [uiLoginRequired]);
 
   const login = useCallback(async (user: string, password: string) => {
     const res = await fetch("/api/auth/login", {
