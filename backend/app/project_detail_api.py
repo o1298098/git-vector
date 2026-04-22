@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Annotated, Any, Optional
+from typing import Annotated, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
@@ -27,6 +27,10 @@ class IssueRulesBody(BaseModel):
     require_human_keywords: list[str] = Field(default_factory=list)
     reply_template: str = Field(default="", max_length=4000)
     reply_requirements: str = Field(default="", max_length=4000)
+    auto_label_enabled: bool = False
+    auto_apply_labels: bool = False
+    available_labels: list[str] = Field(default_factory=list)
+    labeling_instructions: str = Field(default="", max_length=4000)
 
 
 class ProjectRepoOverridesBody(BaseModel):
@@ -162,6 +166,10 @@ async def update_project_issue_rules(
         require_human_keywords=body.require_human_keywords,
         reply_template=body.reply_template,
         reply_requirements=body.reply_requirements,
+        auto_label_enabled=body.auto_label_enabled,
+        auto_apply_labels=body.auto_apply_labels,
+        available_labels=body.available_labels,
+        labeling_instructions=body.labeling_instructions,
     )
     meta = request_meta(request)
     append_audit_event(
@@ -178,6 +186,10 @@ async def update_project_issue_rules(
             "require_human_keywords": saved["require_human_keywords"],
             "reply_template": saved["reply_template"],
             "reply_requirements": saved["reply_requirements"],
+            "auto_label_enabled": saved["auto_label_enabled"],
+            "auto_apply_labels": saved["auto_apply_labels"],
+            "available_labels": saved["available_labels"],
+            "labeling_instructions": saved["labeling_instructions"],
         },
         ip=meta["ip"],
         user_agent=meta["user_agent"],

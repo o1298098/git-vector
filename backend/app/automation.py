@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import re
@@ -8,14 +9,23 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import httpx
+
 from app.audit_repo import append_audit_event
 from app.content_locale import normalize_content_lang
 from app.effective_settings import effective_content_language, effective_llm_provider, effective_openai_model
+from app.code_chat_api import MAX_IMAGE_SUMMARY_CHARS
 from app.impact_repo import save_impact_analysis_run
-from app.issue_poster import post_issue_comment
+from app.issue_poster import post_issue_comment, set_issue_labels
 from app.issue_rules_repo import get_issue_reply_rules
 from app.indexer import _repo_dir, clone_or_pull, collect_code_files, normalize_index_path
-from app.project_issue_repo import append_issue_message, get_project_issue, update_issue_reply_state
+from app.project_issue_repo import (
+    append_issue_message,
+    get_project_issue,
+    update_issue_auto_label_result,
+    update_issue_labels,
+    update_issue_reply_state,
+)
 from app.llm_client import get_llm_client
 from app.llm_usage import record_llm_usage
 from app.vector_store import _extract_llm_description_from_document, get_vector_store
@@ -69,6 +79,8 @@ AUTO_REPLY_BLOCKLIST = (
     "credential",
     "secret",
 )
+MAX_ISSUE_IMAGE_SUMMARY_COUNT = 3
+MAX_ISSUE_IMAGE_BYTES = 5 * 1024 * 1024
 
 
 def _utc_now_iso() -> str:
@@ -1150,6 +1162,108 @@ def _issue_conversation_text(issue: dict[str, Any]) -> str:
     return "\n".join(texts).lower()
 
 
+def _issue_image_summary_system(output_lang: str) -> str:
+    return (
+        "You are an image understanding assistant for issue triage and auto reply generation. "
+        "Describe the image briefly and focus on details that help reply to a software issue. "
+        "If it is a screenshot, mention visible UI text, buttons, errors, statuses, code, logs, file names, or layout clues. "
+        "Do not hallucinate unreadable details. Keep it under 200 words. "
+        f"Reply in {output_lang}."
+    )
+
+
+def _extract_markdown_image_urls(text: str) -> list[str]:
+    pattern = re.compile(r"!\[[^\]]*\]\((https?://[^\s)]+(?:\([^\s)]*\)[^\s)]*)*)\)", re.IGNORECASE)
+    urls: list[str] = []
+    for match in pattern.finditer(str(text or "")):
+        url = str(match.group(1) or "").strip()
+        if url and url not in urls:
+            urls.append(url)
+    return urls
+
+
+def _collect_issue_image_urls(issue: dict[str, Any]) -> list[str]:
+    urls: list[str] = []
+
+    def _add_from_text(value: Any) -> None:
+        for url in _extract_markdown_image_urls(str(value or "")):
+            if url not in urls:
+                urls.append(url)
+
+    _add_from_text(issue.get("issue_body") or issue.get("body") or "")
+    _add_from_text(issue.get("comment_body") or "")
+    for comment in issue.get("comments") or []:
+        _add_from_text(comment)
+    for message in issue.get("messages") or []:
+        if isinstance(message, dict):
+            _add_from_text(message.get("body") or "")
+
+    return urls[:MAX_ISSUE_IMAGE_SUMMARY_COUNT]
+
+
+def _guess_image_mime_type(content_type: str, url: str) -> str:
+    normalized_content_type = str(content_type or "").split(";", 1)[0].strip().lower()
+    if normalized_content_type.startswith("image/"):
+        return normalized_content_type
+    lowered_url = str(url or "").lower()
+    if lowered_url.endswith(".png"):
+        return "image/png"
+    if lowered_url.endswith(".jpg") or lowered_url.endswith(".jpeg"):
+        return "image/jpeg"
+    if lowered_url.endswith(".webp"):
+        return "image/webp"
+    if lowered_url.endswith(".gif"):
+        return "image/gif"
+    return "image/png"
+
+
+def _download_issue_image_as_data_url(url: str) -> tuple[str, str] | None:
+    try:
+        with httpx.Client(timeout=20, follow_redirects=True) as client:
+            response = client.get(url)
+            response.raise_for_status()
+            content = response.content
+            if not content or len(content) > MAX_ISSUE_IMAGE_BYTES:
+                return None
+            mime_type = _guess_image_mime_type(response.headers.get("content-type", ""), url)
+            data_url = f"data:{mime_type};base64,{base64.b64encode(content).decode('ascii')}"
+            return mime_type, data_url
+    except Exception as exc:
+        logger.warning("issue image download failed: %s", exc)
+        return None
+
+
+def _summarize_issue_images(client: Any, issue: dict[str, Any]) -> list[str]:
+    image_urls = _collect_issue_image_urls(issue)
+    if not image_urls:
+        return []
+
+    output_lang = "English" if normalize_content_lang(effective_content_language()) == "en" else "Simplified Chinese"
+    summaries: list[str] = []
+    for idx, url in enumerate(image_urls, start=1):
+        downloaded = _download_issue_image_as_data_url(url)
+        if not downloaded:
+            continue
+        mime_type, data_url = downloaded
+        try:
+            summary = client.chat_multimodal(
+                _issue_image_summary_system(output_lang),
+                [
+                    {"type": "text", "text": "Please summarize this issue image for automatic reply generation."},
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                ],
+                feature="issue_auto_reply_image_summary",
+                project_id=str(issue.get("project_id") or "").strip(),
+            )
+        except Exception as exc:
+            logger.warning("issue image summary failed: %s", exc)
+            continue
+        cleaned = str(summary or "").strip()[:MAX_IMAGE_SUMMARY_CHARS]
+        if cleaned:
+            summaries.append(f"Image {idx}:\nURL: {url}\nSummary: {cleaned}")
+    return summaries
+
+
 def _should_block_auto_reply(issue: dict[str, Any]) -> tuple[bool, str, list[str]]:
     text = _issue_conversation_text(issue)
     rules = get_issue_reply_rules(str(issue.get("project_id") or "").strip())
@@ -1198,6 +1312,95 @@ def _build_issue_related_context(project_id: str, issue: dict[str, Any]) -> list
     return context
 
 
+def _normalize_labels(labels: list[str]) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in labels:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        lowered = text.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        normalized.append(text)
+    return normalized
+
+
+def _coerce_llm_recommended_labels(raw: Any, available_labels: list[str]) -> list[str]:
+    if not isinstance(raw, list):
+        return []
+    normalized_available = {label.lower(): label for label in available_labels}
+    recommended: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        text = str(item or "").strip()
+        lowered = text.lower()
+        if not text or lowered in seen or lowered not in normalized_available:
+            continue
+        seen.add(lowered)
+        recommended.append(normalized_available[lowered])
+    return recommended[:3]
+
+
+def build_issue_auto_labels(issue: dict[str, Any], rules: dict[str, Any], reply_result: dict[str, Any]) -> dict[str, Any]:
+    enabled = bool(rules.get("auto_label_enabled"))
+    available_labels = _normalize_labels(list(rules.get("available_labels") or []))
+    recommended_labels = _coerce_llm_recommended_labels(reply_result.get("recommended_labels"), available_labels)
+    if enabled and bool(reply_result.get("blocked")):
+        blocked_label = next((label for label in available_labels if label.lower() == "blocked"), "")
+        if blocked_label:
+            recommended_labels = _normalize_labels([*recommended_labels, blocked_label])
+    if enabled and bool(reply_result.get("needs_human")):
+        needs_human_label = next((label for label in available_labels if label.lower() == "needs-human"), "")
+        if needs_human_label:
+            recommended_labels = _normalize_labels([*recommended_labels, needs_human_label])
+    return {
+        "enabled": enabled,
+        "recommended_labels": recommended_labels,
+        "applied_labels": [],
+        "matched_rules": [],
+        "applied": False,
+        "apply_error": "",
+        "source": "llm",
+        "updated_at": _utc_now_iso(),
+    }
+
+
+def apply_issue_auto_labels(*, issue: dict[str, Any], rules: dict[str, Any], auto_label_result: dict[str, Any]) -> dict[str, Any]:
+    recommended_labels = _normalize_labels(list(auto_label_result.get("recommended_labels") or []))
+    existing_labels = _normalize_labels(list(issue.get("labels") or []))
+    merged_labels = _normalize_labels([*existing_labels, *recommended_labels])
+    output = {**auto_label_result, "applied_labels": merged_labels}
+    if not bool(auto_label_result.get("enabled")):
+        return output
+    if not bool(rules.get("auto_apply_labels")):
+        return output
+    if not merged_labels:
+        output["applied"] = True
+        return output
+    result = set_issue_labels(
+        provider=str(issue.get("provider") or "").strip().lower(),
+        project_id=str(issue.get("project_id") or "").strip(),
+        repo_url=str(issue.get("repo_url") or "").strip(),
+        issue_number=str(issue.get("issue_number") or "").strip(),
+        labels=merged_labels,
+    )
+    if not result.updated:
+        output["apply_error"] = str(result.error or "failed to update issue labels")
+        return output
+    output["applied"] = True
+    output["applied_labels"] = _normalize_labels(list(result.labels or merged_labels))
+    update_issue_labels(
+        project_id=str(issue.get("project_id") or "").strip(),
+        provider=str(issue.get("provider") or "").strip().lower(),
+        issue_number=str(issue.get("issue_number") or "").strip(),
+        labels=output["applied_labels"],
+        status=str(result.issue_state or issue.get("status") or ""),
+    )
+    return output
+
+
 def generate_issue_reply(*, payload: dict[str, Any], job_id: str) -> dict[str, Any]:
     if not payload.get("messages"):
         existing_issue = get_project_issue(
@@ -1232,6 +1435,7 @@ def generate_issue_reply(*, payload: dict[str, Any], job_id: str) -> dict[str, A
         "repo_url": issue["repo_url"],
         "action": issue["action"],
         "related_context": related_context,
+        "image_summaries": [],
         "auto_post_requested": bool(issue["auto_post"]),
         "auto_post_default": bool(rules.get("auto_post_default")),
         "auto_post_enabled": auto_post_enabled,
@@ -1250,6 +1454,8 @@ def generate_issue_reply(*, payload: dict[str, Any], job_id: str) -> dict[str, A
     }
     client = get_llm_client()
     if client:
+        image_summaries = _summarize_issue_images(client, issue)
+        result["image_summaries"] = image_summaries
         configured_output_lang = "English" if normalize_content_lang(effective_content_language()) == "en" else "Chinese"
         system = (
             "You are an open-source project maintainer assistant and a code Q&A assistant. Prioritize answers grounded in the retrieved vector context in related_context, especially when the user asks about implementation details, file locations, function logic, call relationships, configuration, or debugging suggestions."
@@ -1262,7 +1468,8 @@ def generate_issue_reply(*, payload: dict[str, Any], job_id: str) -> dict[str, A
             "Avoid stiff section headings, excessive numbering, formulaic boilerplate, and repetitive closing phrases unless the user explicitly asks for that format."
             "Decide whether the latest user message actually needs a reply in context. Do not reply to pure acknowledgements, thanks, confirmations, or comments that add no actionable question or no meaningful new information."
             "When you decide no reply is needed, set should_auto_post to false, keep needs_human false unless a human is really needed, set skip_reason to a short explanation, and keep reply as an empty string or a minimal internal draft that will not be posted."
-            "Return JSON with the fields: category, summary, reply, confidence, should_auto_post, needs_human, skip_reason."
+            "You also help assign issue labels. Only choose labels from available_labels when provided. Return at most 3 labels, and return an empty list if you are uncertain."
+            "Return JSON with the fields: category, summary, reply, confidence, should_auto_post, needs_human, skip_reason, recommended_labels."
         )
         user = json.dumps(
             {
@@ -1271,6 +1478,7 @@ def generate_issue_reply(*, payload: dict[str, Any], job_id: str) -> dict[str, A
                 "latest_user_message": issue.get("latest_user_message") or {},
                 "messages": issue.get("messages") or [],
                 "related_context": related_context,
+                "image_summaries": image_summaries,
                 "reply_style": {
                     "prefer_vector_grounded_answer": True,
                     "when_code_question": "answer the user's concrete question first, then mention retrieved code evidence naturally",
@@ -1287,6 +1495,8 @@ def generate_issue_reply(*, payload: dict[str, Any], job_id: str) -> dict[str, A
                     "needs_human_by_rule": needs_human,
                     "matched_human_keyword": matched_human_keyword,
                 },
+                "available_labels": list(rules.get("available_labels") or []),
+                "labeling_instructions": str(rules.get("labeling_instructions") or ""),
                 "reply_template": str(rules.get("reply_template") or ""),
                 "reply_requirements": str(rules.get("reply_requirements") or ""),
             },
@@ -1308,6 +1518,7 @@ def generate_issue_reply(*, payload: dict[str, Any], job_id: str) -> dict[str, A
                     "should_auto_post": False,
                     "needs_human": True,
                     "skip_reason": "llm generation failed",
+                    "recommended_labels": [],
                     "error": str(exc),
                 }
             )
@@ -1321,6 +1532,7 @@ def generate_issue_reply(*, payload: dict[str, Any], job_id: str) -> dict[str, A
                 "should_auto_post": False,
                 "needs_human": True,
                 "skip_reason": "llm unavailable",
+                "recommended_labels": [],
             }
         )
 
@@ -1344,6 +1556,16 @@ def generate_issue_reply(*, payload: dict[str, Any], job_id: str) -> dict[str, A
         result["skip_reason"] = "llm decided no reply is needed"
         if "llm decided no reply is needed" not in result["decision_reasons"]:
             result["decision_reasons"].append("llm decided no reply is needed")
+
+    auto_label_result = build_issue_auto_labels(issue, rules, result)
+    auto_label_result = apply_issue_auto_labels(issue=issue, rules=rules, auto_label_result=auto_label_result)
+    result["auto_label_result"] = auto_label_result
+    update_issue_auto_label_result(
+        project_id=project_id,
+        provider=issue["provider"],
+        issue_number=issue["issue_number"],
+        auto_label_result=auto_label_result,
+    )
 
     latest_status = "blocked" if blocked else ("needs_human" if bool(result.get("needs_human")) else ("generated" if bool(result.get("should_auto_post")) else "skipped"))
     latest_posted_at = ""

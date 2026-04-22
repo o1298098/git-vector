@@ -9,6 +9,8 @@ import logging
 import re
 from typing import Annotated, Any, Literal, Optional
 
+import httpx
+
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -28,6 +30,9 @@ MAX_RETRIEVAL_QUERY_CHARS = 500
 MAX_HISTORY_TURNS = 16
 MAX_HISTORY_TURN_CHARS = 3_000
 MAX_HISTORY_CHARS = 10_000
+MAX_IMAGE_COUNT = 4
+MAX_IMAGE_DATA_URL_CHARS = 7_000_000
+MAX_IMAGE_SUMMARY_CHARS = 4_000
 
 ChatIntent = Literal["code_qa", "chitchat", "product_help", "admin_ops", "unknown"]
 AdminIntent = Literal["audit_help", "settings_help", "jobs_help", "vectors_help", "usage_help", "enqueue_help", "search_help", "chat_help", "admin_general"]
@@ -119,8 +124,15 @@ class CodeChatHistoryTurn(BaseModel):
     content: str = Field(..., min_length=1, max_length=MAX_HISTORY_TURN_CHARS)
 
 
+class CodeChatImage(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255)
+    mime_type: str = Field(..., min_length=1, max_length=100)
+    data_url: str = Field(..., min_length=32, max_length=MAX_IMAGE_DATA_URL_CHARS)
+
+
 class CodeChatBody(BaseModel):
-    message: str = Field(..., min_length=1, max_length=8000)
+    message: str = Field(default="", max_length=8000)
+    images: list[CodeChatImage] = Field(default_factory=list, max_length=MAX_IMAGE_COUNT)
     project_id: Optional[str] = None
     top_k: int = Field(12, ge=1, le=30)
     history: list[CodeChatHistoryTurn] = Field(default_factory=list, max_length=MAX_HISTORY_TURNS)
@@ -189,6 +201,28 @@ def _rewrite_retrieval_query(client: LLMClient, user_message: str, lang: str) ->
         return user_message.strip()
 
 
+def _build_retrieval_input(message: str, image_summaries: list[str]) -> str:
+    msg = message.strip()
+    if not image_summaries:
+        return msg
+
+    image_retrieval_text = "\n\n".join(
+        (summary or "").strip()[:MAX_IMAGE_SUMMARY_CHARS] for summary in image_summaries if (summary or "").strip()
+    )
+    if not image_retrieval_text:
+        return msg
+
+    if msg:
+        reserved = len("\n\nAttached image details:\n")
+        available_for_images = max(0, MAX_HISTORY_CHARS - len(msg) - reserved)
+        if available_for_images <= 0:
+            return msg[:MAX_HISTORY_CHARS]
+        image_retrieval_text = image_retrieval_text[:available_for_images]
+        return f"{msg}\n\nAttached image details:\n{image_retrieval_text}"
+
+    return image_retrieval_text[:MAX_HISTORY_CHARS]
+
+
 def _system_prompt(lang: str) -> str:
     return (
         "You are a senior software engineer assistant. The user's message includes retrieved "
@@ -244,6 +278,43 @@ def _history_block(lang: str, history: list[CodeChatHistoryTurn]) -> str:
         lines.append(f"{speaker}:\n{content}")
     joined = "\n\n".join(lines)
     return f"Recent conversation context:\n{joined}"
+
+
+def _vision_summary_system(lang: str) -> str:
+    return (
+        "You are an image understanding assistant for a code chat product. "
+        "Describe the image briefly and focus on information that helps answer a user's technical question. "
+        "If the image is a screenshot, mention visible UI text, errors, file names, code, diagrams, or logs. "
+        "Do not hallucinate unreadable details. Keep it under 200 words. "
+        + _reply_language_instruction(lang)
+    )
+
+
+def _image_to_openai_content(image: CodeChatImage) -> list[dict[str, Any]]:
+    return [
+        {"type": "text", "text": "Please summarize this image for a developer Q&A context."},
+        {"type": "image_url", "image_url": {"url": image.data_url}},
+    ]
+
+
+def _summarize_images(client: LLMClient, images: list[CodeChatImage], lang: str) -> list[str]:
+    if not images:
+        return []
+    summaries: list[str] = []
+    for idx, image in enumerate(images, start=1):
+        try:
+            summary = client.chat_multimodal(
+                _vision_summary_system(lang),
+                _image_to_openai_content(image),
+                feature="code_chat_image_summary",
+            )
+        except Exception as e:
+            logger.warning("code-chat image summary failed: %s", e)
+            summary = ""
+        cleaned = (summary or "").strip()[:MAX_IMAGE_SUMMARY_CHARS]
+        if cleaned:
+            summaries.append(f"Image {idx} ({image.name}):\n{cleaned}")
+    return summaries
 
 
 def _normalize_intent_label(raw: str) -> ChatIntent:
@@ -393,8 +464,10 @@ def _code_chat_rag(
     msg = body.message.strip()
     pid = (body.project_id or "").strip() or None
     lang = effective_content_language()
-    retrieval_query = _rewrite_retrieval_query(client, msg, lang)
     history_block = _history_block(lang, body.history)
+    image_summaries = _summarize_images(client, body.images, lang)
+    retrieval_input = _build_retrieval_input(msg, image_summaries)
+    retrieval_query = _rewrite_retrieval_query(client, retrieval_input or "image attached", lang)
 
     store = get_vector_store()
     results = store.query(text=retrieval_query, project_id=pid, top_k=body.top_k)
@@ -413,16 +486,24 @@ def _code_chat_rag(
         parts.append(block)
         total += len(block)
 
+    image_block = ""
+    if image_summaries:
+        image_block = "\n\n---\nAttached images summary:\n" + "\n\n".join(image_summaries)
+
     if parts:
         context_str = "\n---\n".join(parts)
         user_payload = (
             (f"{history_block}\n\n---\n" if history_block else "")
-            + f"User question:\n{msg}\n\n---\nRetrieved snippets:\n{context_str}"
+            + f"User question:\n{msg or '[image only]'}"
+            + image_block
+            + f"\n\n---\nRetrieved snippets:\n{context_str}"
         )
     else:
         user_payload = (
             (f"{history_block}\n\n---\n" if history_block else "")
-            + f"User question:\n{msg}\n\n"
+            + f"User question:\n{msg or '[image only]'}"
+            + image_block
+            + "\n\n"
             f"Search query used for vector retrieval (may be LLM-rewritten):\n{retrieval_query}\n\n"
             "Note: vector search returned no snippets from indexed documentation. "
             "Reply briefly: possible reasons (project not indexed, wording mismatch, wrong project filter) "

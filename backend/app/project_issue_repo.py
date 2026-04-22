@@ -59,6 +59,7 @@ def _init(conn: sqlite3.Connection) -> None:
             latest_reply_posted_at TEXT NOT NULL DEFAULT '',
             latest_reply_comment_url TEXT NOT NULL DEFAULT '',
             latest_reply_error TEXT NOT NULL DEFAULT '',
+            latest_auto_label_result_json TEXT NOT NULL DEFAULT '{}',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             UNIQUE(project_id, provider, issue_number)
@@ -69,6 +70,7 @@ def _init(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "latest_reply_posted_at", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(conn, "latest_reply_comment_url", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(conn, "latest_reply_error", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "latest_auto_label_result_json", "TEXT NOT NULL DEFAULT '{}' ")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_project_issues_project_updated ON project_issues(project_id, updated_at DESC)"
     )
@@ -88,6 +90,14 @@ def _parse_json_list(raw: str) -> list[str]:
         if text:
             out.append(text)
     return out
+
+
+def _parse_json_dict(raw: str) -> dict[str, Any]:
+    try:
+        value = json.loads(raw or "{}")
+    except Exception:
+        value = {}
+    return value if isinstance(value, dict) else {}
 
 
 def _parse_messages_json(raw: str) -> list[dict[str, Any]]:
@@ -279,6 +289,7 @@ def _row_to_issue(row: sqlite3.Row) -> dict[str, Any]:
         "latest_reply_posted_at": str(row["latest_reply_posted_at"] or "").strip(),
         "latest_reply_comment_url": str(row["latest_reply_comment_url"] or "").strip(),
         "latest_reply_error": str(row["latest_reply_error"] or ""),
+        "latest_auto_label_result": _parse_json_dict(str(row["latest_auto_label_result_json"] or "{}")),
         "created_at": str(row["created_at"] or "").strip(),
         "updated_at": str(row["updated_at"] or "").strip(),
     }
@@ -311,6 +322,7 @@ def upsert_project_issue(*, payload: dict[str, Any]) -> dict[str, Any]:
             ).fetchone()
             existing_status = str(existing["status"] or "").strip().lower() if existing else ""
             existing_action = str(existing["action"] or "").strip().lower() if existing else ""
+            existing_auto_label_result_json = str(existing["latest_auto_label_result_json"] or "{}") if existing else "{}"
             if existing_status == "closed" and not raw_status and action in {"update", "updated", "edit", "edited", "comment_create", "comment_created", "comment_add"}:
                 status = "closed"
                 if action in {"comment_create", "comment_created", "comment_add"}:
@@ -328,9 +340,9 @@ def upsert_project_issue(*, payload: dict[str, Any]) -> dict[str, Any]:
                 INSERT INTO project_issues (
                     project_id, provider, issue_number, issue_url, repo_url, title, body, author,
                     labels_json, action, comments_json, messages_json, status, latest_reply_job_id, latest_reply_status,
-                    latest_reply_preview, latest_reply_posted_at, latest_reply_comment_url, latest_reply_error,
+                    latest_reply_preview, latest_reply_posted_at, latest_reply_comment_url, latest_reply_error, latest_auto_label_result_json,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', '', '', '', '', ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', '', '', '', '', '{}', ?, ?)
                 ON CONFLICT(project_id, provider, issue_number) DO UPDATE SET
                     issue_url=excluded.issue_url,
                     repo_url=excluded.repo_url,
@@ -350,6 +362,7 @@ def upsert_project_issue(*, payload: dict[str, Any]) -> dict[str, Any]:
                             THEN project_issues.status
                         ELSE excluded.status
                     END,
+                    latest_auto_label_result_json=project_issues.latest_auto_label_result_json,
                     updated_at=excluded.updated_at
                 """,
                 (
@@ -370,6 +383,11 @@ def upsert_project_issue(*, payload: dict[str, Any]) -> dict[str, Any]:
                     updated_at,
                 ),
             )
+            if existing and existing_auto_label_result_json:
+                conn.execute(
+                    "UPDATE project_issues SET latest_auto_label_result_json=? WHERE project_id=? AND provider=? AND issue_number=?",
+                    (existing_auto_label_result_json, project_id, provider, issue_number),
+                )
             conn.commit()
             row = conn.execute(
                 "SELECT * FROM project_issues WHERE project_id=? AND provider=? AND issue_number=?",
@@ -436,6 +454,37 @@ def update_issue_labels(
                     """,
                     (json.dumps(normalized_labels, ensure_ascii=False), now, pid, prov, num),
                 )
+            conn.commit()
+            return int(cur.rowcount or 0) > 0
+        finally:
+            conn.close()
+
+
+def update_issue_auto_label_result(
+    *,
+    project_id: str,
+    provider: str,
+    issue_number: str,
+    auto_label_result: dict[str, Any],
+) -> bool:
+    pid = str(project_id or "").strip()
+    prov = str(provider or "generic").strip().lower() or "generic"
+    num = str(issue_number or "").strip()
+    if not pid or not num:
+        return False
+    now = _utc_now_iso()
+    with _lock:
+        conn = _conn()
+        try:
+            _init(conn)
+            cur = conn.execute(
+                """
+                UPDATE project_issues
+                SET latest_auto_label_result_json=?, updated_at=?
+                WHERE project_id=? AND provider=? AND issue_number=?
+                """,
+                (json.dumps(auto_label_result or {}, ensure_ascii=False), now, pid, prov, num),
+            )
             conn.commit()
             return int(cur.rowcount or 0) > 0
         finally:

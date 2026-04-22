@@ -84,6 +84,20 @@ class LLMClient(ABC):
     def chat(self, system: str, user: str, *, feature: str = "general", project_id: str = "") -> str:
         pass
 
+    def chat_multimodal(
+        self,
+        system: str,
+        user_content: list[dict[str, Any]],
+        *,
+        feature: str = "general",
+        project_id: str = "",
+    ) -> str:
+        text_parts: list[str] = []
+        for item in user_content:
+            if item.get("type") == "text" and item.get("text"):
+                text_parts.append(str(item.get("text")))
+        return self.chat(system, "\n\n".join(text_parts), feature=feature, project_id=project_id)
+
     def chat_stream(self, system: str, user: str, *, feature: str = "general", project_id: str = "") -> Iterator[str]:
         """逐段产出模型文本；默认退化为单次 blocking 回复。"""
         yield self.chat(system, user, feature=feature, project_id=project_id)
@@ -489,6 +503,103 @@ class OpenAICompatibleClient(LLMClient):
             )
             raise
 
+    def chat_multimodal(
+        self,
+        system: str,
+        user_content: list[dict[str, Any]],
+        *,
+        feature: str = "general",
+        project_id: str = "",
+    ) -> str:
+        prompt_text = f"{system}\n\n[multimodal user content]"
+        started = time.perf_counter()
+        try:
+            with httpx.Client(timeout=120) as client:
+                body: dict[str, Any] = {
+                    "model": self.model,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user_content},
+                    ],
+                }
+                if self.use_azure_header:
+                    body["max_completion_tokens"] = 1024
+                else:
+                    body["max_tokens"] = 1024
+                r = client.post(self.chat_url, headers=self._headers(), json=body)
+                r.raise_for_status()
+                data = r.json()
+                choice = (data.get("choices") or [None])[0]
+                if not choice:
+                    return ""
+                msg = choice.get("message") or {}
+                answer = (msg.get("content") or "").strip()
+                usage = data.get("usage") or {}
+                prompt_tokens = usage.get("prompt_tokens") if isinstance(usage, dict) else None
+                completion_tokens = usage.get("completion_tokens") if isinstance(usage, dict) else None
+                total_tokens = usage.get("total_tokens") if isinstance(usage, dict) else None
+                latency_ms = int((time.perf_counter() - started) * 1000)
+                _append_llm_audit_event(
+                    provider="openai_compatible",
+                    model=self.model,
+                    endpoint="/chat/completions",
+                    feature=feature,
+                    http_status_code=r.status_code,
+                    ok=True,
+                    latency_ms=latency_ms,
+                    project_id=project_id,
+                    prompt_tokens=int(prompt_tokens) if prompt_tokens is not None else None,
+                    completion_tokens=int(completion_tokens) if completion_tokens is not None else None,
+                    total_tokens=int(total_tokens) if total_tokens is not None else None,
+                    extra={"multimodal": True},
+                )
+                record_llm_usage(
+                    provider="openai_compatible",
+                    model=self.model,
+                    feature=feature,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    total_tokens=total_tokens,
+                    prompt_text=prompt_text,
+                    completion_text=answer,
+                    success=True,
+                    latency_ms=latency_ms,
+                    ttfb_ms=latency_ms,
+                    estimated_cost_usd=_estimate_cost_usd(
+                        self.model,
+                        int(prompt_tokens or 0),
+                        int(completion_tokens or 0),
+                        int(total_tokens or 0),
+                    ),
+                    project_id=project_id,
+                )
+                return answer
+        except Exception as e:
+            _append_llm_audit_event(
+                provider="openai_compatible",
+                model=self.model,
+                endpoint="/chat/completions",
+                feature=feature,
+                http_status_code=r.status_code if "r" in locals() and r is not None else None,
+                ok=False,
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                project_id=project_id,
+                error_type=type(e).__name__,
+                error_message=str(e),
+                extra={"multimodal": True},
+            )
+            record_llm_usage(
+                provider="openai_compatible",
+                model=self.model,
+                feature=feature,
+                prompt_text=prompt_text,
+                completion_text="",
+                success=False,
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                project_id=project_id,
+            )
+            raise
+
     def chat_stream(self, system: str, user: str, *, feature: str = "general", project_id: str = "") -> Iterator[str]:
         prompt_text = f"{system}\n\n{user}"
         acc_answer = ""
@@ -722,6 +833,49 @@ class AzureOpenAISDKClient(LLMClient):
                 latency_ms=int((time.perf_counter() - started) * 1000),
                 project_id=project_id,
             )
+            raise
+
+    def chat_multimodal(
+        self,
+        system: str,
+        user_content: list[dict[str, Any]],
+        *,
+        feature: str = "general",
+        project_id: str = "",
+    ) -> str:
+        prompt_text = f"{system}\n\n[multimodal user content]"
+        started = time.perf_counter()
+        try:
+            resp = self._client.chat.completions.create(
+                model=self.deployment,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user_content},
+                ],
+                extra_body={"max_completion_tokens": 1024},
+            )
+            choice = (resp.choices or [None])[0]
+            if not choice or not choice.message:
+                return ""
+            answer = (choice.message.content or "").strip()
+            u = getattr(resp, "usage", None)
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            _append_llm_audit_event(
+                provider="azure_openai",
+                model=self.deployment,
+                endpoint="azure.chat.completions",
+                feature=feature,
+                http_status_code=200,
+                ok=True,
+                latency_ms=latency_ms,
+                project_id=project_id,
+                prompt_tokens=int(getattr(u, "prompt_tokens", 0)) if u is not None and getattr(u, "prompt_tokens", None) is not None else None,
+                completion_tokens=int(getattr(u, "completion_tokens", 0)) if u is not None and getattr(u, "completion_tokens", None) is not None else None,
+                total_tokens=int(getattr(u, "total_tokens", 0)) if u is not None and getattr(u, "total_tokens", None) is not None else None,
+                extra={"multimodal": True},
+            )
+            return answer
+        except Exception:
             raise
 
     def chat_stream(self, system: str, user: str, *, feature: str = "general", project_id: str = "") -> Iterator[str]:
