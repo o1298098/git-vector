@@ -1,7 +1,7 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Copy, Pencil, RefreshCw, ThumbsDown, ThumbsUp } from "lucide-react";
 import type { BubbleItemType } from "@ant-design/x";
-import { Button, message } from "antd";
+import { Button, Image, Input, message } from "antd";
 import type { StoredChatTurn as ChatTurn } from "@/lib/codeChatStorage";
 import { useI18n } from "@/i18n/I18nContext";
 import { AssistantMarkdownBubble } from "./AssistantMarkdownBubble";
@@ -17,6 +17,93 @@ type Params = {
   feedbackByTurn: Record<string, 1 | -1>;
   submitFeedback: (assistantTurnId: string, rating: 1 | -1) => Promise<"accepted" | "duplicate" | "failed">;
 };
+
+function EditableUserBubble({
+  turn,
+  loading,
+  isEditing,
+  setEditingUserId,
+  handleUserEditConfirm,
+}: {
+  turn: ChatTurn;
+  loading: boolean;
+  isEditing: boolean;
+  setEditingUserId: (id: string | null) => void;
+  handleUserEditConfirm: (userTurnId: string, nextRaw: string) => void;
+}) {
+  const { t } = useI18n();
+  const [draft, setDraft] = useState(turn.content);
+
+  useEffect(() => {
+    if (isEditing) {
+      setDraft(turn.content);
+      return;
+    }
+    setDraft(turn.content);
+  }, [isEditing, turn.content]);
+
+  const canSubmit = draft.trim().length > 0 && !loading;
+
+  return (
+    <div className={isEditing ? "space-y-3 rounded-2xl border border-border/60 bg-background/80 p-3 shadow-sm" : "space-y-2"}>
+      {turn.images?.length ? (
+        <Image.PreviewGroup>
+          <div className="flex flex-wrap gap-2">
+            {turn.images.map((image) => (
+              <div
+                key={image.id}
+                className="group overflow-hidden rounded-2xl border border-border/60 bg-background/70 shadow-sm transition hover:border-border hover:shadow"
+              >
+                <Image
+                  src={image.dataUrl}
+                  alt={image.name}
+                  width={112}
+                  height={112}
+                  className="object-cover transition group-hover:scale-[1.02]"
+                  style={{ objectFit: "cover" }}
+                  preview={{ mask: false }}
+                />
+              </div>
+            ))}
+          </div>
+        </Image.PreviewGroup>
+      ) : null}
+      {isEditing ? (
+        <div className="space-y-3">
+          <div className="rounded-xl border border-border/55 bg-muted/35 px-2 py-2">
+            <Input.TextArea
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              autoSize={{ minRows: 3, maxRows: 8 }}
+              disabled={loading}
+              variant="borderless"
+              className="bg-transparent"
+            />
+          </div>
+          <div className="flex items-center justify-between gap-3">
+            <div className="text-xs text-muted-foreground">{t("chat.editMessageAria")}</div>
+            <div className="flex items-center gap-2">
+              <Button size="small" className="rounded-lg" onClick={() => setEditingUserId(null)} disabled={loading}>
+                {t("chat.editCancel")}
+              </Button>
+              <Button
+                size="small"
+                type="primary"
+                className="rounded-lg px-3"
+                onClick={() => handleUserEditConfirm(turn.id, draft)}
+                disabled={!canSubmit}
+              >
+                {t("chat.editSave")}
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : turn.content ? (
+        <div className="leading-6">{turn.content}</div>
+      ) : null}
+    </div>
+  );
+}
 
 export function useCodeChatBubbleItems({
   turns,
@@ -42,19 +129,21 @@ export function useCodeChatBubbleItems({
   return useMemo(() => {
     const items: BubbleItemType[] = turns.map((turn) => {
       if (turn.role === "user") {
-        const showUserActions = !loading && editingUserId !== turn.id;
+        const isEditing = editingUserId === turn.id;
+        const showUserActions = !loading && !isEditing;
         return {
           key: turn.id,
           role: "user",
-          content: turn.content,
+          content: (
+            <EditableUserBubble
+              turn={turn}
+              loading={loading}
+              isEditing={isEditing}
+              setEditingUserId={setEditingUserId}
+              handleUserEditConfirm={handleUserEditConfirm}
+            />
+          ),
           className: `gv-code-chat-user-bubble gv-code-chat-turn-${turn.id}`,
-          editable: {
-            editing: editingUserId === turn.id,
-            okText: t("chat.editSave"),
-            cancelText: t("chat.editCancel"),
-          },
-          onEditConfirm: (next: string) => handleUserEditConfirm(turn.id, next),
-          onEditCancel: () => setEditingUserId(null),
           extra: showUserActions ? (
             <div className="flex items-center gap-0.5">
               <Button

@@ -10,7 +10,7 @@ import {
   type StoredHit as Hit,
 } from "@/lib/codeChatStorage";
 import { useI18n } from "@/i18n/I18nContext";
-import type { CodeChatProjectOption } from "./types";
+import type { CodeChatImagePayload, CodeChatProjectOption } from "./types";
 
 /** 流式「打字机」：与网络分包解耦，按固定节奏逐字（略加速追赶积压） */
 const STREAM_TYPING_TICK_MS = 26;
@@ -22,13 +22,24 @@ type ChatHistoryTurnPayload = {
   role: "user" | "assistant";
   content: string;
 };
+
+type ChatImagePayload = {
+  name: string;
+  mime_type: string;
+  data_url: string;
+};
+
 type SubmitFeedbackStatus = "accepted" | "duplicate" | "failed";
+
+const MAX_IMAGE_COUNT = 4;
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 
 export function useCodeChat() {
   const { t } = useI18n();
   const [sessions, setSessions] = useState<ChatSession[]>(() => readInitialCodeChatState().sessions);
   const [activeId, setActiveId] = useState<string>(() => readInitialCodeChatState().activeId);
   const [input, setInput] = useState("");
+  const [pendingImages, setPendingImages] = useState<CodeChatImagePayload[]>([]);
   const [loading, setLoading] = useState(false);
   const [typingBusy, setTypingBusy] = useState(false);
   const [editingUserId, setEditingUserId] = useState<string | null>(null);
@@ -229,9 +240,54 @@ export function useCodeChat() {
     [activeId],
   );
 
+  const addPendingImages = useCallback(
+    async (files: FileList | File[] | null) => {
+      if (!files || files.length === 0) return;
+      const incoming = Array.from(files).filter((file) => file.type.startsWith("image/"));
+      const slots = Math.max(0, MAX_IMAGE_COUNT - pendingImages.length);
+      if (slots <= 0) return;
+      const picked = incoming.slice(0, slots);
+      const results = await Promise.all(
+        picked.map(
+          (file) =>
+            new Promise<CodeChatImagePayload | null>((resolve) => {
+              if (file.size > MAX_IMAGE_BYTES) {
+                resolve(null);
+                return;
+              }
+              const reader = new FileReader();
+              reader.onload = () => {
+                const dataUrl = typeof reader.result === "string" ? reader.result : "";
+                if (!dataUrl) {
+                  resolve(null);
+                  return;
+                }
+                resolve({
+                  id: randomId(),
+                  name: file.name,
+                  mimeType: file.type || "image/png",
+                  dataUrl,
+                  size: file.size,
+                });
+              };
+              reader.onerror = () => resolve(null);
+              reader.readAsDataURL(file);
+            }),
+        ),
+      );
+      setPendingImages((prev) => [...prev, ...results.filter((item): item is CodeChatImagePayload => item != null)]);
+    },
+    [pendingImages.length],
+  );
+
+  const removePendingImage = useCallback((id: string) => {
+    setPendingImages((prev) => prev.filter((image) => image.id !== id));
+  }, []);
+
   const newChat = useCallback(() => {
     if (loading || typingBusy) return;
     setEditingUserId(null);
+    setPendingImages([]);
     const s = createChatSession();
     setSessions((prev) => [s, ...prev]);
     setActiveId(s.id);
@@ -241,6 +297,7 @@ export function useCodeChat() {
     (id: string) => {
       if (loading || typingBusy || id === activeId) return;
       setEditingUserId(null);
+      setPendingImages([]);
       setActiveId(id);
     },
     [loading, typingBusy, activeId],
@@ -284,9 +341,14 @@ export function useCodeChat() {
   }, []);
 
   const streamAssistant = useCallback(
-    async (userMessage: string, assistantId: string, historyTurns: ChatTurn[]) => {
+    async (
+      userMessage: string,
+      assistantId: string,
+      historyTurns: ChatTurn[],
+      images: ChatImagePayload[] = [],
+    ) => {
       const trimmed = userMessage.trim();
-      if (!trimmed) return;
+      if (!trimmed && images.length === 0) return;
       streamAbortRef.current?.abort();
       const controller = new AbortController();
       streamAbortRef.current = controller;
@@ -294,6 +356,7 @@ export function useCodeChat() {
       setTypingBusy(true);
       const body = JSON.stringify({
         message: trimmed,
+        images,
         project_id: projectId.trim() || null,
         top_k: topK,
         history: buildHistoryPayload(historyTurns),
@@ -487,15 +550,25 @@ export function useCodeChat() {
   const doSend = useCallback(
     async (text: string) => {
       const trimmed = text.trim();
-      if (!trimmed || loading || typingBusy) return;
+      if ((trimmed.length === 0 && pendingImages.length === 0) || loading || typingBusy) return;
       setEditingUserId(null);
       const uid = randomId();
       const aid = randomId();
       const historyBeforeSend = turns;
-      setTurns((prev) => [...prev, { id: uid, role: "user", content: trimmed }]);
-      await streamAssistant(trimmed, aid, historyBeforeSend);
+      const imagesForSend: CodeChatImagePayload[] = pendingImages;
+      const imagePayloads: ChatImagePayload[] = imagesForSend.map((image) => ({
+        name: image.name,
+        mime_type: image.mimeType,
+        data_url: image.dataUrl,
+      }));
+      setPendingImages([]);
+      setTurns((prev) => [
+        ...prev,
+        { id: uid, role: "user", content: trimmed, images: imagesForSend },
+      ]);
+      await streamAssistant(trimmed, aid, historyBeforeSend, imagePayloads);
     },
-    [loading, typingBusy, streamAssistant, setTurns, turns],
+    [loading, typingBusy, pendingImages, streamAssistant, setTurns, turns],
   );
 
   const handleUserEditConfirm = useCallback(
@@ -504,13 +577,19 @@ export function useCodeChat() {
       setEditingUserId(null);
       if (!trimmed || loading || typingBusy) return;
       let historyBeforeEditedMessage: ChatTurn[] = [];
+      let editedImages: ChatImagePayload[] = [];
       setTurns((prev) => {
         const i = prev.findIndex((x) => x.id === userTurnId);
         if (i < 0 || prev[i].role !== "user") return prev;
         historyBeforeEditedMessage = prev.slice(0, i);
+        editedImages = (prev[i].images ?? []).map((image) => ({
+          name: image.name,
+          mime_type: image.mimeType,
+          data_url: image.dataUrl,
+        }));
         return [...prev.slice(0, i), { ...prev[i], content: trimmed }];
       });
-      void streamAssistant(trimmed, randomId(), historyBeforeEditedMessage);
+      void streamAssistant(trimmed, randomId(), historyBeforeEditedMessage, editedImages);
     },
     [loading, typingBusy, streamAssistant, setTurns],
   );
@@ -583,6 +662,9 @@ export function useCodeChat() {
   return {
     input,
     setInput,
+    pendingImages,
+    addPendingImages,
+    removePendingImage,
     loading: loading || typingBusy,
     editingUserId,
     setEditingUserId,

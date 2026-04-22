@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { Bubble, Sender, XProvider } from "@ant-design/x";
 import "@ant-design/x-markdown/themes/light.css";
 import "@ant-design/x-markdown/themes/dark.css";
@@ -13,6 +13,7 @@ import { CODE_CHAT_BUBBLE_ROLE } from "./components/codeChatBubbleRole";
 import { CodeChatHistoryCard } from "./components/CodeChatHistoryCard";
 import { CodeChatMobileHistoryDrawer } from "./components/CodeChatMobileHistoryDrawer";
 import { CodeChatQuickNav } from "./components/CodeChatQuickNav";
+import { CodeChatImageComposer } from "./components/CodeChatImageComposer";
 import { CodeChatComposerPrefix } from "./components/CodeChatSessionToolbar";
 import { useCodeChat } from "./components/useCodeChat";
 import { useCodeChatBubbleItems } from "./components/useCodeChatBubbleItems";
@@ -22,6 +23,7 @@ export function CodeChat() {
   const { resolvedDark } = useTheme();
   const chat = useCodeChat();
   const [mobileHistoryOpen, setMobileHistoryOpen] = useState(false);
+  const senderWrapRef = useRef<HTMLDivElement | null>(null);
 
   const mergedLocale = useMemo(
     () => (uiLocale === "zh" ? { ...zhCN, ...zhCN_X } : { ...enUS, ...enUS_X }),
@@ -62,6 +64,17 @@ export function CodeChat() {
   const handleHistoryDeleteSession = (id: string) => {
     chat.deleteSession(id);
     setMobileHistoryOpen(false);
+  };
+
+  const handlePasteCapture = (e: React.ClipboardEvent<HTMLDivElement>) => {
+    if (chat.loading) return;
+    const files = Array.from(e.clipboardData.items)
+      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => file != null);
+    if (files.length === 0) return;
+    e.preventDefault();
+    void chat.addPendingImages(files);
   };
 
   return (
@@ -118,7 +131,17 @@ export function CodeChat() {
             </div>
 
             <div className="gv-code-chat-dock shrink-0 border-t border-border/40 bg-background/85 px-3 py-3 backdrop-blur-md supports-[backdrop-filter]:bg-background/70 sm:px-6 sm:py-4">
-              <div className="gv-code-chat-thread mx-auto w-full">
+              <div
+                ref={senderWrapRef}
+                className="gv-code-chat-thread mx-auto w-full space-y-2"
+                onPasteCapture={handlePasteCapture}
+                title={t("chat.pasteImageHint")}
+              >
+                <CodeChatImageComposer
+                  images={chat.pendingImages}
+                  disabled={chat.loading}
+                  onRemove={chat.removePendingImage}
+                />
                 <Sender
                   rootClassName="gv-code-chat-sender"
                   styles={{

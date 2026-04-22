@@ -15,10 +15,19 @@ export type StoredHit = {
   metadata?: Record<string, unknown>;
 };
 
+export type StoredChatImage = {
+  id: string;
+  name: string;
+  mimeType: string;
+  dataUrl: string;
+  size: number;
+};
+
 export type StoredChatTurn = {
   id: string;
   role: "user" | "assistant";
   content: string;
+  images?: StoredChatImage[];
   sources?: StoredHit[];
   retrievalQuery?: string;
   streaming?: boolean;
@@ -69,6 +78,18 @@ function sanitizeTurn(t: unknown): StoredChatTurn | null {
     content: o.content,
     streaming: false,
   };
+  if (Array.isArray(o.images)) {
+    base.images = o.images.filter(
+      (img): img is StoredChatImage =>
+        !!img &&
+        typeof img === "object" &&
+        typeof (img as StoredChatImage).id === "string" &&
+        typeof (img as StoredChatImage).name === "string" &&
+        typeof (img as StoredChatImage).mimeType === "string" &&
+        typeof (img as StoredChatImage).dataUrl === "string" &&
+        typeof (img as StoredChatImage).size === "number",
+    ) as StoredChatImage[];
+  }
   if (typeof o.retrievalQuery === "string") base.retrievalQuery = o.retrievalQuery;
   if (Array.isArray(o.sources)) {
     base.sources = o.sources.filter(
