@@ -30,6 +30,16 @@ export type ProjectSummary = {
   job_count: number;
 };
 
+export type IssueAutoLabelResult = {
+  enabled?: boolean;
+  recommended_labels: string[];
+  applied_labels: string[];
+  applied: boolean;
+  apply_error?: string;
+  source?: string;
+  updated_at?: string | null;
+};
+
 export type IssueRules = {
   project_id: string;
   auto_post_default: boolean;
@@ -37,6 +47,10 @@ export type IssueRules = {
   require_human_keywords: string[];
   reply_template: string;
   reply_requirements: string;
+  auto_label_enabled: boolean;
+  auto_apply_labels: boolean;
+  available_labels: string[];
+  labeling_instructions: string;
   updated_at?: string | null;
 };
 
@@ -73,6 +87,7 @@ export type ProjectIssueItem = {
   latest_reply_posted_at: string;
   latest_reply_comment_url: string;
   latest_reply_error: string;
+  latest_auto_label_result?: IssueAutoLabelResult | null;
   created_at: string;
   updated_at: string;
 };

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Image } from "antd";
 import { useParams } from "react-router-dom";
 import { MessageSquareMore, RefreshCw, Tags } from "lucide-react";
 import { apiJson } from "@/lib/api";
@@ -84,11 +85,53 @@ function normalizeLabels(labels: string[]): string[] {
   const normalized: string[] = [];
   for (const item of labels) {
     const text = item.trim();
-    if (!text || seen.has(text)) continue;
-    seen.add(text);
+    const lowered = text.toLowerCase();
+    if (!text || seen.has(lowered)) continue;
+    seen.add(lowered);
     normalized.push(text);
   }
   return normalized;
+}
+
+function getDisplayedIssueLabels(issue: ProjectIssueDetail | null): string[] {
+  if (!issue) return [];
+  const currentLabels = Array.isArray(issue.labels) ? issue.labels : [];
+  const autoAppliedLabels = issue.latest_auto_label_result?.applied_labels ?? [];
+  const autoRecommendedLabels = issue.latest_auto_label_result?.recommended_labels ?? [];
+  return normalizeLabels([...currentLabels, ...autoAppliedLabels, ...autoRecommendedLabels]);
+}
+
+function getIssueKey(issue: Pick<ProjectIssueItem, "provider" | "issue_number"> | Pick<ProjectIssueDetail, "provider" | "issue_number"> | null): string | null {
+  if (!issue) return null;
+  return `${issue.provider}:${issue.issue_number}`;
+}
+
+function parseIssueMessageContent(content?: string): { text: string; imageUrls: string[] } {
+  const source = String(content || "");
+  const imageUrls: string[] = [];
+  const imagePattern = /!\[[^\]]*\]\((https?:\/\/[^\s)]+(?:\([^\s)]*\)[^\s)]*)*)\)/g;
+
+  const text = source
+    .replace(imagePattern, (_, url: string) => {
+      const normalizedUrl = String(url || "").trim();
+      if (normalizedUrl) {
+        imageUrls.push(normalizedUrl);
+      }
+      return "";
+    })
+    .replace(/\{width=\d+\s+height=\d+\}/g, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  return {
+    text,
+    imageUrls: Array.from(new Set(imageUrls)),
+  };
+}
+
+function getIssueCreatorName(issue: ProjectIssueItem | ProjectIssueDetail): string {
+  const messages = "messages" in issue ? issue.messages : undefined;
+  return messages?.find((message: ProjectIssueMessage) => message.kind === "issue_body")?.author || issue.author || "—";
 }
 
 export function ProjectIssueTab() {
@@ -99,10 +142,14 @@ export function ProjectIssueTab() {
   const [humanInput, setHumanInput] = useState("");
   const [templateInput, setTemplateInput] = useState("");
   const [requirementsInput, setRequirementsInput] = useState("");
+  const [availableLabelsInput, setAvailableLabelsInput] = useState("");
+  const [labelingInstructionsInput, setLabelingInstructionsInput] = useState("");
   const [issues, setIssues] = useState<ProjectIssueItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [selectedIssue, setSelectedIssue] = useState<ProjectIssueDetail | null>(null);
+  const [selectedIssueKey, setSelectedIssueKey] = useState<string | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
   const [labelOptions, setLabelOptions] = useState<string[]>([]);
   const [labelEditorOpen, setLabelEditorOpen] = useState(false);
   const [draftLabels, setDraftLabels] = useState<string[]>([]);
@@ -110,6 +157,7 @@ export function ProjectIssueTab() {
   const [labelSaving, setLabelSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const selectedIssueRef = useRef<ProjectIssueDetail | null>(null);
+  const issueDetailRequestSeqRef = useRef(0);
   const initializedRulesRef = useRef(false);
   const lastSavedRulesRef = useRef<string>("");
 
@@ -119,13 +167,24 @@ export function ProjectIssueTab() {
 
   const loadIssueDetail = useCallback(
     async (issue: ProjectIssueItem | null) => {
+      const requestSeq = ++issueDetailRequestSeqRef.current;
       if (!projectId || !issue) {
+        setDetailLoading(false);
+        setSelectedIssueKey(null);
         setSelectedIssue(null);
         setLabelOptions([]);
         setDraftLabels([]);
         setLabelEditorOpen(false);
         return;
       }
+      const issueKey = getIssueKey(issue);
+      setSelectedIssueKey(issueKey);
+      setDetailLoading(true);
+      setSelectedIssue(null);
+      setLabelOptions([]);
+      setDraftLabels([]);
+      setLabelEditorOpen(false);
+      setLabelInput("");
       const [detail, options] = await Promise.all([
         apiJson<ProjectIssueDetail>(
           `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issue.provider)}/${encodeURIComponent(issue.issue_number)}`,
@@ -134,12 +193,14 @@ export function ProjectIssueTab() {
           `/api/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(issue.provider)}/${encodeURIComponent(issue.issue_number)}/labels/options`,
         ).catch(() => null),
       ]);
+      if (requestSeq !== issueDetailRequestSeqRef.current) return;
       setSelectedIssue(detail);
       const normalizedCurrentLabels = normalizeLabels(detail.labels ?? []);
       setDraftLabels(normalizedCurrentLabels);
       setLabelOptions(normalizeLabels([...(options?.available_labels ?? []), ...normalizedCurrentLabels]));
       setLabelEditorOpen(false);
       setLabelInput("");
+      setDetailLoading(false);
     },
     [projectId],
   );
@@ -158,29 +219,39 @@ export function ProjectIssueTab() {
       setHumanInput(formatKeywords(rulesResp.require_human_keywords));
       setTemplateInput(rulesResp.reply_template || "");
       setRequirementsInput(rulesResp.reply_requirements || "");
+      setAvailableLabelsInput(formatKeywords(rulesResp.available_labels || []));
+      setLabelingInstructionsInput(rulesResp.labeling_instructions || "");
       lastSavedRulesRef.current = JSON.stringify({
         auto_post_default: Boolean(rulesResp.auto_post_default),
         blocked_keywords: parseKeywords(formatKeywords(rulesResp.blocked_keywords)),
         require_human_keywords: parseKeywords(formatKeywords(rulesResp.require_human_keywords)),
         reply_template: rulesResp.reply_template || "",
         reply_requirements: rulesResp.reply_requirements || "",
+        auto_label_enabled: Boolean(rulesResp.auto_label_enabled),
+        auto_apply_labels: rulesResp.auto_apply_labels == null ? true : Boolean(rulesResp.auto_apply_labels),
+        available_labels: parseKeywords(formatKeywords(rulesResp.available_labels || [])),
+        labeling_instructions: rulesResp.labeling_instructions || "",
       });
       initializedRulesRef.current = true;
       setIssues(issuesResp.issues ?? []);
 
       const currentSelectedIssue = selectedIssueRef.current;
-      const targetIssue = currentSelectedIssue
-        ? (issuesResp.issues ?? []).find(
-            (item) => item.provider === currentSelectedIssue.provider && item.issue_number === currentSelectedIssue.issue_number,
-          ) ?? null
-        : issuesResp.issues?.[0] ?? null;
+      const currentSelectedIssueKey = selectedIssueKey;
+      const targetIssue = currentSelectedIssueKey
+        ? (issuesResp.issues ?? []).find((item) => getIssueKey(item) === currentSelectedIssueKey) ?? null
+        : currentSelectedIssue
+          ? (issuesResp.issues ?? []).find(
+              (item) => item.provider === currentSelectedIssue.provider && item.issue_number === currentSelectedIssue.issue_number,
+            ) ?? null
+          : issuesResp.issues?.[0] ?? null;
+      setSelectedIssueKey(getIssueKey(targetIssue));
       await loadIssueDetail(targetIssue);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : t("projectIssue.loadFail"));
     } finally {
       setLoading(false);
     }
-  }, [loadIssueDetail, projectId, t]);
+  }, [loadIssueDetail, projectId, selectedIssueKey, t]);
 
   useEffect(() => {
     void load();
@@ -190,6 +261,8 @@ export function ProjectIssueTab() {
     const reply = selectedIssue?.latest_reply_job?.result?.reply;
     return typeof reply === "string" ? reply : selectedIssue?.latest_reply_preview || "";
   }, [selectedIssue]);
+
+  const displayedIssueLabels = useMemo(() => getDisplayedIssueLabels(selectedIssue), [selectedIssue]);
 
   const timelineMessages = useMemo(() => {
     if (!selectedIssue) {
@@ -291,6 +364,10 @@ export function ProjectIssueTab() {
       require_human_keywords: parseKeywords(humanInput),
       reply_template: templateInput,
       reply_requirements: requirementsInput,
+      auto_label_enabled: Boolean(rules.auto_label_enabled),
+      auto_apply_labels: Boolean(rules.auto_apply_labels),
+      available_labels: parseKeywords(availableLabelsInput),
+      labeling_instructions: labelingInstructionsInput,
     };
     const payloadKey = JSON.stringify(payload);
     if (payloadKey === lastSavedRulesRef.current) return;
@@ -301,17 +378,25 @@ export function ProjectIssueTab() {
         method: "PUT",
         body: JSON.stringify(payload),
       });
-      setRules(saved);
-      setBlockedInput(formatKeywords(saved.blocked_keywords));
-      setHumanInput(formatKeywords(saved.require_human_keywords));
-      setTemplateInput(saved.reply_template || "");
-      setRequirementsInput(saved.reply_requirements || "");
+      setRules((prev) =>
+        prev
+          ? {
+              ...prev,
+              project_id: saved.project_id,
+              updated_at: saved.updated_at,
+            }
+          : saved,
+      );
       lastSavedRulesRef.current = JSON.stringify({
         auto_post_default: Boolean(saved.auto_post_default),
         blocked_keywords: parseKeywords(formatKeywords(saved.blocked_keywords)),
         require_human_keywords: parseKeywords(formatKeywords(saved.require_human_keywords)),
         reply_template: saved.reply_template || "",
         reply_requirements: saved.reply_requirements || "",
+        auto_label_enabled: Boolean(saved.auto_label_enabled),
+        auto_apply_labels: Boolean(saved.auto_apply_labels),
+        available_labels: parseKeywords(formatKeywords(saved.available_labels || [])),
+        labeling_instructions: saved.labeling_instructions || "",
       });
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : t("projectIssue.saveFail"));
@@ -322,8 +407,8 @@ export function ProjectIssueTab() {
 
   function toggleDraftLabel(label: string) {
     setDraftLabels((prev) => {
-      const exists = prev.includes(label);
-      return exists ? prev.filter((item) => item !== label) : normalizeLabels([...prev, label]);
+      const exists = prev.some((item) => item.toLowerCase() === label.toLowerCase());
+      return exists ? prev.filter((item) => item.toLowerCase() !== label.toLowerCase()) : normalizeLabels([...prev, label]);
     });
   }
 
@@ -364,19 +449,15 @@ export function ProjectIssueTab() {
       setLabelOptions((prev) => normalizeLabels([...prev, ...response.labels]));
       setLabelEditorOpen(false);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "保存标签失败");
+      setError(err instanceof Error ? err.message : t("projectIssue.saveLabelsFail"));
     } finally {
       setLabelSaving(false);
     }
   }
 
-  useEffect(() => {
-    if (!initializedRulesRef.current || !projectId || !rules) return;
-    const timer = window.setTimeout(() => {
-      void onSaveRules();
-    }, 700);
-    return () => window.clearTimeout(timer);
-  }, [projectId, rules, blockedInput, humanInput, templateInput, requirementsInput]);
+  function onRuleFieldBlur() {
+    void onSaveRules();
+  }
 
   return (
     <div className="grid min-w-0 gap-4 xl:grid-cols-[360px_minmax(0,380px)_minmax(0,1fr)]">
@@ -397,17 +478,53 @@ export function ProjectIssueTab() {
             </div>
             <Switch
               checked={Boolean(rules?.auto_post_default)}
-              onCheckedChange={(checked) => setRules((prev) => (prev ? { ...prev, auto_post_default: checked } : prev))}
+              onCheckedChange={(checked) => {
+                setRules((prev) => (prev ? { ...prev, auto_post_default: checked } : prev));
+                window.setTimeout(() => {
+                  void onSaveRules();
+                }, 0);
+              }}
+              disabled={loading || saving}
+            />
+          </div>
+          <div className="flex items-center justify-between rounded-lg border px-3 py-3">
+            <div>
+              <div className="text-sm font-medium">{t("projectIssue.autoLabel")}</div>
+              <div className="text-xs text-muted-foreground">{t("projectIssue.autoLabelHint")}</div>
+            </div>
+            <Switch
+              checked={Boolean(rules?.auto_label_enabled)}
+              onCheckedChange={(checked) => {
+                setRules((prev) => (prev ? { ...prev, auto_label_enabled: checked } : prev));
+                window.setTimeout(() => {
+                  void onSaveRules();
+                }, 0);
+              }}
               disabled={loading || saving}
             />
           </div>
           <div className="space-y-2">
+            <label className="text-sm font-medium">{t("projectIssue.availableLabels")}</label>
+            <Input value={availableLabelsInput} onChange={(e) => setAvailableLabelsInput(e.target.value)} onBlur={onRuleFieldBlur} disabled={loading || saving} placeholder={t("projectIssue.availableLabelsPlaceholder")} />
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm font-medium">{t("projectIssue.labelingInstructions")}</label>
+            <textarea
+              className="min-h-[100px] w-full max-w-full resize-y rounded-md border bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"
+              value={labelingInstructionsInput}
+              onChange={(e) => setLabelingInstructionsInput(e.target.value)}
+              onBlur={onRuleFieldBlur}
+              disabled={loading || saving}
+              placeholder={t("projectIssue.labelingInstructionsPlaceholder")}
+            />
+          </div>
+          <div className="space-y-2">
             <label className="text-sm font-medium">{t("projectIssue.blockedKeywords")}</label>
-            <Input value={blockedInput} onChange={(e) => setBlockedInput(e.target.value)} disabled={loading || saving} />
+            <Input value={blockedInput} onChange={(e) => setBlockedInput(e.target.value)} onBlur={onRuleFieldBlur} disabled={loading || saving} />
           </div>
           <div className="space-y-2">
             <label className="text-sm font-medium">{t("projectIssue.humanKeywords")}</label>
-            <Input value={humanInput} onChange={(e) => setHumanInput(e.target.value)} disabled={loading || saving} />
+            <Input value={humanInput} onChange={(e) => setHumanInput(e.target.value)} onBlur={onRuleFieldBlur} disabled={loading || saving} />
           </div>
           <div className="space-y-2">
             <label className="text-sm font-medium">{t("projectIssue.replyTemplate")}</label>
@@ -415,6 +532,7 @@ export function ProjectIssueTab() {
               className="min-h-[120px] w-full max-w-full resize-y rounded-md border bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"
               value={templateInput}
               onChange={(e) => setTemplateInput(e.target.value)}
+              onBlur={onRuleFieldBlur}
               disabled={loading || saving}
               placeholder={t("projectIssue.replyTemplatePlaceholder")}
             />
@@ -425,11 +543,12 @@ export function ProjectIssueTab() {
               className="min-h-[120px] w-full max-w-full resize-y rounded-md border bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"
               value={requirementsInput}
               onChange={(e) => setRequirementsInput(e.target.value)}
+              onBlur={onRuleFieldBlur}
               disabled={loading || saving}
               placeholder={t("projectIssue.replyRequirementsPlaceholder")}
             />
           </div>
-          {saving ? <div className="pt-2 text-xs text-muted-foreground">正在自动保存…</div> : null}
+          {saving ? <div className="pt-2 text-xs text-muted-foreground">{t("projectIssue.autoSaving")}</div> : null}
         </CardContent>
       </Card>
 
@@ -446,24 +565,31 @@ export function ProjectIssueTab() {
           {issues.length === 0 ? (
             <div className="rounded-md border border-dashed px-4 py-6 text-sm text-muted-foreground">{t("projectIssue.empty")}</div>
           ) : (
-            issues.map((issue) => (
-              <button
-                key={`${issue.provider}:${issue.issue_number}`}
-                type="button"
-                onClick={() => void loadIssueDetail(issue)}
-                className={`w-full rounded-xl border px-3 py-3 text-left transition-colors ${selectedIssue?.provider === issue.provider && selectedIssue?.issue_number === issue.issue_number ? "border-primary bg-primary/5" : "hover:bg-muted/40"}`}
-              >
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <div className="truncate text-sm font-medium">#{issue.issue_number || "-"} · {issue.title || "—"}</div>
-                    <div className="mt-1 line-clamp-2 text-xs text-muted-foreground">{getIssuePrompt(issue.body, issue.title)}</div>
-                    <div className="mt-2 text-[11px] text-muted-foreground">{t("projectIssue.author")}: {issue.author || "—"}</div>
-                    {issue.latest_reply_error ? <div className="mt-1 line-clamp-2 text-[11px] text-destructive">{issue.latest_reply_error}</div> : null}
+            issues.map((issue) => {
+              const issueKey = getIssueKey(issue);
+              const isSelected = selectedIssueKey === issueKey;
+              return (
+                <button
+                  key={`${issue.provider}:${issue.issue_number}`}
+                  type="button"
+                  onClick={() => {
+                    setSelectedIssueKey(issueKey);
+                    void loadIssueDetail(issue);
+                  }}
+                  className={`w-full rounded-xl border px-3 py-3 text-left transition-colors ${isSelected ? "border-primary bg-primary/5" : "hover:bg-muted/40"}`}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-medium">#{issue.issue_number || "-"} · {issue.title || "—"}</div>
+                      <div className="mt-1 line-clamp-2 text-xs text-muted-foreground">{getIssuePrompt(issue.body, issue.title)}</div>
+                      <div className="mt-2 text-[11px] text-muted-foreground">{t("projectIssue.author")}: {getIssueCreatorName(issue)}</div>
+                      {issue.latest_reply_error ? <div className="mt-1 line-clamp-2 text-[11px] text-destructive">{issue.latest_reply_error}</div> : null}
+                    </div>
+                    <div className="shrink-0 rounded-full border px-2 py-0.5 text-[11px] text-muted-foreground">{getIssueStateLabel(issue, t)}</div>
                   </div>
-                  <div className="shrink-0 rounded-full border px-2 py-0.5 text-[11px] text-muted-foreground">{getIssueStateLabel(issue, t)}</div>
-                </div>
-              </button>
-            ))
+                </button>
+              );
+            })
           )}
         </CardContent>
       </Card>
@@ -474,31 +600,37 @@ export function ProjectIssueTab() {
             <div>
               <CardTitle className="text-base">{t("projectIssue.detailTitle")}</CardTitle>
               <CardDescription>
-                {selectedIssue ? `#${selectedIssue.issue_number} · ${selectedIssue.title || "—"}` : t("projectIssue.detailEmpty")}
+                {detailLoading ? t("projectIssue.detailLoading") : selectedIssue ? `#${selectedIssue.issue_number} · ${selectedIssue.title || "—"}` : t("projectIssue.detailEmpty")}
               </CardDescription>
             </div>
             {selectedIssue ? (
-              <Button
-                type="button"
-                variant="outline"
-                size="icon"
-                onClick={() => {
-                  setDraftLabels(normalizeLabels(selectedIssue.labels ?? []));
-                  setLabelEditorOpen((prev) => !prev);
-                  setLabelInput("");
-                }}
-                        disabled={labelSaving}
-                        aria-label={labelEditorOpen ? t("projectIssue.editLabelsCancelAria") : t("projectIssue.editLabelsAria")}
-                        title={labelEditorOpen ? t("projectIssue.editLabelsCancelAria") : t("projectIssue.editLabelsAria")}
-                      >
-                <Tags className="size-4" aria-hidden />
-              </Button>
+              <div className="flex items-center gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon"
+                  onClick={() => {
+                    setDraftLabels(normalizeLabels(selectedIssue.labels ?? []));
+                    setLabelEditorOpen((prev) => !prev);
+                    setLabelInput("");
+                  }}
+                  disabled={labelSaving}
+                  aria-label={labelEditorOpen ? t("projectIssue.editLabelsCancelAria") : t("projectIssue.editLabelsAria")}
+                  title={labelEditorOpen ? t("projectIssue.editLabelsCancelAria") : t("projectIssue.editLabelsAria")}
+                >
+                  <Tags className="size-4" aria-hidden />
+                </Button>
+              </div>
             ) : null}
           </div>
-          {selectedIssue ? (
+          {detailLoading ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="rounded-full border px-2.5 py-1 text-xs text-muted-foreground">{t("projectIssue.detailMetaLoading")}</span>
+            </div>
+          ) : selectedIssue ? (
             <div className="flex flex-wrap items-center gap-2">
               <span className="rounded-full border px-2.5 py-1 text-xs text-muted-foreground">
-                {t("projectIssue.author")}: {selectedIssue.messages?.find((message) => message.role !== "assistant")?.author || selectedIssue.author || "—"}
+                {t("projectIssue.author")}: {getIssueCreatorName(selectedIssue)}
               </span>
               <span className="rounded-full border px-2.5 py-1 text-xs text-muted-foreground">{t("projectIssue.metaIssueStatus")}: {getIssueStateLabel(selectedIssue, t)}</span>
               <span className="rounded-full border px-2.5 py-1 text-xs text-muted-foreground">{t("projectIssue.metaAutoPost")}: {String(selectedIssue.latest_reply_job?.result?.should_auto_post ?? false)}</span>
@@ -508,16 +640,29 @@ export function ProjectIssueTab() {
                   {t("projectIssue.metaSkipReason")}: {String(selectedIssue.latest_reply_job.result.skip_reason)}
                 </span>
               ) : null}
-              {selectedIssue.labels.map((label) => (
-                <span key={label} className="rounded-full border bg-muted/30 px-2 py-1 text-xs text-muted-foreground">
-                  {label}
-                </span>
-              ))}
+              {displayedIssueLabels.length > 0 ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  {displayedIssueLabels.map((label) => (
+                    <span key={label} className="rounded-full border bg-muted/30 px-2 py-1 text-xs text-muted-foreground">
+                      {label}
+                    </span>
+                  ))}
+                </div>
+              ) : null}
             </div>
           ) : null}
         </CardHeader>
         <CardContent className="min-h-0 flex flex-1 flex-col space-y-4 overflow-hidden px-5 pb-5 text-sm">
-          {selectedIssue ? (
+          {detailLoading ? (
+            <div className="flex min-h-0 flex-1 flex-col rounded-2xl border bg-muted/10 p-4">
+              <div className="space-y-3">
+                <div className="h-4 w-28 rounded bg-muted/70" />
+                <div className="h-3 w-full rounded bg-muted/50" />
+                <div className="h-3 w-5/6 rounded bg-muted/50" />
+              </div>
+              <div className="mt-4 flex-1 rounded-2xl border border-dashed border-border/50 bg-background/40" />
+            </div>
+          ) : selectedIssue ? (
             <div className="flex min-h-0 flex-1 flex-col space-y-4">
               {labelEditorOpen ? (
                 <div className="space-y-3 rounded-lg border bg-background p-3">
@@ -525,7 +670,7 @@ export function ProjectIssueTab() {
                   <div className="flex flex-wrap gap-2">
                     {labelOptions.length > 0 ? (
                       labelOptions.map((label) => {
-                        const active = draftLabels.includes(label);
+                        const active = draftLabels.some((item) => item.toLowerCase() === label.toLowerCase());
                         return (
                           <button
                             key={label}
@@ -615,6 +760,7 @@ export function ProjectIssueTab() {
                   {timelineMessages.length > 0 ? (
                     timelineMessages.map((message) => {
                       const isAssistant = message.role === "assistant";
+                      const parsedContent = parseIssueMessageContent(message.content);
                       return (
                         <div key={message.id} className={`flex ${isAssistant ? "justify-end" : "justify-start"}`}>
                           <div className="max-w-[85%] space-y-1.5">
@@ -636,7 +782,33 @@ export function ProjectIssueTab() {
                                 <span className="truncate">{message.title}</span>
                                 {message.status ? <span className="shrink-0">{message.status}</span> : null}
                               </div>
-                              <div className="whitespace-pre-wrap break-words text-sm leading-6 text-foreground">{message.content || "—"}</div>
+                              <div className="space-y-3">
+                                {parsedContent.text ? (
+                                  <div className="whitespace-pre-wrap break-words text-sm leading-6 text-foreground">{parsedContent.text}</div>
+                                ) : null}
+                                {parsedContent.imageUrls.length > 0 ? (
+                                  <Image.PreviewGroup>
+                                    <div className="flex flex-wrap gap-2">
+                                      {parsedContent.imageUrls.map((url, index) => (
+                                        <div key={`${message.id}-image-${index}`} className="group overflow-hidden rounded-2xl border border-border/60 bg-background/70 shadow-sm transition hover:border-border hover:shadow">
+                                          <Image
+                                            src={url}
+                                            alt={`issue-image-${index + 1}`}
+                                            width={160}
+                                            height={120}
+                                            className="object-cover transition group-hover:scale-[1.02]"
+                                            style={{ objectFit: "cover" }}
+                                            preview={{ mask: false }}
+                                          />
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </Image.PreviewGroup>
+                                ) : null}
+                                {!parsedContent.text && parsedContent.imageUrls.length === 0 ? (
+                                  <div className="whitespace-pre-wrap break-words text-sm leading-6 text-foreground">{message.content || "—"}</div>
+                                ) : null}
+                              </div>
                             </div>
                           </div>
                         </div>
