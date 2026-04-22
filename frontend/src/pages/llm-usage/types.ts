@@ -50,7 +50,7 @@ export type Point = { x: number; y: number };
 
 export const DAY_OPTIONS = [1, 7, 30, 90] as const;
 export const CHART_VIEW_WIDTH = 1000;
-export const CHART_LEFT_PADDING = 30;
+export const CHART_LEFT_PADDING = 40;
 export const CHART_RIGHT_PADDING = 24;
 export const CHART_LEGEND_LEFT_PADDING_PERCENT = `${(CHART_LEFT_PADDING / CHART_VIEW_WIDTH) * 100}%`;
 export const CHART_LEGEND_RIGHT_PADDING_PERCENT = `${(CHART_RIGHT_PADDING / CHART_VIEW_WIDTH) * 100}%`;
