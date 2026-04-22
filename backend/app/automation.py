@@ -95,10 +95,26 @@ def _run_git(repo_path: Path, *args: str) -> str:
     return (res.stdout or "").strip()
 
 
+def _git_commit_exists(repo_path: Path, commit_sha: str) -> bool:
+    sha = str(commit_sha or "").strip()
+    if not sha:
+        return False
+    try:
+        _run_git(repo_path, "rev-parse", "--verify", f"{sha}^{{commit}}")
+        return True
+    except Exception:
+        return False
+
+
 def _git_changed_files(repo_path: Path, base_commit: str, head_commit: str) -> list[str]:
-    if not base_commit or not head_commit:
+    base_sha = str(base_commit or "").strip()
+    head_sha = str(head_commit or "").strip()
+    if not head_sha:
         return []
-    out = _run_git(repo_path, "diff", "--name-only", f"{base_commit}..{head_commit}")
+    if base_sha and _git_commit_exists(repo_path, base_sha) and _git_commit_exists(repo_path, head_sha):
+        out = _run_git(repo_path, "diff", "--name-only", f"{base_sha}..{head_sha}")
+    else:
+        out = _run_git(repo_path, "show", "--pretty=", "--name-only", head_sha)
     return [normalize_index_path(line.strip()) for line in out.splitlines() if line.strip()]
 
 
@@ -109,9 +125,14 @@ def _git_commit_subject(repo_path: Path, commit_sha: str) -> str:
 
 
 def _git_name_status(repo_path: Path, base_commit: str, head_commit: str) -> list[dict[str, str]]:
-    if not base_commit or not head_commit:
+    base_sha = str(base_commit or "").strip()
+    head_sha = str(head_commit or "").strip()
+    if not head_sha:
         return []
-    out = _run_git(repo_path, "diff", "--name-status", f"{base_commit}..{head_commit}")
+    if base_sha and _git_commit_exists(repo_path, base_sha) and _git_commit_exists(repo_path, head_sha):
+        out = _run_git(repo_path, "diff", "--name-status", f"{base_sha}..{head_sha}")
+    else:
+        out = _run_git(repo_path, "show", "--name-status", "--format=", head_sha)
     rows: list[dict[str, str]] = []
     for line in out.splitlines():
         parts = [part.strip() for part in line.split("\t") if part.strip()]
@@ -125,9 +146,14 @@ def _git_name_status(repo_path: Path, base_commit: str, head_commit: str) -> lis
 
 
 def _git_numstat(repo_path: Path, base_commit: str, head_commit: str) -> list[dict[str, Any]]:
-    if not base_commit or not head_commit:
+    base_sha = str(base_commit or "").strip()
+    head_sha = str(head_commit or "").strip()
+    if not head_sha:
         return []
-    out = _run_git(repo_path, "diff", "--numstat", f"{base_commit}..{head_commit}")
+    if base_sha and _git_commit_exists(repo_path, base_sha) and _git_commit_exists(repo_path, head_sha):
+        out = _run_git(repo_path, "diff", "--numstat", f"{base_sha}..{head_sha}")
+    else:
+        out = _run_git(repo_path, "show", "--numstat", "--format=", head_sha)
     rows: list[dict[str, Any]] = []
     for line in out.splitlines():
         parts = line.split("\t")
@@ -148,10 +174,15 @@ def _git_numstat(repo_path: Path, base_commit: str, head_commit: str) -> list[di
 
 
 def _git_file_patch(repo_path: Path, base_commit: str, head_commit: str, path: str) -> str:
-    if not base_commit or not head_commit or not path.strip():
+    base_sha = str(base_commit or "").strip()
+    head_sha = str(head_commit or "").strip()
+    normalized_path = str(path or "").strip()
+    if not head_sha or not normalized_path:
         return ""
     try:
-        return _run_git(repo_path, "diff", "--unified=0", f"{base_commit}..{head_commit}", "--", path)
+        if base_sha and _git_commit_exists(repo_path, base_sha) and _git_commit_exists(repo_path, head_sha):
+            return _run_git(repo_path, "diff", "--unified=0", f"{base_sha}..{head_sha}", "--", normalized_path)
+        return _run_git(repo_path, "show", "--unified=0", head_sha, "--", normalized_path)
     except Exception:
         return ""
 
